@@ -1912,14 +1912,27 @@ impl MeetingView {
                     .max_w(px(640.))
                     .child(chip("Fully local · nothing leaves this machine", p.success, cx))
                     .child(
-                        div()
-                            .font_family(p.display_font())
-                            .text_3xl()
-                            .font_weight(if p.dark { FontWeight::BOLD } else { FontWeight::MEDIUM })
-                            .text_color(p.text)
-                            .text_center()
-                            .line_height(rems(1.2))
-                            .child("Take notes in shorthand.\nGet the whole story."),
+                        v_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .font_family(p.display_font())
+                                    .text_3xl()
+                                    .font_weight(if p.dark { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                                    .text_color(p.text)
+                                    .text_center()
+                                    .child("Take notes in shorthand."),
+                            )
+                            .child(
+                                div()
+                                    .font_family(p.display_font())
+                                    .text_3xl()
+                                    .font_weight(if p.dark { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                                    .text_color(p.text)
+                                    .text_center()
+                                    .child("Get the whole story."),
+                            ),
                     )
                     .child(div().text_sm().text_color(p.text_dim).text_center().line_height(rems(1.65)).max_w(px(520.)).child(
                         "Marginalia listens to your microphone and system audio, transcribes with Whisper, expands your bullets with Gemma 4, and watches for questions it can answer from your documents, with exact citations.",
