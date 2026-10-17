@@ -57,21 +57,19 @@ Optional *compute nodes* on your network make the AI faster while you are near t
 
 ## How it fits together
 
-```mermaid
-flowchart TB
-    subgraph Phone
-        UI["Kotlin + Compose UI (app/)"]
-        Core["Rust core (core/)<br/>SQLite, vector index, write-up pipeline"]
-        AI["LiteRT-LM (Gemma) and whisper.cpp"]
-        UI -- "JSON over JNI" --> Core
-        Core --- AI
-    end
-    subgraph NodeBox ["Compute node (optional, a PC)"]
-        Node["marginalia-node (compute-node/)<br/>Rust, tokio, llama.cpp, whisper.cpp"]
-        Tray["tray icon and details panel"]
-        Tray -- "local admin channel" --> Node
-    end
-    Core -- "QUIC, pinned certificates" --> Node
+```text
+             Phone                     Compute node (optional, a PC)
+┌──────────────────────────────┐      ┌─────────────────────────────┐
+│ Kotlin + Compose UI   (app/) │      │ marginalia-node             │
+│       |  JSON over JNI       │      │ (compute-node/)             │
+│ Rust core   (core/)          │      │   Rust, tokio, QUIC         │
+│   SQLite, vector index,      │◄────►│   llama.cpp (CUDA, Vulkan)  │
+│   write-up pipeline          │      │   whisper.cpp               │
+│       |                      │      │       ^                     │
+│ LiteRT-LM (Gemma)            │      │       | local admin channel │
+│ whisper.cpp                  │      │ tray icon, details panel    │
+└──────────────────────────────┘      └─────────────────────────────┘
+                     QUIC, pinned certificates
 ```
 
 Every AI job is offered to the compute nodes first, ranked by expected wait, and runs on the phone only when no node can take it.
