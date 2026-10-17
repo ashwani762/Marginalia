@@ -1,6 +1,7 @@
 # Marginalia
 
 **Record a meeting, jot as it happens, and get the notes, a summary and answers from your own documents. Everything runs on the phone.**
+
 Optional *compute nodes* on your network make the AI faster while you are near them, and the phone carries on by itself when they are not.
 
 <p align="center">
