@@ -90,7 +90,7 @@ pub const ENHANCE_SYSTEM: &str = "You are Marginalia, an on-device meeting assis
 
 pub const SCAN_SYSTEM: &str = "You extract questions from a live meeting transcript. Return a JSON array of concise, self-contained questions or lookups that someone would answer from documents (specs, policies, contracts, pricing, past meetings). Rephrase fragments into full questions. Ignore small talk, rhetorical questions, questions already answered in the window, questions the speaker asks the audience for a show of hands or a poll (how many of you, who here), and questions about the personal characteristics of the people present. Speech recognition makes mistakes, so when a question sounds odd or out of place for the talk, leave it out. Return [] if there are none. Output only JSON.";
 
-pub const CARD_SYSTEM: &str = "You answer a question raised during a live meeting. Use what was said in the meeting first (the transcript excerpts), and the documents only when they clearly help with this exact question. Reply in at most 60 words, plain and direct. Cite a transcript excerpt by its time like [12:03] and a document by its number like [1]. If neither answers the question, reply exactly 'Not answered yet.' Output only the answer.";
+pub const CARD_SYSTEM: &str = "You answer a question raised during a live meeting. Use what was said in the meeting first (the transcript excerpts), and the documents only when they clearly help with this exact question. Reply in at most 60 words, plain and direct. Start with the answer itself and never with the source: do not begin with 'The transcript', 'The meeting', 'The speaker' or 'According to'. Cite a transcript excerpt by its time like [12:03] and a document by its number like [1]. If neither answers the question, reply exactly 'Not answered yet.' Output only the answer.";
 
 pub const TITLE_SYSTEM: &str = "Write a short descriptive title for this meeting, 3 to 7 words, in sentence case (capitalise only the first word and proper nouns). No quotes, no trailing punctuation, no date, no prefix like 'Title:'. Output only the title.";
 
@@ -130,6 +130,43 @@ pub fn strip_meta(text: &str) -> String {
         }
     }
     out.join("\n")
+}
+
+/// How an answer must not begin: the model likes to open by naming its source ("The transcript mentions that ...")
+/// instead of just answering.
+const LEAD_INS: [&str; 22] = [
+    "the transcript mentions that ", "the transcript states that ", "the transcript says that ", "the transcript indicates that ",
+    "the transcript mentions ", "the transcript states ", "the transcript says ", "the transcript indicates ",
+    "the meeting mentioned that ", "the meeting mentions that ", "the meeting noted that ", "the meeting discussed that ",
+    "the speaker mentioned that ", "the speaker says that ", "the speaker states that ", "the speaker explained that ",
+    "according to the transcript, ", "according to the meeting, ", "based on the transcript, ", "based on the meeting, ",
+    "in the transcript, ", "from the transcript, ",
+];
+
+/// An answer for a card without its opening attribution, capitalised again. Used on what the person sees and what is saved,
+/// also on a half written answer: while the start could still turn into an attribution nothing is shown yet.
+pub fn card_answer(raw: &str) -> String {
+    let t = raw.trim_start();
+    let lower = t.to_lowercase();
+    for lead in LEAD_INS {
+        if lower.starts_with(lead) {
+            let rest = t[lead.len()..].trim_start();
+            return capitalise(rest);
+        }
+    }
+    // Still being written: "The transcr" may become "The transcript mentions that ...", so wait for more words.
+    if !lower.is_empty() && LEAD_INS.iter().any(|lead| lead.starts_with(lower.as_str())) {
+        return String::new();
+    }
+    t.to_string()
+}
+
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
 }
 
 /// Remove the model's habits that add noise: a redundant leading "Summary" heading
@@ -269,3 +306,31 @@ pub fn head_tokens(s: &str, max_tokens: usize) -> String {
 }
 
 pub const JOT_SYSTEM: &str = "You expand a short jot, written quickly during a meeting, into one clear note of at most 35 words. The note is about what the jot says, nothing else. Use the transcript only to fill in missing detail about the jot's own subject: names, numbers, dates, who owns it, what was decided. Never change the subject, never replace the jot with something else the transcript says, and never add anything the transcript does not support. If the transcript has nothing on the jot's subject, only tidy the wording. Write plain text with no preamble, no quotes and no bullet.";
+
+#[cfg(test)]
+mod card_answer_tests {
+    use super::card_answer;
+
+    #[test]
+    fn an_opening_that_names_the_source_is_dropped() {
+        assert_eq!(card_answer("The transcript mentions that runways need one plane at a time [00:17]."), "Runways need one plane at a time [00:17].");
+        assert_eq!(card_answer("The meeting mentioned that each flight needs a runway."), "Each flight needs a runway.");
+        assert_eq!(card_answer("According to the transcript, the limit is 500."), "The limit is 500.");
+        assert_eq!(card_answer("Based on the meeting, we ship Friday."), "We ship Friday.");
+    }
+
+    #[test]
+    fn an_answer_that_starts_with_the_answer_is_left_alone() {
+        assert_eq!(card_answer("More than half of all traffic goes through 30 airports."), "More than half of all traffic goes through 30 airports.");
+        assert_eq!(card_answer("The transcript was cut off at 10 minutes."), "The transcript was cut off at 10 minutes.");
+    }
+
+    #[test]
+    fn a_half_written_opening_waits_instead_of_flashing() {
+        assert_eq!(card_answer("The transcr"), "");
+        assert_eq!(card_answer("According to the"), "");
+        assert_eq!(card_answer(""), "");
+        assert_eq!(card_answer("The tran"), "");
+        assert_eq!(card_answer("The team agreed"), "The team agreed");
+    }
+}

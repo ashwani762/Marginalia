@@ -464,7 +464,7 @@ impl Remote {
                     Ok((conn, fp)) => {
                         if !want.is_empty() && !fp.starts_with(&want) {
                             conn.close(0u32.into(), b"mismatch");
-                            return Err(anyhow!("a different computer answered than the one that was announced"));
+                            return Err(anyhow!("a different device answered than the compute node that was announced"));
                         }
                         let r = client::knock(&conn, &phone).await;
                         conn.close(0u32.into(), b"done");
@@ -1290,9 +1290,9 @@ impl Remote {
 fn short_error(e: &anyhow::Error) -> String {
     let s = format!("{e:#}");
     if s.contains("blocked") {
-        "This computer has blocked this phone".into()
+        "This compute node has blocked this phone".into()
     } else if s.contains("not the paired compute node") {
-        "A different computer answered at that address".into()
+        "A different device answered at that address".into()
     } else if s.contains("not paired") || s.contains("closed") {
         "This phone is no longer paired with it".into()
     } else if s.contains("no answer") || s.contains("timed out") {

@@ -157,6 +157,7 @@ fun LiveScreen(vm: AppVm, onMinimize: () -> Unit, onCite: (Source) -> Unit) {
     var kind by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("note") }
     var editing by remember { mutableStateOf<Jot?>(null) }
     val folders by vm.folders.collectAsState()
+    val prefsNow by vm.prefs.collectAsState()
     val liveFolder by vm.liveFolder.collectAsState()
     val folderUi = rememberFolderUi()
     var pickingFolder by remember { mutableStateOf(false) }
@@ -332,7 +333,7 @@ fun LiveScreen(vm: AppVm, onMinimize: () -> Unit, onCite: (Source) -> Unit) {
                             Box(Modifier.weight(1f)) { ActivityStrip(s.activity, s.recording) }
                             folderPill(Modifier.padding(end = 16.dp))
                         }
-                        CorrectionNote(if (showTranscript) s.correctedBy else null)
+                        CorrectionNote(if (showTranscript) s.correctedBy else null, s, prefsNow.liveCorrectionWindowS)
                         timeline(Modifier.weight(1f))
                     }
                 } else {
@@ -365,8 +366,8 @@ fun LiveScreen(vm: AppVm, onMinimize: () -> Unit, onCite: (Source) -> Unit) {
 
 /** A calm line under the header while a compute node is fixing the captions. It is not there when none is. */
 @Composable
-private fun CorrectionNote(node: String?) {
-    val label = correctionLabel(node)
+private fun CorrectionNote(node: String?, s: LiveState, windowS: Int) {
+    val label = correctionLabel(node, s.correctionPhase, s.workFrom, s.workTo, s.checkedUpto, windowS)
     AnimatedVisibility(visible = label != null, enter = fadeIn(tween(250)) + expandVertically(), exit = fadeOut(tween(200)) + shrinkVertically()) {
         Text(
             label.orEmpty(), style = type.caption.copy(color = pal.textFaint), maxLines = 1,
@@ -418,7 +419,7 @@ private fun Timeline(
             items(items, key = { it.key }) { m ->
                 when (m) {
                     is Moment.Said -> SwipeToKeep(onKeep = { onKeep(m.line) }, modifier = Modifier.animateItem()) {
-                        TranscriptRow(m.line, animateIn = true, dim = if (m.line.id == newestLine) 1f else 0.7f)
+                        TranscriptRow(m.line, animateIn = true, dim = if (m.line.id == newestLine) 1f else 0.7f, fresh = m.line.id in s.freshFixes)
                     }
                     is Moment.Noted -> SwipeToDelete(
                         onDelete = { onDeleteJot(m.jot) },

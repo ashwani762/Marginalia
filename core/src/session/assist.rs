@@ -187,7 +187,7 @@ impl Core {
                             } else {
                                 c.state = CardState::Done;
                                 if let Some(db) = c.db_id {
-                                    let _ = core.kb.store.update_card_answer(db, &c.answer);
+                                    let _ = core.kb.store.update_card_answer(db, &crate::text::card_answer(&c.answer));
                                 }
                                 out = Some(c.json());
                             }

@@ -179,18 +179,48 @@ class AppVm(private val app: Application) {
     private var embedModel: LiteRtEmbedder? = null
     @Volatile private var modelsLoaded = false
 
-    /** Brings Gemma and the search model into memory if they are not there. Cheap when they are. */
+    /**
+     * Brings the search model into memory and puts the stand-in for Gemma in place. Cheap when they are there.
+     * Gemma itself loads when the phone has to write something (see [ensureChat]). With a compute node in reach
+     * that is never, and the loading of Gemma on the GPU is what made the screen stall for seconds.
+     */
     suspend fun ensureModels() {
         if (modelsLoaded) return
         modelLock.withLock {
-            if (!modelsLoaded) loadModels()
+            if (!modelsLoaded) loadLight()
         }
     }
 
-    /**
-     * The GPU first (it reads a long prompt many times faster and leaves the processor to speech),
-     * then the CPU.
-     */
+    /** Loads Gemma now if it is not loaded. Returns false when it could not start. */
+    suspend fun ensureChat(): Boolean {
+        if (chatModel != null) return true
+        modelLock.withLock {
+            if (!modelsLoaded) loadLight()
+            if (chatModel == null) loadChat()
+        }
+        return chatModel != null
+    }
+
+    /** Stands in for Gemma until the first job that has to run on the phone, then hands that job to the real one. */
+    private val lazyChat = object : LlmGenerator {
+        private val stopped = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
+        override fun start(request: Long, json: String) {
+            viewModelScope.launch(Dispatchers.Default) {
+                val ready = ensureChat()
+                val real = chatModel
+                when {
+                    request in stopped -> { stopped.remove(request); Native.emit(request, 1, "{\"prompt_tokens\":0,\"generated_tokens\":0}") }
+                    !ready || real == null -> Native.emit(request, 2, "The AI could not start")
+                    else -> real.start(request, json)
+                }
+            }
+        }
+        override fun cancel(request: Long) {
+            val real = chatModel
+            if (real != null) real.cancel(request) else stopped.add(request)
+        }
+    }
+
     /**
      * Everything that loads a model runs on one thread at the lowest priority. The threads the model libraries
      * start inherit it, so the screen keeps its frames and the microphone keeps its turn while they warm up.
@@ -202,7 +232,32 @@ class AppVm(private val app: Application) {
         }, "model-loader")
     }.asCoroutineDispatcher() }
 
-    private suspend fun loadModels() {
+    /** Loads the search model, which stays on the processor and is quick, and sets up the stand-in for Gemma. */
+    private suspend fun loadLight() {
+        val prefs = ctx.getSharedPreferences("engine", Context.MODE_PRIVATE)
+        kotlinLabel = "Loading the search model"
+        publishBoot()
+        val embedGpu = runCatching { java.util.Properties().apply { File(ctx.filesDir, "tune.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) } }.getProperty("embedGpu") == "true" }.getOrDefault(false)
+        var emb = LiteRtEmbedder(ctx, File(ModelInstaller.dir(ctx), ModelInstaller.EMBED_LITERT).absolutePath, gpu = embedGpu, threads = 4)
+        var eerr = withContext(loaderThread) { emb.prepare() }
+        if (eerr != null && embedGpu) {
+            emb = LiteRtEmbedder(ctx, File(ModelInstaller.dir(ctx), ModelInstaller.EMBED_LITERT).absolutePath, gpu = false)
+            eerr = withContext(loaderThread) { emb.prepare() }
+        }
+        if (eerr != null) { failure = "The search model could not start: $eerr"; publishBoot(); return }
+        Native.setEmbedder(emb)
+        Native.setGenerator(lazyChat)
+        val gpuPlanned = prefs.getString("chat", "auto") != "litert-cpu" && !prefs.getBoolean("gpu_failed", false)
+        runCatching { backend.call("engine.gpu", JSONObject().put("gpu", gpuPlanned)) }
+        embedModel = emb
+        modelsLoaded = true
+        modelInfo.value = "Gemma 4 ${if (gemmaFile() == ModelDownload.E4B_FILE) "E4B" else "E2B"} loads when the phone needs it · EmbeddingGemma 2 on ${emb.label} · Whisper small · ${Native.variant}"
+        kotlinLabel = null
+        publishBoot()
+    }
+
+    /** Loads Gemma, on the GPU first (it reads a long prompt many times faster and leaves the processor to speech), then the CPU. */
+    private suspend fun loadChat() {
         val prefs = ctx.getSharedPreferences("engine", Context.MODE_PRIVATE)
         val wantedGpu = prefs.getString("chat", "auto") != "litert-cpu" && !prefs.getBoolean("gpu_failed", false)
         val notes = mutableListOf<String>()
@@ -217,32 +272,19 @@ class AppVm(private val app: Application) {
             if (gpu) prefs.edit().putBoolean("gpu_failed", true).apply()
         }
         if (chat == null) { failure = "The AI could not start.\n" + notes.joinToString("\n"); publishBoot(); return }
-        Native.setGenerator(chat)
-
-        kotlinLabel = "Loading the search model"
-        publishBoot()
-        // The search model stays on the CPU. On the GPU it reads passages about twice as fast, but next to Gemma's
-        // GPU engine it takes the memory the image reader needs, and every photo then fails to read.
-        val embedOnGpu = chat.label.contains("GPU") &&
-            runCatching { java.util.Properties().apply { File(ctx.filesDir, "tune.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) } }.getProperty("embedGpu") == "true" }.getOrDefault(false)
-        var emb = LiteRtEmbedder(ctx, File(ModelInstaller.dir(ctx), ModelInstaller.EMBED_LITERT).absolutePath, gpu = embedOnGpu, threads = 4)
-        var eerr = withContext(loaderThread) { emb.prepare() }
-        if (eerr != null && chat.label.contains("GPU")) {
-            emb = LiteRtEmbedder(ctx, File(ModelInstaller.dir(ctx), ModelInstaller.EMBED_LITERT).absolutePath, gpu = false)
-            eerr = withContext(loaderThread) { emb.prepare() }
-        }
-        if (eerr != null) { failure = "The search model could not start: $eerr"; publishBoot(); return }
-        Native.setEmbedder(emb)
         runCatching { backend.call("engine.gpu", JSONObject().put("gpu", chat.label.contains("GPU"))) }
-
         chatModel = chat
-        embedModel = emb
-        modelsLoaded = true
         engineNote = if (notes.isNotEmpty()) "The GPU was not usable, so the AI runs on the CPU." else ""
-        modelInfo.value = "Gemma 4 ${if (gemmaFile() == ModelDownload.E4B_FILE) "E4B" else "E2B"} on ${chat.label} · EmbeddingGemma 2 on ${emb.label} · Whisper small · ${Native.variant}" +
+        modelInfo.value = "Gemma 4 ${if (gemmaFile() == ModelDownload.E4B_FILE) "E4B" else "E2B"} on ${chat.label} · EmbeddingGemma 2 on ${embedModel?.label ?: "CPU"} · Whisper small · ${Native.variant}" +
             (if (engineNote.isNotEmpty()) "\n$engineNote" else "")
         kotlinLabel = null
         publishBoot()
+    }
+
+    /** Loads everything now, Gemma included. Used when a setting changes how Gemma loads, to find out at once whether it fits. */
+    private suspend fun loadModels() {
+        loadLight()
+        loadChat()
     }
 
     /** Keep the recording itself next to the transcript (about 11 MB an hour). */
@@ -576,7 +618,29 @@ class AppVm(private val app: Application) {
             }
             "lines_replace" -> {
                 val new = Line.list(e.optJSONArray("lines"))
-                _live.update { s -> s?.copy(lines = s.lines.replacingLines(e.optInt("from"), e.optInt("removed"), new)) }
+                val from = e.optInt("from")
+                val removed = e.optInt("removed")
+                var fresh = emptySet<Long>()
+                _live.update { s ->
+                    s?.let {
+                        // Only lines whose words really changed are highlighted.
+                        val before = it.lines.drop(from).take(removed).joinToString(" ") { l -> l.text }.split(Regex("\\s+")).filter { w -> w.isNotEmpty() }
+                        val after = new.joinToString(" ") { l -> l.text }.split(Regex("\\s+")).filter { w -> w.isNotEmpty() }
+                        fresh = if (before == after) emptySet() else new.map { l -> l.id }.toSet()
+                        it.copy(lines = it.lines.replacingLines(from, removed, new), freshFixes = it.freshFixes + fresh)
+                    }
+                }
+                if (fresh.isNotEmpty()) viewModelScope.launch {
+                    delay(4000)
+                    _live.update { s -> s?.copy(freshFixes = s.freshFixes - fresh) }
+                }
+            }
+            "correction_state" -> _live.update {
+                it?.copy(
+                    correctionPhase = e.optString("phase", "idle"),
+                    workFrom = e.optDouble("from", it.workFrom), workTo = e.optDouble("to", it.workTo),
+                    checkedUpto = if (e.has("upto")) e.optDouble("upto") else it.checkedUpto,
+                )
             }
             "correction" -> _live.update { it?.copy(correctedBy = if (e.isNull("node")) null else e.optString("node")) }
             "enhance" -> _live.update { it?.copy(enhanced = e.optString("text"), enhanceStreaming = e.optBoolean("streaming"), enhanceBusy = e.optBoolean("streaming")) }
@@ -775,6 +839,9 @@ class AppVm(private val app: Application) {
         loadCache("docs")?.let { a -> runCatching { _docs.value = a.objects().map(DocItem::from) } }
     }
 
+    /** True when a compute node is switched on, allowed for this phone and answering. */
+    private fun computeNodeInReach(): Boolean = _nodes.value.let { n -> n.enabled && n.paired.any { it.approved && it.online } }
+
     fun startRecording() {
         if (_live.value != null) {
             liveExpanded.value = true
@@ -784,6 +851,9 @@ class AppVm(private val app: Application) {
             try {
                 val folder = liveFolder.value ?: meetingsFilter.value?.takeIf { it > 0 }
                 val r = backend.obj("meeting.start", JSONObject().put("folder", folder ?: 0))
+                // With no compute node in reach the phone writes the jots and cards itself, so Gemma is loaded now
+                // instead of in the middle of the meeting.
+                if (!computeNodeInReach()) viewModelScope.launch(Dispatchers.Default) { ensureChat() }
                 _live.value = LiveState(meetingId = r.optLong("id"), recording = true)
                 liveFolder.value = folder
                 liveExpanded.value = true

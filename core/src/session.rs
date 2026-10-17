@@ -69,7 +69,7 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(40);
 const SCAN_MIN_LINES: usize = 6;
 const EMIT_EVERY: Duration = Duration::from_millis(120);
 const JOT_SETTLE: Duration = Duration::from_secs(5);
-const ASK_LIVE_SYSTEM: &str = "You answer a question that someone asks while a meeting or talk is still going on. Use what was said first, then the library passages if they help, citing a library passage like [1] only when you used it. Answer in at most 70 words, plain and direct, and name who said it when the transcript does. If neither says, reply: That has not been said yet. Never invent.";
+const ASK_LIVE_SYSTEM: &str = "You answer a question that someone asks while a meeting or talk is still going on. Use what was said first, then the library passages if they help, citing a library passage like [1] only when you used it. Answer in at most 70 words, plain and direct, and name who said it when the transcript does. Start with the answer itself and never with the source: do not begin with 'The transcript', 'The meeting' or 'According to'. If neither says, reply: That has not been said yet. Never invent.";
 const IDEAS_SYSTEM: &str = "You help someone who is listening to a talk or a meeting think of good questions for the speaker. From the transcript, write exactly 3 short questions they could ask. Each question must point at something specific that was said, or at something left unclear or unproven. One question per line, plain words, no numbering, no bullets, no preface.";
 /// Long meetings are condensed in stretches of about this many tokens of transcript.
 const SECTION_WINDOW_TOKENS: usize = 2200;
@@ -130,7 +130,7 @@ impl Card {
             "kind": self.kind,
             "t": self.t,
             "question": self.question,
-            "answer": self.answer,
+            "answer": if self.kind == "ideas" { self.answer.clone() } else { crate::text::card_answer(&self.answer) },
             "state": self.state.as_str(),
             "sources": self.hits,
         })
@@ -508,7 +508,8 @@ impl Core {
         self.kb.attach_whisper(self.engine.whisper());
 
         self.set_engine_state(json!({"type": "engine", "state": "ready"}));
-        self.warm_vision();
+        // Gemma's vision projector is not warmed up here any more. That job loaded Gemma on the phone's GPU at every
+        // start and stalled the screen for seconds. The first photo that the phone itself reads pays for it instead.
         self.reembed_if_needed();
         self.resume_ingests();
         // Unfinished meetings are picked up by the app calling meeting.recover once it knows whether it is in view.

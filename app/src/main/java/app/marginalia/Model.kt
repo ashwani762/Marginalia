@@ -66,10 +66,25 @@ fun List<Line>.replacingLines(from: Int, removed: Int, new: List<Line>): List<Li
 
 private fun List<Line>.renumbered(): List<Line> = mapIndexed { n, l -> if (l.i == n) l else l.copy(i = n) }
 
-/** "Corrected by Desk" for the live screen, with the node's name kept to the house style. */
-fun correctionLabel(node: String?): String? {
-    val name = node?.replace("—", ", ")?.replace(";", ".")?.trim().orEmpty()
-    return if (node == null) null else if (name.isEmpty()) "Corrected by a compute node" else "Corrected by $name"
+/** The compute node's name kept to the house style, or "a compute node" when it has none. */
+private fun nodeName(node: String): String {
+    val name = node.replace("—", ", ").replace(";", ".").trim()
+    return name.ifEmpty { "a compute node" }
+}
+
+/**
+ * The line under the header of the live screen while a compute node fixes the captions. It says what is happening:
+ * waiting for the first stretch, working on one, or how far the text has been checked.
+ */
+fun correctionLabel(node: String?, phase: String = "idle", workFrom: Double = 0.0, workTo: Double = 0.0, checkedUpto: Double = 0.0, windowS: Int = DEFAULT_CORRECTION_WINDOW_S): String? {
+    if (node == null) return null
+    val who = nodeName(node)
+    val start = who.replaceFirstChar { it.uppercase() }
+    return when {
+        phase == "working" -> "$start is checking ${formatClock(workFrom)} to ${formatClock(workTo)}"
+        checkedUpto > 0.5 -> "Checked by $who up to ${formatClock(checkedUpto)}"
+        else -> "$start will check the captions every $windowS s"
+    }
 }
 
 enum class CardState { Retrieving, Answering, Done, NoMatch;
@@ -273,6 +288,14 @@ data class LiveState(
     val activity: List<String> = emptyList(),
     /** The compute node that is fixing the captions while recording, else null. */
     val correctedBy: String? = null,
+    /** What the correction is doing now: "idle" (waiting for the next stretch), or "working" on [workFrom] to [workTo]. */
+    val correctionPhase: String = "idle",
+    val workFrom: Double = 0.0,
+    val workTo: Double = 0.0,
+    /** Meeting seconds up to which the captions have been checked by the compute node. */
+    val checkedUpto: Double = 0.0,
+    /** Lines that were just changed by the correction, shown with a soft highlight for a few seconds. */
+    val freshFixes: Set<Long> = emptySet(),
 )
 
 /** A compute node on the home network that has been paired with this phone. */

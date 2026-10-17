@@ -91,13 +91,15 @@ fun rememberBitmap(path: String, targetPx: Int = 900): ImageBitmap? {
 @Composable
 fun TranscriptRow(
     line: Line, modifier: Modifier = Modifier, animateIn: Boolean = false, dim: Float = 1f, active: Boolean = false, onPlay: (() -> Unit)? = null,
-    speaker: String? = null, speakerColor: androidx.compose.ui.graphics.Color? = null,
+    speaker: String? = null, speakerColor: androidx.compose.ui.graphics.Color? = null, fresh: Boolean = false,
 ) {
+    // A line the compute node has just fixed glows softly for a few seconds, so the change can be seen.
+    val glow by androidx.compose.animation.animateColorAsState(if (fresh) pal.tonal else androidx.compose.ui.graphics.Color.Transparent, androidx.compose.animation.core.tween(500), label = "fixed")
     val appear = remember { Animatable(if (animateIn) 0f else 1f) }
     LaunchedEffect(Unit) { if (animateIn) appear.animateTo(1f, Motion.fade(380)) }
     val tap = if (onPlay != null) Modifier.clickable(onClickLabel = "Play from here", onClick = onPlay) else Modifier
     Row(
-        modifier.fillMaxWidth().then(tap).then(if (active) Modifier.background(pal.tonal) else Modifier)
+        modifier.fillMaxWidth().then(tap).then(if (active) Modifier.background(pal.tonal) else Modifier.background(glow))
             .padding(horizontal = 20.dp, vertical = 7.dp)
             .graphicsLayer { alpha = appear.value * dim; translationY = (1f - appear.value) * 14.dp.toPx() },
     ) {

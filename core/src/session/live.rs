@@ -428,6 +428,7 @@ impl Core {
                 self.emit(json!({"type": "correction", "node": shown}));
             }
             if let Some(job) = work.correct.take() {
+                self.emit(json!({"type": "correction_state", "phase": "working", "from": job.win.start, "to": job.win.end}));
                 self.spawn_correction(job);
             }
             if let Some(s) = work.tick {

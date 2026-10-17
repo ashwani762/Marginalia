@@ -103,33 +103,6 @@ impl Core {
         }
     }
 
-    /// Load Gemma's vision projector now, in the background, so the first photo of a session does
-    /// not pay for it.
-    pub(super) fn warm_vision(self: &Arc<Self>) {
-        if !self.settings.read().vision {
-            return;
-        }
-        let core = self.clone();
-        std::thread::Builder::new()
-            .name("warm-vision".into())
-            .spawn(move || {
-                let Some(llm) = core.engine.llm() else { return };
-                let path = core.paths.data_dir.join("warmup.png");
-                if std::fs::write(&path, include_bytes!("../warm.png")).is_err() {
-                    return;
-                }
-                let t = Instant::now();
-                let _ = llm.complete_with_images(
-                    vec![ChatMessage::user(format!("{}\nOk", image_marker()))],
-                    vec![path],
-                    GenParams { max_tokens: 1, temperature: 0.0, ..Default::default() },
-                    Priority::Low,
-                );
-                tracing::info!("vision projector warmed in {:.1}s", t.elapsed().as_secs_f32());
-            })
-            .expect("spawn warm vision");
-    }
-
     pub(super) fn describe_photo(&self, path: &str) -> String {
         let Some(llm) = self.engine.llm() else { return String::new() };
         let prompt = format!(

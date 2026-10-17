@@ -402,17 +402,25 @@ impl Core {
     }
 
     /// Puts what a node heard in a window in place of the live text, when it is good enough. Quiet about every problem.
+    /// The screen is told how far the text has been checked and how many lines were changed.
     pub(super) fn apply_correction(&self, job: &CorrectionJob, heard: Result<Heard>) {
+        if let Some((upto, changed)) = self.apply_correction_inner(job, heard) {
+            self.emit(json!({"type": "correction_state", "phase": "idle", "upto": upto, "changed": changed}));
+        }
+    }
+
+    /// Returns how far the text is checked (meeting seconds) and how many lines were swapped, or None when the meeting is gone.
+    fn apply_correction_inner(&self, job: &CorrectionJob, heard: Result<Heard>) -> Option<(f64, usize)> {
         let _gate = self.line_gate.lock();
         let mut g = self.live.lock();
-        let Some(l) = g.as_mut().filter(|l| l.meeting_id == job.meeting_id) else { return };
+        let l = g.as_mut().filter(|l| l.meeting_id == job.meeting_id)?;
         l.corr.in_flight = false;
         let heard = match heard {
             Ok(h) => h,
             Err(e) => {
                 tracing::debug!("live correction: {e:#}");
                 l.corr.retry_at = Some(Instant::now() + RETRY_AFTER);
-                return;
+                return Some((l.corr.upto, 0));
             }
         };
         let mid = l.meeting_id;
@@ -421,31 +429,39 @@ impl Core {
         let new = tidy_segments(accepted, crate::engine::whisper::clean_transcript);
         let live_now: Vec<(f64, f64, String)> = self.kb.store.segments(mid).unwrap_or_default().into_iter().map(|s| (s.t0, s.t1, s.text)).collect();
         match decide(&job.win, upto, new, &live_now, heard.complete) {
-            Decision::Nothing => l.corr.retry_at = Some(Instant::now() + RETRY_AFTER),
-            Decision::Skip { upto: to } => l.corr.upto = l.corr.upto.max(to),
+            Decision::Nothing => {
+                l.corr.retry_at = Some(Instant::now() + RETRY_AFTER);
+                Some((l.corr.upto, 0))
+            }
+            Decision::Skip { upto: to } => {
+                l.corr.upto = l.corr.upto.max(to);
+                Some((l.corr.upto, 0))
+            }
             Decision::Swap { r0, r1, new } => {
                 let (a, _) = touched_lines(&l.lines, r0, r1);
                 if a < l.sec_upto {
                     // Part of this is already condensed into notes, which are written from the old words. Leave it be and move on.
                     let past = l.sections.last().map(|s| s.t1 + 1.0).unwrap_or(r1);
                     l.corr.upto = l.corr.upto.max(past);
-                    return;
+                    return Some((l.corr.upto, 0));
                 }
                 let (removed, added, payload) = match swap_lines(&self.kb.store, mid, &mut l.lines, r0, r1, &new) {
                     Ok(x) => x,
                     Err(e) => {
                         tracing::warn!("live correction could not be saved: {e:#}");
                         l.corr.retry_at = Some(Instant::now() + RETRY_AFTER);
-                        return;
+                        return Some((l.corr.upto, 0));
                     }
                 };
                 l.enhance_lines_seen = shift_index(l.enhance_lines_seen, a, removed, added);
                 l.scanned_upto = shift_index(l.scanned_upto, a, removed, added);
                 l.corr.upto = l.corr.upto.max(r1);
                 l.corr.retry_at = None;
+                let upto_now = l.corr.upto;
                 tracing::info!("live correction on {}: {:.0}-{:.0}s, {removed} lines became {added}", heard.node, r0, r1);
                 drop(g);
                 self.emit(json!({"type": "lines_replace", "from": a, "removed": removed, "lines": payload}));
+                Some((upto_now, added))
             }
         }
     }
