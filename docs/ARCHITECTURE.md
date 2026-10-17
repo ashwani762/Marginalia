@@ -80,7 +80,3 @@ sequenceDiagram
 - **Write-up after the meeting.** Models stay loaded until the write-up finishes and are then unloaded. A foreground service (`WorkService`) keeps the process alive and a persisted job restarts it if Android ends it. Unfinished meetings are picked up again, and parts already written are reused.
 - **Jots.** A short note typed during a meeting is turned into a proper line using the transcript around it, and can be reworded once when later talk adds a detail.
 - **Search.** Hybrid retrieval: dense vectors with a Matryoshka prefilter, FTS5 BM25, reciprocal rank fusion, MMR, neighbour expansion. Every answer carries citations.
-
-## Measurements
-
-See [AUDIT.md](AUDIT.md) for what was measured on a real phone (speed, memory, battery temperature, bugs found and fixed).

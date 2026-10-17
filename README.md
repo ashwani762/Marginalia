@@ -181,8 +181,6 @@ cargo test -p marginalia-node-tray      # tray icon logic
 ./gradlew :app:testDebugUnitTest        # Kotlin unit tests
 ```
 
-Measurements on a real phone and the bugs found are in [docs/AUDIT.md](docs/AUDIT.md).
-
 ## Conventions
 
 - **Commit messages** look like `[area] short subject`, then a short body saying why. Areas in use: `repo`, `app`, `core`, `compute-node`.
@@ -198,7 +196,6 @@ Measurements on a real phone and the bugs found are in [docs/AUDIT.md](docs/AUDI
 | --- | --- |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Pieces, job routing, failover, diagrams |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Building the app and the node, debug intents, conventions |
-| [docs/AUDIT.md](docs/AUDIT.md) | Measurements and bugs found on a real phone |
 | [docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md) | Start here when working on Windows |
 | [compute-node/README.md](compute-node/README.md) | Using and running a node |
 | [compute-node/DESIGN.md](compute-node/DESIGN.md) | Protocol and the planned cluster of nodes |
