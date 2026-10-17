@@ -56,10 +56,22 @@ sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
 - whisper.cpp's `no_speech_prob` reads 0.00 for this model even over silence, so the old "thank you over silence" check never fired.
   The node now looks at the sound under each segment instead (loudness of 50 ms frames) and at the model's own word confidence.
 
+## Verified on Windows 11 (RTX 4060, CUDA)
+
+- `setup.ps1 -Auto` builds the node and the tray, downloads the models, installs to `%LOCALAPPDATA%\MarginaliaNode`, adds the two
+  login tasks and the firewall rules, starts both programs and runs `verify.ps1`, which passes 19 of 19 checks (the mDNS line is
+  a warning, because Windows cannot see its own announcement).
+- Fixed on the way: CMake older than 4.2 cannot make a Visual Studio 2026 project, and Rust older than 1.95 cannot build the
+  tray. `setup.ps1` now upgrades both.
+- The node serves chat (E2B, about 65 tokens a second), search and speech, and the self tests for let in, search, chat and speech pass.
+- Chat model choice: E2B is the default. `marginalia-node chat-model e4b` and the tray menu entry switch to E4B. Stopping the
+  node frees the graphics memory (5141 MiB used, 2026 MiB after stop, 7166 MiB with E4B loaded), then the new model loads.
+- `cargo test` for proto (23), node (22) and tray (29) passes on Windows.
+
 ## Not verified yet
 
-- Everything on Windows: the node build, the tray (`compute-node/tray/src/windows.rs` was written without being
-  compiled), the Task Scheduler start at login, the firewall prompt, mDNS announcements from Windows.
+- On Windows, still to try by hand: the tray clicks (left click panel, right click menu, pause, resume, stop, start), a reboot
+  bringing the node and the tray back, mDNS announcements seen from a real phone, and a real phone getting an answer.
 - Nodes finding and sharing work with each other (cluster) is designed in `DESIGN.md`, not built.
 - Live (streaming) speech to text on nodes is not built as one open stream. The node side of "live correction" exists (short windows with a prompt, own lane, see below) but no phone sends them yet.
 - The window lane was not tried with Gemma generating at the same time (the 8 GB card is shared with the running service, so a second Gemma did not fit). Windows were measured next to a long recording only.
@@ -71,8 +83,8 @@ sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
 
 ## Building on Windows
 
-The quick way is `.\compute-node\windows\setup.ps1` (see `compute-node/windows/README.md`). It is UNTESTED: the scripts and
-the new `models` command were written on Linux, nothing here ran on Windows. What the scripts do:
+The quick way is `.\compute-node\windows\setup.ps1` (see `compute-node/windows/README.md`). It was run on Windows 11
+(see "Verified on Windows" below). What the scripts do:
 
 - `setup.ps1`: checks Git, Rust (MSVC), Visual Studio Build Tools (C++), CMake, LLVM (libclang, sets `LIBCLANG_PATH`) and the
   CUDA toolkit when an NVIDIA card is found, and prints the exact `winget install` line for each missing one (`-Auto` runs them).

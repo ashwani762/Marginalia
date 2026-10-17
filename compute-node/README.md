@@ -28,7 +28,7 @@ One caveat to be straight about: the process necessarily sees the text while it 
 
 ## Requirements
 
-- A machine on the same network as the phones. Linux x86_64 and ARM64 are the tested targets. Windows is expected to work, macOS is untested.
+- A machine on the same network as the phones. Linux x86_64 and ARM64 are the tested targets. Windows 11 works (see the Windows section), macOS is untested.
 - Rust 1.85 or newer, CMake and a C++ compiler (the llama.cpp engine is built from source).
 - For the GPU build: an NVIDIA card and the CUDA toolkit. Without them use the CPU-only build.
 - The model files (see below). Enough disk and memory for the models (about 3.7 GB on disk; chat and search need a few GB of memory, the speech model about 0.8 GB more while it is loaded and 1 GB extra for a 75 minute recording).
@@ -132,7 +132,7 @@ marginalia-node-tray --print                    # prints the menu as text and ex
 - **How it is built.** The tray and the panel are the same program. The tray starts `marginalia-node-tray --panel` as a second process when the panel is wanted and stops it when it is not, so the tray stays small. The panel polls the node every 1.5 seconds while it is open. On Windows the panel appears bottom right above the taskbar, on X11 top right, and on Wayland the compositor chooses the place because windows cannot position themselves there.
 - **Ubuntu.** The top bar shows the icon through the AppIndicator extension, which ships and is on by default. On a plain GNOME without it: `sudo apt install gnome-shell-extension-appindicator` and log in again. The icon uses the StatusNotifierItem protocol over D-Bus (the `ksni` crate) and the panel uses `egui` with OpenGL, so no GTK or other development packages are needed. The OpenGL, X11 and Wayland libraries are loaded at run time and are on any desktop.
 - Short messages (for example "Could not pause the node") use `notify-send`, so the `libnotify-bin` package must be installed (Ubuntu has it).
-- On Windows it uses the `tray-icon` crate. That part could not be built or tried where it was written. See `packaging/windows.md` for starting it at login.
+- On Windows it uses the `tray-icon` crate. It builds and runs, and `windows\setup.ps1` starts it at login. The right-click menu also lets you switch the chat model between E2B and E4B, which restarts the node.
 - It is built on its own and is not part of the default workspace build.
 
 ## Firewall and network
@@ -146,7 +146,9 @@ marginalia-node-tray --print                    # prints the menu as text and ex
 
 ## Windows
 
-`windows/` has PowerShell scripts for a one command setup (`.\compute-node\windows\setup.ps1`): prerequisites check with the exact winget commands, GPU backend detection (CUDA, Vulkan or CPU), build, install to `%LOCALAPPDATA%\MarginaliaNode`, model download (`marginalia-node.exe models download`), Task Scheduler entries for the node and the tray at logon, and Windows Firewall rules. See `windows/README.md` for the quick start and a troubleshooting table, and `packaging/windows.md` for the manual steps. These scripts are not tested on a real Windows machine yet.
+`windows/` has PowerShell scripts for a one command setup (`.\compute-node\windows\setup.ps1`): prerequisites check with the exact winget commands, GPU backend detection (CUDA, Vulkan or CPU), build, install to `%LOCALAPPDATA%\MarginaliaNode`, model download (`marginalia-node.exe models download`), Task Scheduler entries for the node and the tray at logon, and Windows Firewall rules. See `windows/README.md` for the quick start and a troubleshooting table, and `packaging/windows.md` for the manual steps. The scripts and the node were run on Windows 11 with an NVIDIA RTX 4060 (CUDA). `verify.ps1` passes all 19 checks there, including the self tests for search, chat and speech. Still to try by hand are the tray clicks, a reboot and a real phone on the same Wi-Fi.
+
+Needs: Visual Studio Build Tools (C++), CMake 4.2 or newer when Visual Studio 2026 is installed, Rust 1.95 or newer, LLVM, and the CUDA toolkit for the graphics card. `setup.ps1` checks each one and upgrades CMake and Rust when they are too old. The chat model is E2B unless you switch it with `marginalia-node chat-model e4b` or from the tray menu. `setup.ps1` downloads both.
 
 ## Raspberry Pi
 
