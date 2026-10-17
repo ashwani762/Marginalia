@@ -27,6 +27,8 @@ pub fn normalize(code: &str) -> String {
 pub enum Side {
     Phone,
     Node,
+    /// A compute node that has just paired as a phone proves it knows the code again to be taken as a peer.
+    Peer,
 }
 
 /// The code is short, so it is stretched with scrypt (16 MiB, tens of milliseconds): someone who
@@ -44,6 +46,7 @@ pub fn proof(code: &str, side: Side, exporter: &[u8; 32], phone_fp: &str, node_f
     h.update(match side {
         Side::Phone => b"phone",
         Side::Node => b"node-",
+        Side::Peer => b"peer-",
     });
     h.update(exporter);
     h.update(phone_fp.as_bytes());

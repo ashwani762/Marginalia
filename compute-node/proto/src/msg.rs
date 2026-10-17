@@ -42,6 +42,15 @@ pub enum Request {
     KnockStatus,
     /// A paired phone answers another phone's knock. `who` starts with the waiting phone's id.
     Decide { who: String, allow: bool },
+    /// Sent by a compute node right after it paired with this one (as a phone would): it says it is a compute
+    /// node, not a phone, and where it listens. `proof` is made with [`crate::pair::Side::Peer`], so only
+    /// whoever knows the code can turn a pairing into a peer. Answered with [`PeerReply`].
+    Join { name: String, port: u16, proof: [u8; 32] },
+    /// A peer sends the phone records it holds and asks for this node's. `port` is where the sender listens, so
+    /// a peer that moved is found again. Only answered for peers. Answered with [`RecordsReply`].
+    Records { port: u16, records: Vec<PhoneRecord> },
+    /// A peer says it leaves the cluster and asks to be forgotten. Only answered for peers. Answered with [`PeerReply`].
+    Leave,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -177,4 +186,79 @@ pub struct StatusReply {
     /// The node keeps its models loaded but turns new chat and search jobs away. Last on purpose:
     /// a reader of the older layout ignores the extra byte.
     pub paused: bool,
+}
+
+/// What a record says about a phone. Allow and Revoke are one register (the later one wins), Block and Unblock
+/// another. A phone is let in when it is allowed and not blocked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum RecordKind {
+    Allow,
+    Revoke,
+    Block,
+    Unblock,
+}
+
+/// One fact about one phone that compute nodes copy to each other. Never anything about a job.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhoneRecord {
+    /// The phone's certificate fingerprint.
+    pub fp: String,
+    pub name: String,
+    pub kind: RecordKind,
+    /// Milliseconds since 1970 when it was written. The later record wins.
+    pub at_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PeerReply {
+    Ok,
+    Refused(String),
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RecordsReply {
+    pub records: Vec<PhoneRecord>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first(r: &Request) -> u8 {
+        postcard::to_stdvec(r).unwrap()[0]
+    }
+
+    /// Phones in the field send and read these numbers. New messages go at the end and never shift an old one.
+    #[test]
+    fn the_messages_phones_know_keep_their_numbers() {
+        let chat = ChatRequest { messages: vec![], max_tokens: 1, temperature: 0.0, top_p: 0.0, top_k: 0, priority: Priority::Bulk };
+        let embed = EmbedRequest { texts: vec![], priority: Priority::Bulk };
+        let transcribe = TranscribeRequest { language: None, total_ms: 0, priority: Priority::Bulk, prompt: None };
+        let old = [
+            Request::Status,
+            Request::Pair { name: String::new(), proof: [0; 32] },
+            Request::Chat(chat),
+            Request::Embed(embed),
+            Request::Transcribe(transcribe),
+            Request::Knock { name: String::new() },
+            Request::KnockStatus,
+            Request::Decide { who: String::new(), allow: true },
+        ];
+        for (i, r) in old.iter().enumerate() {
+            assert_eq!(first(r) as usize, i);
+        }
+        assert_eq!(first(&Request::Join { name: String::new(), port: 1, proof: [0; 32] }), 8);
+        assert_eq!(first(&Request::Records { port: 1, records: vec![] }), 9);
+        assert_eq!(first(&Request::Leave), 10);
+    }
+
+    #[test]
+    fn records_survive_the_wire() {
+        let rec = PhoneRecord { fp: "ab".repeat(32), name: "phone".into(), kind: RecordKind::Unblock, at_ms: 1_700_000_000_123 };
+        let bytes = postcard::to_stdvec(&Request::Records { port: 47615, records: vec![rec.clone()] }).unwrap();
+        match postcard::from_bytes::<Request>(&bytes).unwrap() {
+            Request::Records { port, records } => assert_eq!((port, records), (47615, vec![rec])),
+            other => panic!("{other:?}"),
+        }
+    }
 }

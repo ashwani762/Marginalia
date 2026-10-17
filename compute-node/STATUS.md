@@ -105,7 +105,7 @@ sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
 
 - Windows is beta and will be finished later. Still to try by hand: the tray clicks on Windows, a reboot bringing the node and the tray
   back, mDNS announcements seen from a real phone, and a real phone getting an answer.
-- Nodes finding and sharing work with each other (cluster) is designed in `DESIGN.md`, not built.
+- Nodes working together: the first slice is built and checked on one machine (see "Cluster slice"). Not checked on two real machines or with a real phone against a cluster.
 - Live speech to text as one open stream is not built on purpose. Live correction in windows exists on both sides (phone and node) and works, see "Measured on Linux later". An open stream was decided against: every window is its own request, so failover to another node or to the phone's own captions is free, and a stream would need state per stream on a node that keeps nothing.
 - Wayland (the tray icon was only tried under X11) and a Raspberry Pi.
 - The phone alone still stalls the screen once for about 5 s when it has to load Gemma on the GPU (see docs/DEVELOPMENT.md).
@@ -146,6 +146,37 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
 ## Next steps (in order)
 
 1. Later: take Windows out of beta (tray clicks, a reboot, a real phone). The core features work today on Linux.
-2. Cluster: peers pair and gossip, entry node forwards jobs, block records spread, hot-hot and standby (`DESIGN.md`).
+2. Cluster, the rest: peers found by mDNS, member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
 3. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.
 4. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).
+
+## Cluster slice
+
+Peers, shared phone records and placing chat and search jobs (design in `DESIGN.md`, use in `README.md`, "Working together").
+Standby mode, roles, mDNS between nodes, member lists, work stealing and batch requests are not built.
+
+Verified on Linux on one machine, with the debug build, three nodes with their own ports (47701 to 47703), state folders and
+`--cpu --lock`, by `compute-node/node/tests/cluster.sh` (about 2 minutes, all checks passed on the last run):
+
+- `join` between a and b and between c and b (a is a chain, a to b to c). `peers` and `status` list the peers, `peers.json` has mode 0600,
+  a wrong code is refused, joining a peer again is refused, a peer is not counted as a phone.
+- A phone paired on a with `probe --code` is let in by b and c with `probe --knock` while they are locked and no code was typed there.
+  A phone nobody knows is made to wait by b. c gets the record through b.
+- `block` on a reaches b and c in under 15 seconds (the immediate push, the 3 second exchange is the fallback) and the phone is turned away
+  by both. `unblock` on c reaches a and b, and does not bring the pairing back.
+- Chat sent to a, which has only the search model, is answered by b (a counts 1 forwarded job). Search sent to a stays on a.
+- A job that comes to a paused b from a peer is not passed on to c (checked in the logs: b "turned a chat job away (paused)"). A chat job sent
+  to the paused b is answered by c.
+- 4 chat jobs sent to b 0.3 seconds apart: at least one is forwarded to and answered by c, all 4 come back.
+- c killed with `kill -9` while b has not yet noticed: the jobs b sends to it get no answer, b waits 10 seconds (the phone gets a heartbeat
+  every 2 seconds meanwhile), then runs them itself and all 4 come back.
+- `unjoin` on b of a dead c works, `unjoin` on a also removes a from b.
+- Unit tests: the merge of phone records (order, ties, block wins, unblock later wins, repeated and reordered merges, 11 tests), the placing
+  decision (10), the peer file round trip and its mode (5), the store over restarts, from an older node's `clients.json` and between two
+  stores (3), and that the messages old phones know keep their numbers (2). `cargo test -p marginalia-proto -p marginalia-node-tray` and
+  `cargo test -p marginalia-node` pass.
+
+Not verified: two real machines (loopback only, so the address a peer sees for the joiner was always 127.0.0.1), a real phone talking to a
+cluster, a peer that moved to a new address, a restart of a node with peers (the file round trip is tested, the reconnect is not), clocks
+that differ by seconds, the CUDA build (the changed code does not depend on the feature), Windows, nodes with a speech model (transcription is
+not forwarded and was not run here).

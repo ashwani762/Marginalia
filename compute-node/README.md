@@ -6,10 +6,11 @@ It is optional. The phone app works without it. If a node is reachable, the phon
 
 ## What it keeps, and what it does not
 
-The node is stateless with respect to your work. It keeps exactly two things on disk:
+The node is stateless with respect to your work. It keeps exactly three things on disk:
 
-- its own identity (a self-signed certificate and key, made on first run), and
-- the list of paired phones (a fingerprint and a name for each).
+- its own identity (a self-signed certificate and key, made on first run),
+- the phones it knows: paired phones, blocked phones and the records of phones that were removed or unblocked (a fingerprint, a name and a time for each, in `records.json`, with `clients.json` and `blocked.json` written beside it as plain lists), and
+- the other compute nodes it has joined (`peers.json`: a fingerprint, a name and an address for each).
 
 Nothing about a job is stored: not the text sent in, not the answer, not the search vectors, not a log of what was asked. A request and its answer exist in memory while the job runs and are gone when the connection stream ends. The node never reports anywhere, has no account, and talks to nothing outside your network. Its normal log lines say things like "paired with X" and "ready", not what anyone asked.
 
@@ -66,29 +67,42 @@ marginalia-node chat-model [e2b|e4b]   # show or choose the chat model, restart 
 marginalia-node run --chat e2b|e4b      # choose it for one run
 marginalia-node run [--port 47615] [--name NAME] [--models DIR] [--cpu] [--speech-model FILE] [--no-speech] [--window-max-seconds 120]
 marginalia-node pair
+marginalia-node join <addr:port> <code>
+marginalia-node peers
+marginalia-node unjoin <id or name>
 marginalia-node status
 marginalia-node pause | resume
 marginalia-node stop
 marginalia-node revoke <id or name>
-marginalia-node probe <addr:port> [--code CODE] [--transcribe FILE.wav] [--language en] [--window] [--prompt TEXT]
+marginalia-node probe <addr:port> [--code CODE] [--knock] [--only status|embed|chat] [--transcribe FILE.wav] [--language en] [--window] [--prompt TEXT]
 ```
 
 - `models list` shows each expected model file, whether it is present, its size and the folder. `models download` fetches what is missing from Hugging Face: it continues a stopped download (`.part` file, HTTP Range), shows MB, percent, speed and time left on one updating line, checks the size and only then renames the file, skips files that are complete, and retries with growing pauses when the network drops. If a repository asks for a login (HTTP 401 or 403) set the `HF_TOKEN` environment variable, it is sent only to Hugging Face and never printed. `--chat-model e4b` fetches the larger chat model, which the node uses instead of E2B whenever it is in the models folder (or when started with `run --chat-model FILE`). The Windows scripts fetch E4B. `models download` fetches all three files by default, `--skip-speech` leaves out the speech model and `--only speech` fetches just that one. `run` tells you about this command when the models are missing.
 - `run` starts the node in the foreground and stops on Ctrl-C. `--cpu` keeps the models off the graphics card at run time (the build still has to match). `--name` is what phones show; it defaults to the machine's name.
 - `pair` asks the running node for a one-time code and prints it with the addresses the node can be reached at. On the phone: Settings, Compute nodes, Add a compute node.
-- `status` prints what the running node serves, its measured speed and the paired phones with their ids.
+- `status` prints what the running node serves, its measured speed, the paired phones with their ids and the peers (see "Working together").
+- `join` makes this node a peer of another compute node, `peers` lists the peers and whether they answer, `unjoin` forgets one. See "Working together".
 - `stats` prints how much work the node has done: jobs, failures, tokens, passages and seconds of audio transcribed, speed, per phone totals and the size and duration of recent jobs. Numbers only, never any content. The counters live in memory and restart from zero with the node.
 - `approve` / `deny` answer a phone that is waiting (when locked). `lock` / `unlock` switch between the two modes.
 - `pause` makes the node turn new jobs (chat, search and transcription) away (the phone gets "paused" and uses its own speed instead). The models stay loaded, jobs that are already running finish, and `status` shows `"paused": true`. `resume` takes jobs again. A pause lives in memory only, so a restarted node is never paused.
 - `stop` stops the running node cleanly: it stops accepting phones and new jobs, lets running jobs finish for up to 10 seconds, leaves the network (mDNS) and exits with status 0. Ctrl-C and a system stop request (SIGTERM) do the same. With the systemd unit a clean exit is not restarted, use `systemctl --user start marginalia-node` to bring it back.
 - `revoke` forgets a phone. Use the id from `status` or the phone's name. That phone is a stranger again and has to pair anew.
-- `probe` behaves like a phone: connects to an address, optionally pairs with `--code`, and tries each job type. It is for checking that a node works, for example from another machine. `probe ADDR --transcribe FILE.wav` instead sends a recording (16 kHz, mono, 16 bit `.wav`, or a raw `.pcm`) like the phone does, and prints the progress, each segment with its times, and the speed in times faster than real time. `--language` sets the language, otherwise it is detected. `--window` sends it as a short live window (interactive priority) and prints the time from the last audio frame to `Done`, `--prompt TEXT` sends what was said just before.
+- `probe` behaves like a phone: connects to an address, optionally pairs with `--code` (or asks to be let in with `--knock`), and tries each job type (`--only status`, `embed` or `chat` sends just one). It is for checking that a node works, for example from another machine. `probe ADDR --transcribe FILE.wav` instead sends a recording (16 kHz, mono, 16 bit `.wav`, or a raw `.pcm`) like the phone does, and prints the progress, each segment with its times, and the speed in times faster than real time. `--language` sets the language, otherwise it is detected. `--window` sends it as a short live window (interactive priority) and prints the time from the last audio frame to `Done`, `--prompt TEXT` sends what was said just before.
 
 `pair`, `status`, `pause`, `stop`, `revoke` and the tray icon talk to the running node through a control channel on `127.0.0.1:47616` (change with `--admin-port`). It only listens on this machine, so these commands must be run on the same machine as `run`.
 
-`status` prints one JSON object with the node name, whether it is paused or locked, `running_jobs`, `waiting_jobs`, `served` (chat and search jobs since start), `uptime_s`, the number of `phones`, the models and measured speed, the paired phones and the addresses the node can be reached at. `stats` adds failures and per phone totals. Both hold counts, names and timings only.
+`status` prints one JSON object with the node name, whether it is paused or locked, `running_jobs`, `waiting_jobs`, `served` (chat and search jobs since start), `uptime_s`, the number of `phones`, the models and measured speed, the paired phones, the blocked phones, the `peers` (name, id, address, whether they answer, their load and what they serve), `forwarded` (jobs a peer answered for this node since it started) and the addresses the node can be reached at. `stats` adds failures and per phone totals. Both hold counts, names and timings only.
 
 State (identity and paired list) lives in `~/.config/marginalia-node` on Linux. Change with `--state-dir`. Delete that folder to make the node a new device that no phone knows.
+
+## Working together
+
+Several compute nodes on one network can work as a group. The phone still talks to one node at a time and does not need to know about the others. This is built for phone records and for chat and search jobs. Standby mode, roles and splitting one model over several machines are only designed (see `DESIGN.md`).
+
+- **Joining.** On the node that is already there run `marginalia-node pair`. It prints a code and its address. On the other node run `marginalia-node join ADDRESS CODE`, for example `marginalia-node join 192.168.1.20:47615 K7QM-4TDX`. The joining node pairs the way a phone does, then tells the other that it is a compute node and where it listens. Both save the other's certificate fingerprint, name and address in `peers.json` (readable by your user only) and trust that certificate in both directions. `marginalia-node peers` lists them, `status` includes them, `marginalia-node unjoin NAME_OR_ID` forgets one on this node and tells it to forget this node too. Joining is by address. Nodes do not find each other with mDNS yet.
+- **Phones.** Allowed phones, blocked phones and the notes that a phone was removed or unblocked are copied between peers, every 3 seconds and at once when one changes here (pair, approve, block, unblock, revoke). The newest note about a phone wins. A block beats an allow for the same phone until a later unblock. So a phone paired with one node is accepted by its peers, and a phone blocked on one node is blocked on all of them. An unblock does not bring a pairing back, the phone asks again. Nodes should have roughly the same time. Peers never share job content.
+- **Jobs.** Each node asks its peers for their load and speed every 2 seconds. When a chat or search job arrives from a phone and this node is clearly the worse choice (its expected wait is more than 1.5 times a peer's plus half a second, or it is paused, or it has no model for that job) the job is run on the best peer and the answer is passed back through the same stream. If the peer cannot be reached, turns the job away or says nothing for 10 seconds before the first token, the next peer is tried and then this node. A job that arrives from a peer is never passed on again. Transcription is never passed on. A node's load counts all its jobs, including transcription.
+- **Check it.** `compute-node/node/tests/cluster.sh` starts three nodes on one machine (own ports and state folders, chat on the processor) and checks all of the above. See `STATUS.md`.
 
 ## Transcribing recordings
 
@@ -164,8 +178,8 @@ A Pi 4 or 5 (64-bit OS) can run the node, CPU only (`scripts/node/build.sh --cpu
 
 These are plans, not features:
 
-- Nodes that find, join and share work with each other (hot-hot, primary and standby, load balancing). The plan is in `DESIGN.md`.
-- Live speech (streaming transcription) on the node as one open stream. Short windows of a recording in progress are served (see above), the phone cuts them.
+- Finding peers with mDNS, peers sharing their member lists, standby mode, node roles, taking work from a busy peer and splitting one model over several nodes. The plan is in `DESIGN.md`. Joining, shared phone records and forwarding chat and search jobs are built (see "Working together").
+- Live speech as one open audio stream. Not planned: short windows of a recording in progress are served (see above) and the phone cuts them, so a lost node costs one window and nothing else.
 - Fan-out of one write-up across several nodes.
 - Per-client priority and fairness (today the order is by job priority, not by who asked).
 - A true Windows service wrapper (for now `scripts/windows/setup.ps1` makes login tasks).
@@ -174,7 +188,7 @@ These are plans, not features:
 ## Files
 
 - `proto/` shared wire protocol, identity and pairing (crate `marginalia-proto`), with tests in `proto/tests/`.
-- `node/` the node program.
+- `node/` the node program, with `tests/cluster.sh` that starts three nodes on one machine.
 - `tray/` the tray icon program (crate `marginalia-node-tray`).
 - `vendor/` a patched `llama-cpp-sys-2` that includes support for EmbeddingGemma 2.
 - The scripts live in the top level `scripts/` folder: `scripts/node/` for Linux and `scripts/windows/` for Windows.

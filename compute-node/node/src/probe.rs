@@ -5,8 +5,16 @@ use marginalia_proto::{client, tls::Identity, wire, AudioFrame, ChatEvent, ChatM
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+/// Which job `probe` sends when it is not asked to try everything.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Only {
+    Status,
+    Embed,
+    Chat,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>, knock: bool, decide: Option<String>, deny: bool, transcribe: Option<PathBuf>, language: Option<String>, window: bool, prompt: Option<String>, hang_up_after: Option<f32>) -> Result<()> {
+pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>, knock: bool, decide: Option<String>, deny: bool, transcribe: Option<PathBuf>, language: Option<String>, window: bool, prompt: Option<String>, hang_up_after: Option<f32>, only: Option<Only>) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let id_path = dir.join("probe-identity.json");
     let id: Identity = match std::fs::read(&id_path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
@@ -63,19 +71,27 @@ pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>,
         return transcribe_file(&conn, &file, language, window, prompt, hang_up_after).await;
     }
 
-    let t = Instant::now();
-    let texts: Vec<String> = (0..48).map(|i| format!("title: none | text: Probe passage {i}, about a launch date and a migration.")).collect();
-    let (mut send, mut recv) = client::open(&conn, &Request::Embed(EmbedRequest { texts, priority: Priority::Bulk })).await?;
-    let _ = send.finish();
-    loop {
-        match wire::read_frame::<EmbedReply>(&mut recv).await?.context("closed")? {
-            EmbedReply::Queued { ahead } => println!("embed queued behind {ahead}"),
-            EmbedReply::Vectors(v) => {
-                println!("embedded {} texts, dim {}, norm {:.3}, in {:.2}s", v.len(), v[0].len(), v[0].iter().map(|x| x * x).sum::<f32>().sqrt(), t.elapsed().as_secs_f32());
-                break;
+    if only == Some(Only::Status) {
+        return Ok(());
+    }
+    if only != Some(Only::Chat) {
+        let t = Instant::now();
+        let texts: Vec<String> = (0..48).map(|i| format!("title: none | text: Probe passage {i}, about a launch date and a migration.")).collect();
+        let (mut send, mut recv) = client::open(&conn, &Request::Embed(EmbedRequest { texts, priority: Priority::Bulk })).await?;
+        let _ = send.finish();
+        loop {
+            match wire::read_frame::<EmbedReply>(&mut recv).await?.context("closed")? {
+                EmbedReply::Queued { ahead } => println!("embed queued behind {ahead}"),
+                EmbedReply::Vectors(v) => {
+                    println!("embedded {} texts, dim {}, norm {:.3}, in {:.2}s", v.len(), v[0].len(), v[0].iter().map(|x| x * x).sum::<f32>().sqrt(), t.elapsed().as_secs_f32());
+                    break;
+                }
+                EmbedReply::Error(e) => anyhow::bail!(e),
             }
-            EmbedReply::Error(e) => anyhow::bail!(e),
         }
+    }
+    if only == Some(Only::Embed) {
+        return Ok(());
     }
 
     let t = Instant::now();

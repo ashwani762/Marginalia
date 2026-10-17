@@ -2,12 +2,16 @@
 //! slow at, for phones you have paired, and keeps nothing about that work once it is done.
 
 mod admin;
+mod cluster;
 mod discovery;
 mod engine;
 mod host;
 mod metrics;
 mod models_dl;
+mod peers;
+mod place;
 mod probe;
+mod records;
 mod server;
 mod state;
 
@@ -92,8 +96,18 @@ enum Cmd {
     },
     /// Show a one-time code to type on the phone.
     Pair,
-    /// Show what the running node serves and which phones are paired.
+    /// Show what the running node serves, which phones are paired and which peers it has.
     Status,
+    /// Make this node a peer of another compute node. Run `marginalia-node pair` on the other one first and give its address and code.
+    Join {
+        /// Where the other compute node listens, for example 192.168.1.20:47615 (`pair` prints it).
+        addr: String,
+        code: String,
+    },
+    /// List the compute nodes this one has joined and whether they answer.
+    Peers,
+    /// Stop being a peer of a compute node (its id from `peers`, or its name).
+    Unjoin { who: String },
     /// Show how much work the running node has done: jobs, speed, errors. Never any content.
     Stats,
     /// Let a waiting phone in. Give its id if more than one is waiting.
@@ -134,6 +148,9 @@ enum Cmd {
         /// With `--transcribe`: close the connection after this many seconds, to check that the node stops.
         #[arg(long, hide = true)]
         hang_up_after: Option<f32>,
+        /// Send only this job (status, embed or chat) instead of all of them.
+        #[arg(long, value_enum)]
+        only: Option<probe::Only>,
     },
 }
 
@@ -175,6 +192,26 @@ async fn terminated() {
     std::future::pending::<()>().await
 }
 
+/// What `marginalia-node peers` prints.
+fn peers_text(r: &serde_json::Value) -> String {
+    let list = r["peers"].as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        return "No peers. Run `marginalia-node pair` on another compute node, then `marginalia-node join ADDRESS CODE` here.\n".into();
+    }
+    let mut out = format!("{} {}\n", list.len(), if list.len() == 1 { "peer" } else { "peers" });
+    for p in &list {
+        let what: Vec<&str> = [("chat", "chat"), ("embed", "search"), ("speech", "speech")].iter().filter(|(k, _)| p[*k].as_bool() == Some(true)).map(|(_, n)| *n).collect();
+        let state = if p["reachable"].as_bool() == Some(true) {
+            let load = p["load"].as_u64().unwrap_or(0);
+            format!("answers, {} {} in progress{}, serves {}", load, if load == 1 { "job" } else { "jobs" }, if p["paused"].as_bool() == Some(true) { ", paused" } else { "" }, if what.is_empty() { "nothing".to_string() } else { what.join(", ") })
+        } else {
+            "not answering".to_string()
+        };
+        out += &format!("  {} ({}) at {}: {}\n", p["name"].as_str().unwrap_or(""), p["id"].as_str().unwrap_or(""), p["addr"].as_str().unwrap_or(""), state);
+    }
+    out
+}
+
 fn state_dir(cli: &Cli) -> PathBuf {
     cli.state_dir.clone().or_else(|| dirs::config_dir().map(|d| d.join("marginalia-node"))).unwrap_or_else(|| PathBuf::from("marginalia-node-state"))
 }
@@ -198,6 +235,22 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Status => println!("{}", serde_json::to_string_pretty(&admin::ask(cli.admin_port, json!({"cmd": "status"})).await?)?),
+        Cmd::Join { addr, code } => {
+            let r = admin::ask(cli.admin_port, json!({"cmd": "join", "addr": addr, "code": code})).await?;
+            if let Some(e) = r["error"].as_str() {
+                anyhow::bail!("{e}");
+            }
+            println!("Joined {} ({}) at {}. Phones paired with either compute node now work with both, and each sends jobs to the other when it is busy.", r["joined"].as_str().unwrap_or(""), r["id"].as_str().unwrap_or(""), r["addr"].as_str().unwrap_or(""));
+        }
+        Cmd::Peers => print!("{}", peers_text(&admin::ask(cli.admin_port, json!({"cmd": "peers"})).await?)),
+        Cmd::Unjoin { who } => {
+            let r = admin::ask(cli.admin_port, json!({"cmd": "unjoin", "who": who})).await?;
+            if let Some(e) = r["error"].as_str() {
+                anyhow::bail!("{e}");
+            }
+            let names: Vec<&str> = r["unjoined"].as_array().into_iter().flatten().filter_map(|n| n.as_str()).collect();
+            println!("No longer a peer of {}.", names.join(", "));
+        }
         Cmd::Stats => println!("{}", metrics::report(&admin::ask(cli.admin_port, json!({"cmd": "stats"})).await?)),
         Cmd::ChatModel { choice } => match choice {
             Some(c) => {
@@ -228,7 +281,7 @@ async fn main() -> Result<()> {
         Cmd::Approve { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "approve", "who": who})).await?),
         Cmd::Deny { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "deny", "who": who})).await?),
         Cmd::Revoke { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "revoke", "who": who})).await?),
-        Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, window, prompt, hang_up_after } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *window, prompt.clone(), *hang_up_after).await?,
+        Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, window, prompt, hang_up_after, only } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *window, prompt.clone(), *hang_up_after, *only).await?,
         Cmd::Run { port, name, models, chat_model, chat, embed_model, speech_model, no_speech, cpu, ctx, lock, window_max_seconds } => {
             let store = Arc::new(state::Store::open(dir.clone())?);
             let identity = store.identity()?;
@@ -259,7 +312,9 @@ async fn main() -> Result<()> {
             tracing::info!("loading models from {}", models_dir.display());
             let opts = host::Options { models_dir, chat_model: chat_model.clone(), embed_model: embed_model.clone(), speech_model: speech_model.clone(), no_speech: *no_speech, cpu_only: *cpu, ctx: *ctx, window_max_s: *window_max_seconds };
             let host = Arc::new(tokio::task::spawn_blocking(move || host::Host::start(&opts)).await??);
-            let shared = Arc::new(server::Shared { store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), stop: Default::default() });
+            let peers = peers::Peers::open(&dir)?;
+            let cluster = cluster::Cluster::new(store.clone(), peers, identity.clone(), name.clone(), *port)?;
+            let shared = Arc::new(server::Shared { cluster: cluster.clone(), store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), stop: Default::default() });
             let ep = server::endpoint(&shared, *port)?;
             let mdns = discovery::advertise(&name, *port, &identity.fingerprint());
             match &mdns {
@@ -268,6 +323,10 @@ async fn main() -> Result<()> {
             }
             tracing::info!("node {name} ready on port {port}; {} phone(s) paired. Run `marginalia-node pair` to add one.", shared.store.list().len());
             tokio::spawn(admin::serve(shared.clone(), cli.admin_port, *port));
+            cluster.start();
+            if !cluster.peers.list().is_empty() {
+                tracing::info!("{} peer(s): {}", cluster.peers.list().len(), cluster.peers.list().iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(", "));
+            }
             // The measured speed is re-taken while the node is idle, so a graphics card that is busy with
             // something else, or hot, shows up in what phones are told.
             {
@@ -305,6 +364,7 @@ async fn main() -> Result<()> {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             }
             ep.close(0u32.into(), b"bye");
+            cluster.shutdown();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(1), ep.wait_idle()).await;
             host.shutdown();
             tracing::info!("stopped");

@@ -42,9 +42,19 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                         "speech": caps.transcribe, "speech_x": caps.transcribe_x, "window_max_s": caps.window_max_s,
                         "blocked": sh.store.blocked_list().iter().map(|b| json!({"name": b.name, "id": &b.fp[..16], "at": b.at})).collect::<Vec<_>>(),
                         "waiting": sh.pending_list().iter().map(|p| json!({"id": p.id, "name": p.name, "waited_s": p.waited_s})).collect::<Vec<_>>(),
+                        "peers": sh.cluster.snapshot(), "forwarded": sh.cluster.forwarded.load(Ordering::Relaxed),
                         "clients": sh.store.list().iter().map(|c| json!({"name": c.name, "fp": &c.fp[..16], "paired_at": c.paired_at})).collect::<Vec<_>>(),
                     })
                 }
+                "peers" => json!({"peers": sh.cluster.snapshot()}),
+                "join" => match sh.cluster.join(req["addr"].as_str().unwrap_or(""), req["code"].as_str().unwrap_or("")).await {
+                    Ok(p) => json!({"joined": p.name, "id": &p.fp[..16], "addr": p.addr}),
+                    Err(e) => json!({"error": format!("{e:#}")}),
+                },
+                "unjoin" => match sh.cluster.unjoin(req["who"].as_str().unwrap_or("")).await {
+                    Ok(gone) => json!({"unjoined": gone.iter().map(|p| p.name.clone()).collect::<Vec<_>>()}),
+                    Err(e) => json!({"error": format!("{e:#}")}),
+                },
                 "pause" | "resume" => {
                     let on = cmd == "pause";
                     sh.paused.store(on, Ordering::Relaxed);

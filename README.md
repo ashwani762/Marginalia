@@ -152,6 +152,7 @@ Use `marginalia-node lock` if you want to approve every new phone yourself, or `
 | Pause or resume new jobs | `marginalia-node pause` and `marginalia-node resume` |
 | Let a waiting phone in | `marginalia-node approve` |
 | Block or forget a phone | `marginalia-node block <id or name>` and `marginalia-node revoke <id or name>` |
+| Join another compute node (it shows a code with `pair`) | `marginalia-node join <address> <code>`, list with `marginalia-node peers`, leave with `marginalia-node unjoin <name>` |
 | Try every job type like a phone would | `marginalia-node probe <address>` |
 | Service log (Linux) | `journalctl --user -u marginalia-node -f` |
 
@@ -207,13 +208,13 @@ cargo test -p marginalia-node-tray      # tray icon logic
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Building the app and the node, debug intents, conventions |
 | [docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md) | Start here when working on Windows (beta) |
 | [compute-node/README.md](compute-node/README.md) | Using and running a node |
-| [compute-node/DESIGN.md](compute-node/DESIGN.md) | Protocol and the planned cluster of nodes |
+| [compute-node/DESIGN.md](compute-node/DESIGN.md) | Protocol and the cluster of nodes (what exists, what is planned) |
 | [compute-node/STATUS.md](compute-node/STATUS.md) | What is checked, what is not, next steps |
 
 ## Status
 
-Working and tested on an Android phone and Ubuntu: everything above. The compute node on Windows is **beta**. It builds, runs and passes its script checks on Windows 11, and the rest of the Windows testing comes later (see [compute-node/STATUS.md](compute-node/STATUS.md)). Planned: nodes that find and share work with each other,
-speech to text on nodes as one open stream.
+Working and tested on an Android phone and Ubuntu: everything above. The compute node on Windows is **beta**. It builds, runs and passes its script checks on Windows 11, and the rest of the Windows testing comes later (see [compute-node/STATUS.md](compute-node/STATUS.md)). Compute nodes can join each other (shared allowed and blocked phones, jobs forwarded to a less busy node), checked on one machine.
+Planned: nodes finding each other by themselves, standby mode and roles.
 
 ## License
 

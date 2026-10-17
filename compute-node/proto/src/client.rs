@@ -79,3 +79,26 @@ pub async fn decide(conn: &quinn::Connection, who: &str, allow: bool) -> Result<
         DecideReply::Refused(why) => bail!(why),
     }
 }
+
+/// Right after [`pair`] on the same connection: says this device is a compute node listening on `port`, not a phone.
+/// The other node takes it as a peer only when `code` is the one it showed.
+pub async fn join(conn: &quinn::Connection, id: &tls::Identity, node_fp: &str, name: &str, port: u16, code: &str) -> Result<()> {
+    let exp = pair::exporter(conn).ok_or_else(|| anyhow!("no session secret"))?;
+    let proof = pair::proof(code, pair::Side::Peer, &exp, &id.fingerprint(), node_fp);
+    match call::<PeerReply>(conn, &Request::Join { name: name.to_string(), port, proof }).await? {
+        PeerReply::Ok => Ok(()),
+        PeerReply::Refused(why) => bail!(why),
+    }
+}
+
+/// Peers trade phone records: sends ours, returns theirs.
+pub async fn records(conn: &quinn::Connection, port: u16, records: Vec<PhoneRecord>) -> Result<Vec<PhoneRecord>> {
+    Ok(call::<RecordsReply>(conn, &Request::Records { port, records }).await?.records)
+}
+
+pub async fn leave(conn: &quinn::Connection) -> Result<()> {
+    match call::<PeerReply>(conn, &Request::Leave).await? {
+        PeerReply::Ok => Ok(()),
+        PeerReply::Refused(why) => bail!(why),
+    }
+}

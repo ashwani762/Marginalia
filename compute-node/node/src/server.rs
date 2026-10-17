@@ -2,12 +2,14 @@
 //! this task's memory and go away when it ends.
 
 use crate::engine::{self, GenEvent, GenParams, GenRequest};
+use crate::cluster::Cluster;
 use crate::host::Host;
 use crate::metrics::Metrics;
+use crate::place::{Job, Node};
 use crate::state::Store;
 use anyhow::Result;
 use marginalia_proto::tls::{self, Identity};
-use marginalia_proto::{pair, wire, AudioFrame, ChatEvent, DecideReply, EmbedReply, KnockReply, PairReply, PendingPhone, Priority, Request, StatusReply, TranscribeEvent};
+use marginalia_proto::{pair, wire, AudioFrame, ChatEvent, DecideReply, EmbedReply, KnockReply, PairReply, PeerReply, PendingPhone, Priority, RecordsReply, Request, StatusReply, TranscribeEvent};
 use std::collections::HashMap;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +29,8 @@ pub struct Waiting {
 
 pub struct Shared {
     pub store: Arc<Store>,
+    /// The other compute nodes this one has joined.
+    pub cluster: Arc<Cluster>,
     pub host: Arc<Host>,
     pub identity: Identity,
     pub name: String,
@@ -183,7 +187,10 @@ async fn request(sh: Arc<Shared>, conn: quinn::Connection, fp: String, mut send:
     }
     // Someone who is not paired may only ask to pair, so what they send is kept small: nothing is
     // allocated for them before they have shown they know the code.
-    let known = sh.store.find(&fp);
+    // A peer is known too, with the rights of a phone and a few more. What a phone sends may be forwarded to a peer,
+    // what a peer sends never is.
+    let peer = sh.cluster.peers.find(&fp);
+    let known = sh.store.find(&fp).or_else(|| peer.as_ref().map(|p| crate::state::Client { fp: fp.clone(), name: p.name.clone(), paired_at: p.added_at }));
     let limit = if known.is_some() { 64 * 1024 * 1024 } else { 4 * 1024 };
     let Some(req) = wire::read_frame_max::<Request>(&mut recv, limit).await? else { return Ok(()) };
     match (req, known) {
@@ -192,7 +199,28 @@ async fn request(sh: Arc<Shared>, conn: quinn::Connection, fp: String, mut send:
             wire::write_frame(&mut send, &reply).await?;
         }
         (Request::Pair { .. }, Some(_)) => {
-            wire::write_frame(&mut send, &PairReply::Refused("This phone is already paired.".into())).await?;
+            let why = if peer.is_some() { "That compute node is already a peer." } else { "This phone is already paired." };
+            wire::write_frame(&mut send, &PairReply::Refused(why.into())).await?;
+        }
+        (Request::Join { name, port, proof }, Some(_)) => {
+            let reply = sh.cluster.accept_join(&conn, &fp, name, port, proof);
+            wire::write_frame(&mut send, &reply).await?;
+        }
+        (Request::Records { port, records }, Some(_)) if peer.is_some() => {
+            sh.cluster.peer_seen(&fp, conn.remote_address().ip(), port);
+            if let Err(e) = sh.store.merge(&records) {
+                tracing::warn!("could not save phone records from a peer: {e:#}");
+            }
+            wire::write_frame(&mut send, &RecordsReply { records: sh.store.records() }).await?;
+        }
+        (Request::Leave, Some(_)) if peer.is_some() => {
+            wire::write_frame(&mut send, &PeerReply::Ok).await?;
+            sh.cluster.peer_left(&fp);
+        }
+        (Request::Records { .. } | Request::Leave, Some(_)) => {
+            sh.metrics.rejected.fetch_add(1, Ordering::Relaxed);
+            conn.close(2u32.into(), b"not a peer");
+            return Ok(());
         }
         (Request::Knock { name }, None) => wire::write_frame(&mut send, &sh.knock(&fp, name)).await?,
         (Request::Knock { .. }, Some(_)) => wire::write_frame(&mut send, &KnockReply::Accepted { node_name: sh.name.clone() }).await?,
@@ -220,8 +248,8 @@ async fn request(sh: Arc<Shared>, conn: quinn::Connection, fp: String, mut send:
             return Ok(());
         }
         (Request::Status, Some(_)) => wire::write_frame(&mut send, &sh.status()).await?,
-        (Request::Chat(r), Some(c)) => chat(&sh, r, &mut send, c).await?,
-        (Request::Embed(r), Some(c)) => embed(&sh, r, &mut send, c).await?,
+        (Request::Chat(r), Some(c)) => chat(&sh, r, &mut send, c, peer.is_some()).await?,
+        (Request::Embed(r), Some(c)) => embed(&sh, r, &mut send, c, peer.is_some()).await?,
         (Request::Transcribe(r), Some(c)) => transcribe(&sh, &conn, r, &mut send, recv, c).await?,
     }
     let _ = send.finish();
@@ -252,6 +280,8 @@ fn try_pair(sh: &Shared, conn: &quinn::Connection, fp: &str, name: String, proof
         return PairReply::Refused("That code is not right.".into());
     }
     let reply = PairReply::Ok { node_name: sh.name.clone(), proof: pair::proof(&p.code, pair::Side::Node, &exp, fp, &node_fp) };
+    // A compute node joining follows the pairing with `Join`, which needs the code once more.
+    sh.cluster.note_pair(fp, &p.code);
     *guard = None;
     if let Err(e) = sh.store.add(fp.to_string(), name.clone()) {
         return PairReply::Refused(format!("Could not save the pairing: {e}"));
@@ -261,7 +291,16 @@ fn try_pair(sh: &Shared, conn: &quinn::Connection, fp: &str, name: String, proof
     reply
 }
 
-async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut quinn::SendStream, client: crate::state::Client) -> Result<()> {
+async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut quinn::SendStream, client: crate::state::Client, from_peer: bool) -> Result<()> {
+    // A job from a phone goes to a peer when this node is clearly the worse choice. A job from a peer stays here,
+    // so a job is never passed on twice.
+    if !from_peer {
+        let local = Node { load: sh.in_flight(), paused: sh.paused.load(Ordering::Relaxed), speed: sh.host.caps.lock().chat_tok_s, serves: sh.host.llm.is_some() };
+        let order = sh.cluster.plan(Job::Chat { max_tokens: r.max_tokens }, &local);
+        if !order.is_empty() && sh.cluster.forward_chat(order, &r, send).await? {
+            return Ok(());
+        }
+    }
     if sh.paused.load(Ordering::Relaxed) {
         wire::write_frame(send, &ChatEvent::Error("paused".into())).await?;
         return Ok(());
@@ -336,7 +375,14 @@ async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut qui
     Ok(())
 }
 
-async fn embed(sh: &Arc<Shared>, r: marginalia_proto::EmbedRequest, send: &mut quinn::SendStream, client: crate::state::Client) -> Result<()> {
+async fn embed(sh: &Arc<Shared>, r: marginalia_proto::EmbedRequest, send: &mut quinn::SendStream, client: crate::state::Client, from_peer: bool) -> Result<()> {
+    if !from_peer {
+        let local = Node { load: sh.in_flight(), paused: sh.paused.load(Ordering::Relaxed), speed: sh.host.caps.lock().embed_per_s, serves: sh.host.embed.is_some() };
+        let order = sh.cluster.plan(Job::Embed { texts: r.texts.len() as u32 }, &local);
+        if !order.is_empty() && sh.cluster.forward_embed(order, &r, send).await? {
+            return Ok(());
+        }
+    }
     if sh.paused.load(Ordering::Relaxed) {
         wire::write_frame(send, &EmbedReply::Error("paused".into())).await?;
         return Ok(());

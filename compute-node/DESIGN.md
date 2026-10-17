@@ -14,59 +14,88 @@ of the request and are gone after it.
 - Each node measures its own speed at start and the phone only uses it when it is clearly faster.
 - `marginalia-node stats`: counts, speed, failures and per phone totals. Numbers only, never content.
 
-## Next: nodes that work together (slice 2)
+## Built: peers, shared phone records and placing work (first part of slice 2)
 
-The goal is that the phone never has to manage nodes. It pairs with one node of a cluster, finds the rest
-through that node and through discovery, and sends work to whichever it can reach. The cluster places the
-work.
+The goal is that the phone never has to manage nodes. It pairs with one node of a cluster and the cluster takes
+care of the rest. What is built is the part below. Standby mode, roles and the split model are not (see "Still
+designed, not built").
 
-### Finding each other
+### Peers
 
-- Phones browse for every node on the network, as today.
-- Nodes also browse for each other (mDNS). Finding a node is not trusting it: two nodes only talk after
-  they have paired, the same way a phone does (`marginalia-node join ADDRESS CODE`).
-- Paired nodes exchange their member lists, so a node that mDNS cannot see (another subnet, a VPN) is still
-  known. A node that moved gets its new address from gossip.
+- Two nodes become peers with `marginalia-node join ADDRESS CODE` on one of them, after `marginalia-node pair` on
+  the other. The joining node acts like a phone: it pairs with the code, then sends a `Join` request on the same
+  connection that carries its name, its port and a second proof of the code (`pair::Side::Peer`). Without that
+  proof a paired phone could make itself a node. The other node takes the joiner's address from the connection.
+  The phone record the pairing made is withdrawn at once (a revoke, which spreads like any other).
+- Both sides save the other's certificate fingerprint, name and address in `peers.json` in the state dir (0600).
+  Each trusts the other's certificate pinned, as a client (the peer may talk to it) and as a server (it only
+  connects to the saved fingerprint). A peer is known to the request handler like a paired phone, plus the right
+  to trade records and to leave.
+- `marginalia-node peers` lists them, `status` shows them, `unjoin` forgets one (and tells it, if it answers).
+- A node is not found by mDNS and not told about other nodes by its peers yet. Joining is always by address.
+  Peers are not transitive for jobs, only for records (a record reaches a peer's peers because a change is sent on).
+  A peer that moved gets its new address when it next contacts this node.
 
-### Membership and what is shared
+### Shared phone records
 
-- A cluster is the set of nodes that have paired with each other. Membership, the list of paired phones and
-  per node settings (priority, role) are small records with a version number. They are copied between nodes
-  by gossip with last writer wins. Revoking a phone or a node is a record too, so it spreads.
-- Blocking a phone (`marginalia-node block`) writes a block record, stronger than a revoke: the phone is
-  refused even when connecting is open or it knows a pairing code. Block records spread to all peers like any
-  other record and win over an allow record for the same phone, so blocking on one node blocks it on all.
-  Unblocking is a newer record. Block records are kept, never forgotten, so a node that was offline learns of
-  them when it returns.
-- Pair a phone with any one node and every node accepts it. This is configuration, not job data.
-- Nothing about a job is replicated. That is why there is no need for consensus (Raft): losing a node loses
-  at most the jobs it was running, and those are simply sent again.
+- Allowed phones, blocked phones and the tombstones of revokes and unblocks are small records `(phone
+  fingerprint, name, kind, time in milliseconds)`. A phone has two registers. One holds Allow or Revoke, the
+  other Block or Unblock. The later record in a register wins. On a tie Revoke beats Allow and Block beats
+  Unblock. A phone is let in when it is allowed and not blocked, so a block beats an allow for the same phone
+  until a later unblock. The merge (`records.rs`) is a pure function, the same in any order and any number of
+  times, with tests for that.
+- A change made here (pair, approve, block, unblock, revoke) is stamped with the later of the clock and one
+  millisecond after what this node already knows about that phone, so it always beats what it follows even when
+  clocks differ by a little. Real clock differences of seconds can still make two near simultaneous changes on
+  different nodes resolve the wrong way round.
+- Peers trade their records at once when one changes and every 3 seconds anyway (the `Records` request: each
+  side sends its records and gets the other's back). A record taken from a peer is sent on to the other peers,
+  so a chain of nodes works, and it stops when every node holds the same set.
+- Block records and revokes are kept as tombstones for good, so a node that was off learns of them when it returns.
+- Pair a phone with any one node and every node accepts it without pairing again. This is configuration, not
+  job data. Nothing about a job is ever sent to a peer except the job it is asked to run.
 
 ### Placing work
 
-- Every node tells its peers its load and speed once or twice a second over a standing peer connection.
-- A node that receives a job (the entry node) either runs it or forwards it to the peer with the shortest
-  expected wait, counting the forwarding cost. The phone still holds one connection and sees one answer
-  stream. The hop between nodes is encrypted like every other connection.
-- Placement uses capabilities (which models, which engine, GPU or not), the measured speed and the job
-  priority (interactive before background before bulk, fair between phones).
-- Idle nodes can take waiting work from a busy peer (work stealing). Jobs are self contained, so this is safe.
-- A batch request (`ChatBatch`, `EmbedBatch`) lets the phone submit the sections of a long write-up at once.
-  The cluster runs them in parallel on several nodes and streams results back as they finish.
+- Every 2 seconds a node asks each peer for its `Status` and keeps the answer. A peer whose answer is older than
+  8 seconds is not counted on.
+- A chat or search job that arrives from a phone is placed by `place.rs`. The expected wait of a node is its jobs
+  in flight plus the new one, times the time this job takes at its measured speed. A node that is paused, or has no
+  model for the job, has no wait. The job is forwarded when this node has no wait, or when its wait is more than
+  1.5 times a peer's plus 0.5 seconds for the hop. Several peers are tried best first. Jobs this node has just
+  sent to a peer are added to that peer's load, so a burst does not all go to the same peer.
+- The answer is relayed through the same stream, so the phone holds one connection to one node and sees one answer
+  stream. While the peer is silent the phone is sent a heartbeat every 2 seconds.
+- A request from a peer is never forwarded, which is the loop protection: it is recognised by the sender's
+  fingerprint being a peer's.
+- Before the first token, a peer that cannot be reached, refuses (paused, no model) or is silent for 10 seconds is
+  skipped and the next peer is tried, then this node. After the first token an error reaches the phone, whose
+  write-up retries from saved parts.
+- Transcription is not forwarded: the phone already chooses nodes for it and a recording needs a long upload.
+- Load is the number of jobs in flight of any kind, because that is what `Status` has. A node busy with a long
+  recording looks busy for chat too.
+
+### Still designed, not built
+
+- Nodes finding each other with mDNS, and peers handing each other their member lists (another subnet, a VPN).
+- Per node settings (priority, role) as records, and revoking a node as a record. Leaving is `unjoin` on each side.
+- Idle nodes taking waiting work from a busy peer (work stealing), and fair sharing between phones.
+- A batch request (`ChatBatch`, `EmbedBatch`) that runs the sections of a long write-up in parallel on several nodes.
+- Standby mode, roles and the split model below.
 
 ### Modes
 
-- **Hot-hot (default).** Every node serves and any node can be the entry. If one disappears, the phone's
+- **Hot-hot (default, built).** Every node serves and any node can be the entry. If one disappears, the phone's
   next request goes to another and an unfinished job is sent again from the start.
-- **Primary and standby.** A node can be marked standby. It keeps its models loaded and takes work only when
+- **Primary and standby (not built).** A node can be marked standby. It keeps its models loaded and takes work only when
   the primary stops answering its heartbeat, or when the primary is full. Useful for a small always-on box
   backing up a big machine that sleeps.
-- **Roles.** Tags per node: `gpu`, `light` (a Raspberry Pi serving only search), `batch-only`. Placement
+- **Roles (not built).** Tags per node: `gpu`, `light` (a Raspberry Pi serving only search), `batch-only`. Placement
   respects them.
-- **Distributed model (optional, later).** One large model split across machines with llama.cpp's RPC
+- **Distributed model (not built, optional, later).** One large model split across machines with llama.cpp's RPC
   backend. Only worth it on wired networks and for models that do not fit one machine.
 
-### Failure handling
+### Failure handling (built for chat and search jobs)
 
 - Before the first token: the job moves to another node, invisibly.
 - After tokens have been sent: the error reaches the phone, whose write-up already retries from saved
