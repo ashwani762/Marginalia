@@ -1,3 +1,5 @@
+// Kotlin side of the native core: suspend calls go in as JSON and a stream of events comes back.
+
 package app.marginalia
 
 import android.content.Context

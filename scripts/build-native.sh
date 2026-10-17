@@ -8,6 +8,9 @@
 #
 # arm64 is built twice: a baseline for any Armv8.2 phone (dotprod) and an i8mm build
 # for Armv8.6+/Armv9 phones. The app picks one at launch from /proc/cpuinfo.
+#
+# Needs cargo-ndk and the Android NDK. Environment:
+#   ANDROID_NDK_HOME   NDK to use (default: the newest one under ~/Android/Sdk/ndk)
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

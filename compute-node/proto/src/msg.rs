@@ -33,7 +33,7 @@ pub enum Request {
     Chat(ChatRequest),
     Embed(EmbedRequest),
     /// A phone that is not paired yet asks to be let in. The person has already said on the phone
-    /// that they trust this computer.
+    /// that they trust this compute node.
     Knock { name: String },
     /// Asks how a knock went. Answered for phones that are waiting or already let in.
     KnockStatus,
@@ -88,7 +88,7 @@ pub enum PairReply {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum KnockReply {
     Accepted { node_name: String },
-    /// Waiting for a phone that is already paired, or someone at the computer, to allow it.
+    /// Waiting for a phone that is already paired, or someone at the node, to allow it.
     Pending { node_name: String },
     Refused(String),
 }

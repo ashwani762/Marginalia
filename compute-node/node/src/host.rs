@@ -27,8 +27,8 @@ pub struct Host {
     pub embed_jobs: Arc<AtomicU32>,
 }
 
-const CHAT_FILE: &str = "gemma-4-E2B-it-Q4_0.gguf";
-const EMBED_FILE: &str = "embeddinggemma-2-Q8_0.gguf";
+pub const CHAT_FILE: &str = "gemma-4-E2B-it-Q4_0.gguf";
+pub const EMBED_FILE: &str = "embeddinggemma-2-Q8_0.gguf";
 
 fn tiers(cpu_only: bool) -> Vec<u32> {
     if cpu_only { vec![0] } else { vec![999, 16, 0] }
@@ -108,7 +108,7 @@ impl Host {
         Ok(host)
     }
 
-    /// A short run of each model, so phones know what this computer is worth before they send work.
+    /// A short run of each model, so phones know what this machine is worth before they send work.
     fn benchmark(&mut self) {
         let mut caps = self.caps.lock();
         if let Some(e) = &self.embed {

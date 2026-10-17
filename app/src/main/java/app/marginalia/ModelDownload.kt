@@ -1,3 +1,5 @@
+// The optional download of the larger Gemma model.
+
 package app.marginalia
 
 import android.content.Context

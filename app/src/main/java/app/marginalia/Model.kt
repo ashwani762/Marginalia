@@ -1,3 +1,5 @@
+// Plain data classes for what the native core sends to the screens, with their JSON parsing.
+
 package app.marginalia
 
 import org.json.JSONArray
@@ -223,7 +225,7 @@ data class LiveState(
     val activity: List<String> = emptyList(),
 )
 
-/** A computer on the home network that has been paired with this phone. */
+/** A compute node on the home network that has been paired with this phone. */
 data class HomeComputer(
     val fp: String,
     val name: String,
@@ -235,9 +237,9 @@ data class HomeComputer(
     val embedPerSec: Double,
     val busy: Int,
     val problem: String,
-    /** "approved" (in use), "waiting" (the computer has not allowed this phone yet) or "refused". */
+    /** "approved" (in use), "waiting" (the compute node has not allowed this phone yet) or "refused". */
     val state: String = "approved",
-    /** Other phones asking to use this computer. Only filled when this phone is approved there. */
+    /** Other phones asking to use this compute node. Only filled when this phone is approved there. */
     val pending: List<PendingPhone> = emptyList(),
 ) {
     val approved: Boolean get() = state != "waiting" && state != "refused"
@@ -260,14 +262,14 @@ data class HomeComputer(
     }
 }
 
-/** Another phone that is asking to use a home computer. */
+/** Another phone that is asking to use a home compute node. */
 data class PendingPhone(val id: String, val name: String, val waitedS: Int) {
     companion object {
         fun from(o: JSONObject) = PendingPhone(o.optString("id"), o.optString("name"), o.optInt("waited_s", 0))
     }
 }
 
-/** A computer the network search has seen that is not paired yet. */
+/** A compute node the network search has seen that is not paired yet. */
 data class FoundComputer(val id: String, val name: String, val addrs: List<String>) {
     companion object {
         fun from(o: JSONObject) = FoundComputer(o.optString("id"), o.optString("name"), o.strings("addrs"))
@@ -288,12 +290,12 @@ data class HomeComputers(
     }
 }
 
-/** One phone asking to use one or more computers. The person answers once for all of them. */
+/** One phone asking to use one or more compute nodes. The person answers once for all of them. */
 data class ApprovalAsk(val who: String, val phone: String, val computers: List<AskedComputer>)
 
 data class AskedComputer(val fp: String, val name: String)
 
-/** Groups the pending phones of every approved computer by phone id and returns the first phone not in [dismissed] (a set of phone ids). */
+/** Groups the pending phones of every approved compute node by phone id and returns the first phone not in [dismissed] (a set of phone ids). */
 fun groupApprovals(paired: List<HomeComputer>, dismissed: Set<String>): ApprovalAsk? {
     val byPhone = LinkedHashMap<String, MutableList<Pair<HomeComputer, PendingPhone>>>()
     paired.filter { it.approved }.forEach { c -> c.pending.forEach { ph -> byPhone.getOrPut(ph.id) { mutableListOf() }.add(c to ph) } }
@@ -303,3 +305,27 @@ fun groupApprovals(paired: List<HomeComputer>, dismissed: Set<String>): Approval
 
 /** The ids of all phones that are asking for something right now. */
 fun askingPhones(paired: List<HomeComputer>): Set<String> = paired.flatMap { c -> c.pending.map { it.id } }.toSet()
+
+/** Compute nodes the network search has seen that are not paired yet. */
+fun unpairedFound(n: HomeComputers): List<FoundComputer> =
+    n.found.filter { f -> n.paired.none { f.id.isNotBlank() && it.fp.startsWith(f.id, ignoreCase = true) } }
+
+/** What a found compute node is remembered by when the person says "Not now". Falls back to the name when there is no id. */
+fun foundKey(f: FoundComputer): String = f.id.trim().lowercase().ifBlank { "name:" + f.name.trim().lowercase() }
+
+/** The found compute nodes the banner should still offer: not paired yet and not dismissed. Nothing while home compute nodes are switched off. */
+fun computersToOffer(n: HomeComputers, dismissed: Set<String>): List<FoundComputer> =
+    if (!n.enabled) emptyList() else unpairedFound(n).filter { foundKey(it) !in dismissed }
+
+/** "1 compute node found on your network", "3 compute nodes found on your network". */
+fun offerTitle(count: Int): String = if (count == 1) "1 compute node found on your network" else "$count compute nodes found on your network"
+
+/** The small status chip text for the approved compute nodes that are online right now, or null when there are none. */
+fun onlineChipText(paired: List<HomeComputer>): String? {
+    val on = paired.filter { it.approved && it.online }
+    return when (on.size) {
+        0 -> null
+        1 -> on[0].name.trim().takeIf { it.isNotBlank() }?.let { "Compute node: $it" } ?: "Compute node"
+        else -> "Compute nodes: ${on.size}"
+    }
+}

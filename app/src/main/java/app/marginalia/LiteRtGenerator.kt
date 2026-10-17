@@ -1,3 +1,5 @@
+// Chat generation (Gemma) served to the native core from LiteRT-LM.
+
 package app.marginalia
 
 import android.content.Context

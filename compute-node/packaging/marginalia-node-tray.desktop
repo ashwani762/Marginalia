@@ -1,5 +1,5 @@
 # Autostart entry for the tray icon. install-linux.sh copies this to ~/.config/autostart/ and fills in
-# @HOME@ with your home folder (a .desktop file does not expand ~ or $HOME).
+# @HOME@ with your user folder (a .desktop file does not expand ~ or $HOME).
 # By hand: replace @HOME@ yourself, or use Exec=marginalia-node-tray if ~/.local/bin is in your PATH at login.
 [Desktop Entry]
 Type=Application

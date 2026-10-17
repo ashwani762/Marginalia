@@ -6,7 +6,6 @@
 
 use anyhow::{anyhow, Result};
 use crossbeam_channel::{bounded, unbounded, Sender};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -43,10 +42,6 @@ enum Job {
         texts: Vec<String>,
         reply: Sender<Vec<usize>>,
     },
-    EmbedImage {
-        path: PathBuf,
-        reply: Sender<Result<Vec<f32>>>,
-    },
     Shutdown,
 }
 
@@ -73,15 +68,6 @@ impl EmbedHandle {
             .embed(vec![text.to_string()], kind)?
             .pop()
             .unwrap_or_default())
-    }
-
-    /// Embed an image file into the shared text/image space (needs the vision projector).
-    pub fn embed_image(&self, path: &std::path::Path) -> Result<Vec<f32>> {
-        let (reply, rx) = bounded(1);
-        self.tx
-            .send(Job::EmbedImage { path: path.to_path_buf(), reply })
-            .map_err(|_| anyhow!("embedding worker is gone"))?;
-        rx.recv().map_err(|_| anyhow!("embedding worker dropped reply"))?
     }
 
     pub fn count_tokens(&self, texts: Vec<String>) -> Vec<usize> {
@@ -169,9 +155,6 @@ impl EmbedHandle {
                                     })
                                     .collect(),
                             );
-                        }
-                        Job::EmbedImage { reply, .. } => {
-                            let _ = reply.send(Err(anyhow!("image embedding is not available")));
                         }
                         Job::Shutdown => break,
                     }

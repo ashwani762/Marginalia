@@ -1,3 +1,5 @@
+// The review screen for a finished meeting: summary, notes, transcript and assist tabs.
+
 @file:OptIn(ExperimentalFoundationApi::class)
 
 package app.marginalia.ui
@@ -80,7 +82,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import app.marginalia.AppVm
 import app.marginalia.Jot
@@ -90,7 +91,6 @@ import app.marginalia.Photo
 import app.marginalia.Source
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
 private val tabs = listOf("Summary", "Notes", "Transcript", "Assist")
 

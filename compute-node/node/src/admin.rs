@@ -1,5 +1,5 @@
 //! The local control channel: `marginalia-node pair`, `status`, `pause`, `stop` and the tray icon talk
-//! to the running daemon through a port that only this computer can reach. Replies hold counts, names
+//! to the running daemon through a port that only this machine can reach. Replies hold counts, names
 //! and timings, never any content.
 
 use crate::server::Shared;

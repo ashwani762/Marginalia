@@ -319,7 +319,6 @@ fn transcribe_with(ctx: &Ctx, mut pcm: Vec<f32>, language: &str, threads: i32, f
         p.language = lang_c.as_ptr();
         p.detect_language = false;
         p.greedy.best_of = 1;
-        let _speech = crate::engine::gate::Speech::begin();
         let rc = ws::whisper_full_with_state(ctx.ctx, ctx.state, p, pcm.as_ptr(), pcm.len() as i32);
         if rc != 0 {
             return Err(anyhow!("whisper_full failed with code {rc}"));

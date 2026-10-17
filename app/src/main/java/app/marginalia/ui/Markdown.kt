@@ -1,3 +1,5 @@
+// A small Markdown renderer for summaries and notes.
+
 package app.marginalia.ui
 
 import androidx.compose.foundation.layout.Box

@@ -1,3 +1,5 @@
+// Small animated visuals: brand mark, waveform, timer, pulse and thinking dots.
+
 package app.marginalia.ui
 
 import androidx.compose.animation.core.Animatable
@@ -8,7 +10,6 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect

@@ -57,12 +57,6 @@ impl Default for GenParams {
     }
 }
 
-impl GenParams {
-    pub fn precise(max_tokens: usize) -> Self {
-        Self { max_tokens, temperature: 0.2, ..Default::default() }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub enum GenEvent {
     Token(String),

@@ -1,3 +1,5 @@
+// Tells speakers apart on the kept audio after a meeting, on the phone itself.
+
 package app.marginalia
 
 import android.content.Context

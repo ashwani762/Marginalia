@@ -14,10 +14,14 @@ pub fn lan_addresses() -> Vec<IpAddr> {
         .filter(|i| !i.is_loopback())
         .filter(|i| {
             let n = i.name.as_str();
-            !(n.starts_with("docker") || n.starts_with("br-") || n.starts_with("veth") || n.starts_with("virbr") || n.starts_with("mpqemubr") || n.starts_with("lxc") || n.starts_with("tailscale"))
+            !(n.starts_with("docker") || n.starts_with("br-") || n.starts_with("veth") || n.starts_with("virbr") || n.starts_with("mpqemubr") || n.starts_with("lxc") || n.starts_with("tailscale")
+                // Windows names adapters in words: the virtual switches of WSL, Hyper-V, VMware and VirtualBox.
+                || n.contains("WSL") || n.contains("Default Switch") || n.contains("VMware") || n.contains("VirtualBox") || n.contains("Host-Only"))
         })
         .map(|i| i.ip())
         .filter(|ip| ip.is_ipv4())
+        // 169.254.x.x is what an adapter without a network gives itself, nothing a phone can reach.
+        .filter(|ip| !matches!(ip, IpAddr::V4(v4) if v4.is_link_local()))
         .collect()
 }
 

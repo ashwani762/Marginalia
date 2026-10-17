@@ -274,7 +274,7 @@ impl Remote {
             return;
         }
         let mut g = self.inner.lock();
-        // A paired computer that moved to a new address is followed.
+        // A paired compute node that moved to a new address is followed.
         for n in g.nodes.iter_mut().filter(|n| id.len() >= 16 && n.saved.fp.starts_with(id)) {
             n.saved.addrs = addrs.iter().map(|a| a.to_string()).collect();
             n.live.failed_at = None;
@@ -443,7 +443,7 @@ impl Remote {
         json!({"enabled": g.enabled, "paired": paired, "found": found})
     }
 
-    /// Looks at every paired computer now (answers when they have all replied or timed out).
+    /// Looks at every paired compute node now (answers when they have all replied or timed out).
     pub fn refresh(self: &Arc<Self>) {
         let targets: Vec<usize> = (0..self.inner.lock().nodes.len()).collect();
         self.rt.block_on(async {
@@ -891,7 +891,7 @@ fn short_error(e: &anyhow::Error) -> String {
     let s = format!("{e:#}");
     if s.contains("blocked") {
         "This computer has blocked this phone".into()
-    } else if s.contains("not the paired computer") {
+    } else if s.contains("not the paired compute node") {
         "A different computer answered at that address".into()
     } else if s.contains("not paired") || s.contains("closed") {
         "This phone is no longer paired with it".into()
@@ -902,7 +902,7 @@ fn short_error(e: &anyhow::Error) -> String {
     }
 }
 
-/// Keeps an eye on the paired computers while the app is running: quickly while one is waiting to be
+/// Keeps an eye on the paired compute nodes while the app is running: quickly while one is waiting to be
 /// allowed, and every so often otherwise so the settings screen and the next job start from fresh facts.
 async fn monitor(r: Arc<Remote>) {
     loop {

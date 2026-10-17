@@ -1,3 +1,5 @@
+// The first-run introduction and permission requests.
+
 package app.marginalia.ui
 
 import android.Manifest
@@ -95,7 +97,7 @@ fun Onboarding(onDone: () -> Unit) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Rounded.Lock, null, tint = p.success, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.size(8.dp))
-                                Text("Nothing leaves this phone", style = type.label.copy(color = p.textDim))
+                                Text("Stays on your own devices", style = type.label.copy(color = p.textDim))
                             }
                         }
                         1 -> {

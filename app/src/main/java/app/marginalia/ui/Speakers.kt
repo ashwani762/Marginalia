@@ -1,3 +1,5 @@
+// Speaker colours, names and the header that separates and renames speakers.
+
 package app.marginalia.ui
 
 import androidx.compose.foundation.background

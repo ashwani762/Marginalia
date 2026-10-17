@@ -237,4 +237,4 @@ impl LlmHandle {
 
 
 mod worker;
-pub use worker::{render_gemma_prompt, spawn, LlmConfig};
+pub use worker::{spawn, LlmConfig};

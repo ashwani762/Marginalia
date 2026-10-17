@@ -1,3 +1,5 @@
+// The setup screen and the settings and source sheets.
+
 @file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 
 package app.marginalia.ui
@@ -34,7 +36,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
@@ -44,7 +48,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -144,12 +147,20 @@ private val languages = listOf(
 )
 
 @Composable
-fun YouSheet(vm: AppVm, onDismiss: () -> Unit) {
+fun YouSheet(vm: AppVm, onDismiss: () -> Unit, scrollToHome: Boolean = false) {
     val p = pal
     val prefs by vm.prefs.collectAsState()
     val stats by vm.stats.collectAsState()
     val info by vm.modelInfo.collectAsState()
     val haptic = LocalHapticFeedback.current
+    val homeSpot = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+    // Opened from the home compute node chip: bring that part of the sheet into view once the sheet has settled.
+    LaunchedEffect(scrollToHome) {
+        if (scrollToHome) {
+            kotlinx.coroutines.delay(400)
+            runCatching { homeSpot.bringIntoView() }
+        }
+    }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -224,7 +235,7 @@ fun YouSheet(vm: AppVm, onDismiss: () -> Unit) {
                 languages.forEach { (code, name) -> Chip(name, selected = prefs.language == code) { vm.setPref("language", code) } }
             }
 
-            HomeComputersSection(vm)
+            HomeComputersSection(vm, Modifier.bringIntoViewRequester(homeSpot))
 
             SectionLabel("Backup", Modifier.padding(top = 22.dp), flush = true)
             BackupRow(vm)
@@ -239,7 +250,7 @@ fun YouSheet(vm: AppVm, onDismiss: () -> Unit) {
                     Text("Private by design", style = type.headline)
                 }
                 Spacer(Modifier.height(6.dp))
-                Text("Transcription, notes, search and answers run on this phone. Your audio and documents never leave it. If you trust a computer on your home network, the text for notes and answers goes to it while you are home, and it keeps none of it. Nothing goes to the internet.", style = type.callout)
+                Text("Transcription, notes, search and answers run on this phone. Your audio and documents never leave it. If you trust a compute node on your network, the text for notes and answers goes to it while it is in reach, and it keeps none of it. Nothing goes to the internet.", style = type.callout)
                 if (info.isNotBlank()) {
                     Spacer(Modifier.height(10.dp))
                     Text(info, style = type.time)

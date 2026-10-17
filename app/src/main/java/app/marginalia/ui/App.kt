@@ -1,3 +1,5 @@
+// The app shell: tabs, navigation, the floating bar, toasts and the screens that sit on top.
+
 @file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 
 package app.marginalia.ui
@@ -16,7 +18,6 @@ import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
@@ -39,7 +40,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.gestures.rememberDraggableState
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -60,7 +60,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -75,7 +74,6 @@ import androidx.compose.material.icons.rounded.ChatBubbleOutline
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.GraphicEq
-import androidx.compose.material.icons.rounded.MicNone
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -233,6 +231,7 @@ private fun Shell(vm: AppVm) {
     val openDoc by vm.doc.collectAsState()
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var showYou by remember { mutableStateOf(false) }
+    var showHome by remember { mutableStateOf(false) }
     var citeSheet by remember { mutableStateOf<app.marginalia.Source?>(null) }
     val ready = boot is Boot.Ready
     val imeVisible = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
@@ -305,6 +304,7 @@ private fun Shell(vm: AppVm) {
                             vm, review, onRecord = startRecording, sideBySide = w.twoPane, backEnabled = !liveOpen,
                             onCite = { citeSheet = it },
                             onAsk = { q -> vm.closeReview(); tab = Tab.Ask.ordinal; vm.ask(q) },
+                            onOpenHome = { showHome = true; showYou = true },
                         )
                         Tab.Knowledge -> KnowledgeScreen(vm, onCite = { citeSheet = it })
                         Tab.Ask -> AskScreen(vm, onCite = { citeSheet = it })
@@ -381,7 +381,7 @@ private fun Shell(vm: AppVm) {
         ToastHost(vm, modifier = Modifier.align(Alignment.TopCenter).zIndex(5f))
     }
 
-    if (showYou) YouSheet(vm, onDismiss = { showYou = false })
+    if (showYou) YouSheet(vm, onDismiss = { showYou = false; showHome = false }, scrollToHome = showHome)
     ApprovalPrompt(vm)
     citeSheet?.let { SourceSheet(it, onDismiss = { citeSheet = null }) }
 }
@@ -547,16 +547,17 @@ private fun MeetingsHost(
     backEnabled: Boolean,
     onCite: (app.marginalia.Source) -> Unit,
     onAsk: (String) -> Unit,
+    onOpenHome: () -> Unit,
 ) {
     if (!sideBySide) {
-        MeetingsScreen(vm, onRecord = onRecord)
+        MeetingsScreen(vm, onRecord = onRecord, onOpenHome = onOpenHome)
         return
     }
     val p = pal
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val listW = (maxWidth * 0.38f).coerceIn(290.dp, 400.dp)
         Row(Modifier.fillMaxSize()) {
-            Box(Modifier.width(listW).fillMaxHeight()) { MeetingsScreen(vm, onRecord = onRecord, selectedId = review?.meeting?.id) }
+            Box(Modifier.width(listW).fillMaxHeight()) { MeetingsScreen(vm, onRecord = onRecord, selectedId = review?.meeting?.id, onOpenHome = onOpenHome) }
             Box(Modifier.width(1.dp).fillMaxHeight().background(p.line))
             androidx.compose.animation.AnimatedContent(
                 targetState = review,
@@ -660,7 +661,6 @@ private fun ToastHost(vm: AppVm, modifier: Modifier = Modifier) {
         if (current === t) current = null
     }
     val still = reducedMotion()
-    val inMs = if (still) 0 else 220
     val outMs = if (still) 0 else 180
     BoxWithConstraints(
         modifier

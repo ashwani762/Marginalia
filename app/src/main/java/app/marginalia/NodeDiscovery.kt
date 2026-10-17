@@ -1,3 +1,5 @@
+// Finds home compute nodes on the local network through NSD.
+
 package app.marginalia
 
 import android.content.Context
@@ -9,12 +11,12 @@ import android.os.Looper
 import android.util.Log
 import java.net.Inet4Address
 
-/** A home computer found on the network, as the core wants to hear about it. */
+/** A home compute node found on the network, as the core wants to hear about it. */
 data class SeenNode(val name: String, val id: String, val port: Int, val addrs: List<String>)
 
 /**
- * Finds `marginalia-node` computers on the local network and tells [report] about each one.
- * It only runs while the app is on screen, and does nothing but listen for the computers' announcements.
+ * Finds `marginalia-node` compute nodes on the local network and tells [report] about each one.
+ * It only runs while the app is on screen, and does nothing but listen for the compute nodes' announcements.
  * Every NsdManager callback is hopped onto the main thread so this class needs no locks.
  */
 class NodeDiscovery(context: Context, private val report: (SeenNode) -> Unit) {
@@ -37,7 +39,7 @@ class NodeDiscovery(context: Context, private val report: (SeenNode) -> Unit) {
     private val refresh = object : Runnable {
         override fun run() {
             if (!running) return
-            // Tell the core again now and then so a computer that stays put does not look gone.
+            // Tell the core again now and then so a compute node that stays put does not look gone.
             seen.values.forEach(report)
             main.postDelayed(this, REPEAT_MS)
         }

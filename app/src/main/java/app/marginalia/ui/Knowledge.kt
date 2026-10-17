@@ -1,17 +1,13 @@
+// The Knowledge screen: imported documents, passages and import progress.
+
 @file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 
 package app.marginalia.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -37,7 +33,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
-import androidx.compose.material.icons.rounded.Article
+import androidx.compose.material.icons.automirrored.rounded.Article
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Event
@@ -63,14 +59,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.text.style.TextOverflow
@@ -232,7 +226,7 @@ private fun IngestRow(j: IngestJob, modifier: Modifier = Modifier) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (j.active) ThinkingDots(color = p.accentInk) else Icon(
-            if (j.stage == "failed") Icons.Rounded.UploadFile else Icons.Rounded.Article, null,
+            if (j.stage == "failed") Icons.Rounded.UploadFile else Icons.AutoMirrored.Rounded.Article, null,
             tint = if (j.stage == "failed") p.danger else p.success, modifier = Modifier.size(20.dp),
         )
         Spacer(Modifier.width(12.dp))
@@ -267,7 +261,7 @@ private fun iconFor(kind: String): ImageVector = when (kind) {
     "code" -> Icons.Rounded.Code
     "image" -> Icons.Rounded.Image
     "audio" -> Icons.Rounded.AudioFile
-    else -> Icons.Rounded.Article
+    else -> Icons.AutoMirrored.Rounded.Article
 }
 
 @Composable

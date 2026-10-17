@@ -744,11 +744,6 @@ impl Store {
         Ok(rows)
     }
 
-    pub fn clear_sections(&self, meeting_id: i64) -> Result<()> {
-        self.conn.lock().execute("DELETE FROM meeting_sections WHERE meeting_id=?1", params![meeting_id])?;
-        Ok(())
-    }
-
     /// A meeting whose notes are completely written (summary, title, index). Recovery leaves it alone.
     pub fn mark_wrapped(&self, id: i64) -> Result<()> {
         self.conn.lock().execute(

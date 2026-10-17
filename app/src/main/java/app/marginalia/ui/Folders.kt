@@ -1,3 +1,5 @@
+// Folder colours and the folder chip.
+
 @file:OptIn(ExperimentalMaterial3Api::class)
 
 package app.marginalia.ui

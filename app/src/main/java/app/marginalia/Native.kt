@@ -1,3 +1,5 @@
+// The JNI bridge to the Rust core (the marginalia_core library).
+
 package app.marginalia
 
 import android.os.Build

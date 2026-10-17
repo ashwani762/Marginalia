@@ -1,3 +1,5 @@
+// Microphone recording as a foreground service, feeding audio into the native core.
+
 package app.marginalia
 
 import java.io.File

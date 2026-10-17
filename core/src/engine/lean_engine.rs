@@ -1,5 +1,5 @@
-//! The engine without llama.cpp (Android). Chat and embeddings are attached from outside
-//! (LiteRT-LM); speech runs on whisper.cpp here.
+//! The `Engine` that owns the workers. Chat and embeddings are attached from outside (LiteRT-LM),
+//! and speech runs on whisper.cpp here.
 
 use super::*;
 use crate::config::{Paths, Settings};
@@ -78,17 +78,6 @@ impl Engine {
         }
         if let Some(e) = self.embed.write().take() {
             e.shutdown();
-        }
-    }
-
-    pub fn unload_whisper(&self) {
-        if let Some(old) = self.whisper.write().take() {
-            old.shutdown();
-        }
-    }
-    pub fn unload_llm(&self) {
-        if let Some(old) = self.llm.write().take() {
-            old.shutdown();
         }
     }
 }

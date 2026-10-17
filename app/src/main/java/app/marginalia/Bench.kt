@@ -1,3 +1,5 @@
+// Debug-only benchmark for the chat model on LiteRT-LM, started through the DEBUG_LITERT intent.
+
 package app.marginalia
 
 import android.content.Context
@@ -8,7 +10,6 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.ExperimentalFlags
-import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect

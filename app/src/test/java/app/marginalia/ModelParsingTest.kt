@@ -82,7 +82,7 @@ class ModelParsingTest {
         assertFalse(attic.approved)
         assertEquals("approved", old.state)
         assertTrue(old.pending.isEmpty())
-        assertEquals("Not allowed by this computer", app.marginalia.ui.statusOf(attic).first)
+        assertEquals("Not allowed by this compute node", app.marginalia.ui.statusOf(attic).first)
         assertEquals("Waiting", app.marginalia.ui.statusOf(den).first)
         assertEquals("76a8 ae41", app.marginalia.ui.shortId("76a8ae41ffff0000"))
         assertEquals("", app.marginalia.ui.shortId(""))
@@ -107,14 +107,56 @@ class ModelParsingTest {
     }
 
     @Test fun trustSummaryWords() {
-        assertEquals("Connected to 3 computers", trustSummary(3, 0))
-        assertEquals("Connected to 2 computers, 1 is waiting for approval", trustSummary(2, 1))
-        assertEquals("Connected to 1 computer, 2 are waiting for approval", trustSummary(1, 2))
+        assertEquals("Connected to 3 compute nodes", trustSummary(3, 0))
+        assertEquals("Connected to 2 compute nodes, 1 is waiting for approval", trustSummary(2, 1))
+        assertEquals("Connected to 1 compute node, 2 are waiting for approval", trustSummary(1, 2))
         assertEquals("Waiting for approval", trustSummary(0, 1))
     }
 
     @Test fun unpairedFoundSkipsPaired() {
         val n = HomeComputers.from(JSONObject("""{"paired":[{"fp":"76a8ae41ffff"}],"found":[{"id":"76a8ae41","name":"a","addrs":[]},{"id":"0123","name":"b","addrs":[]}]}"""))
-        assertEquals(listOf("b"), app.marginalia.ui.unpairedFound(n).map { it.name })
+        assertEquals(listOf("b"), unpairedFound(n).map { it.name })
+    }
+
+    private fun nodes(json: String) = HomeComputers.from(JSONObject(json))
+
+    @Test fun offerSkipsDismissedButShowsNewComputers() {
+        val n = nodes("""{"enabled":true,"paired":[],"found":[{"id":"AA11","name":"falcon","addrs":[]},{"id":"bb22","name":"hawk","addrs":[]}]}""")
+        assertEquals(listOf("falcon", "hawk"), computersToOffer(n, emptySet()).map { it.name })
+        // The key is lower case, so the saved set matches whatever case the id comes in.
+        assertEquals(listOf("hawk"), computersToOffer(n, setOf("aa11")).map { it.name })
+        assertTrue(computersToOffer(n, setOf("aa11", "bb22")).isEmpty())
+        val later = nodes("""{"enabled":true,"paired":[],"found":[{"id":"aa11","name":"falcon","addrs":[]},{"id":"cc33","name":"owl","addrs":[]}]}""")
+        assertEquals(listOf("owl"), computersToOffer(later, setOf("aa11", "bb22")).map { it.name })
+    }
+
+    @Test fun offerSkipsPairedAndSwitchedOff() {
+        val paired = nodes("""{"enabled":true,"paired":[{"fp":"aa11ffff"}],"found":[{"id":"aa11","name":"falcon","addrs":[]}]}""")
+        assertTrue(computersToOffer(paired, emptySet()).isEmpty())
+        val off = nodes("""{"enabled":false,"paired":[],"found":[{"id":"aa11","name":"falcon","addrs":[]}]}""")
+        assertTrue(computersToOffer(off, emptySet()).isEmpty())
+    }
+
+    @Test fun computerWithoutIdIsRememberedByName() {
+        val f = FoundComputer("", " Falcon ", listOf("192.168.1.5"))
+        assertEquals("name:falcon", foundKey(f))
+        val n = HomeComputers(enabled = true, found = listOf(f))
+        assertTrue(computersToOffer(n, setOf(foundKey(f))).isEmpty())
+    }
+
+    @Test fun offerTitleCounts() {
+        assertEquals("1 compute node found on your network", offerTitle(1))
+        assertEquals("3 compute nodes found on your network", offerTitle(3))
+    }
+
+    @Test fun chipTextForZeroOneAndSeveralOnline() {
+        fun c(name: String, online: Boolean, state: String = "approved") =
+            HomeComputer.from(JSONObject("""{"fp":"$name","name":"$name","online":$online,"state":"$state"}"""))
+        assertNull(onlineChipText(emptyList()))
+        // Paired but offline, waiting or refused show nothing.
+        assertNull(onlineChipText(listOf(c("falcon", false), c("hawk", true, "waiting"), c("owl", true, "refused"))))
+        assertEquals("Compute node: falcon", onlineChipText(listOf(c("falcon", true), c("hawk", false))))
+        assertEquals("Compute nodes: 2", onlineChipText(listOf(c("falcon", true), c("hawk", true), c("owl", false))))
+        assertEquals("Compute node", onlineChipText(listOf(c("", true))))
     }
 }

@@ -3,7 +3,7 @@ name = "marginalia-node"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "A stateless compute node: serves the phone app's AI work from a computer on the home network"
+description = "A stateless compute node: serves the phone app's AI work from a machine on your local network"
 license = "Apache-2.0"
 publish = false
 
@@ -33,4 +33,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "7"
 hostname = "0.4"
+# Model downloads (`marginalia-node models download`). Same version and TLS backend as the phone core.
+ureq = { version = "3", features = ["rustls"] }
 if-addrs = "0.13"

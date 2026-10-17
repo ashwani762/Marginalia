@@ -1,3 +1,5 @@
+// Export and restore of everything the person made, as one file.
+
 package app.marginalia
 
 import android.content.Context

@@ -1,3 +1,5 @@
+// Window size helpers so the layout adapts between phone and larger screens.
+
 package app.marginalia.ui
 
 import androidx.compose.foundation.layout.Box

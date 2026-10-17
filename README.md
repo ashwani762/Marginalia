@@ -1,86 +1,85 @@
-# Marginalia for Android
+# Marginalia
 
-The phone version of Marginalia: record a meeting, jot as it happens, and get notes, a summary and
-answers from your own documents. **Everything runs on the phone.** Nothing is sent anywhere.
+**Record a meeting, jot as it happens, and get the notes, a summary and answers from your own documents. Everything runs on the phone.**
+Optional *compute nodes* on your network make the AI faster while you are near them, and the phone carries on by itself when they are not.
+
+<p align="center">
+  <img src="docs/images/meetings.png" width="24%" alt="Meetings list with a compute node banner">
+  <img src="docs/images/live.png" width="24%" alt="Live recording with captions and jots">
+  <img src="docs/images/review.png" width="24%" alt="Written notes and transcript">
+  <img src="docs/images/ask.png" width="24%" alt="Ask with sources, answered on a compute node">
+</p>
+
+## What it does
+
+- **Live captions** in many languages, on the phone (whisper.cpp). Nothing is uploaded.
+- **Jots**: type a few words while people talk. The AI finds what was said around it and writes it up properly. Four kinds: note, action, decision, question.
+- **Notes after the meeting**: a summary and clean notes, also for meetings of two hours. Notes are written once the meeting ends, so recording stays light.
+- **Ask** your meetings and documents. Answers carry their sources. Add PDFs, pictures, web pages, text.
+- **Photos** of a whiteboard are read and added to the meeting.
+- **Speaker separation** after the meeting, with rename and merge. Tap a transcript line to hear it.
+- **Compute nodes** (optional): a small daemon on a PC does the heavy AI work for the phone, found automatically on the Wi-Fi, trusted with one tap.
+  Notes, answers and search run about six times faster. If a node is lost mid-answer, another node or the phone finishes it.
+- **Private by design**: no accounts, no cloud, no analytics. Nodes keep nothing and show only counts.
+
+<p align="center">
+  <img src="docs/images/nodes.png" width="24%" alt="Compute nodes in Settings">
+  <img src="docs/images/knowledge.png" width="24%" alt="Knowledge">
+  <img src="docs/images/tray.png" width="24%" alt="Tray icon details panel on the compute node">
+  <img src="docs/images/topbar.png" width="24%" alt="Tray icon in the Ubuntu top bar">
+</p>
 
 ## How it is built
 
-| Part | What runs it |
+| Part | Technology |
 | --- | --- |
-| Screens, gestures, notifications | Kotlin and Jetpack Compose (`app/`) |
-| Gemma 4 E2B: notes, summaries, answers, reading photos | Google **LiteRT-LM** on the GPU (CPU as a fallback), through a Kotlin bridge |
-| EmbeddingGemma 2 (270M): search | Google **LiteRT-LM** `EmbeddingEngine`, on the CPU |
-| Speech to text | **whisper.cpp** (small, multilingual) on the CPU |
-| Search, documents, meetings, folders, long-meeting logic | Rust (`core/`) |
+| App and screens | Kotlin, Jetpack Compose (`app/`) |
+| Meetings, notes, search, chat logic | Rust, SQLite with FTS5, a vector index (`core/`) |
+| AI on the phone | Gemma 4 E2B and EmbeddingGemma 2 on Google LiteRT-LM (GPU first), whisper.cpp for speech, sherpa-onnx for speakers |
+| Compute node | Rust, tokio, QUIC with pinned certificates, llama.cpp with CUDA or Vulkan (`compute-node/`) |
+| Tray icon | Rust, `ksni` on Linux, `tray-icon` on Windows, `egui` details panel |
 
-The Kotlin and Rust halves talk through four JNI calls (`app.marginalia.Native`) that carry JSON and raw
-audio.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the diagrams and how a job is routed and recovered.
 
-### Why Whisper is not on LiteRT
+## Getting started
 
-The LiteRT Whisper exports use a fixed 30 second window and a decoder that re-runs the whole sequence
-at every step. Live captions need the opposite: short snippets, decoded fast. whisper.cpp with a window
-trimmed to the snippet decodes 2 to 3 seconds of speech in about 0.7 seconds on the test phone (about
-0.3x real time). The two speech models built for LiteRT-LM (Qwen3-ASR 1.7B and Fun-ASR-Nano) are far
-larger and give nothing back in speed. If a streaming LiteRT speech model appears, it plugs in behind the
-same `WhisperHandle`.
+**The phone app** (Android 14 or newer, 8 GB of memory recommended): see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). In short
+`scripts/build-native.sh arm64`, `scripts/stage-models.sh`, `./gradlew assembleRelease`. The models are not in the repository.
 
-## Home computers (optional)
-
-`compute-node/` is a small daemon you can run on a computer at home (Linux now, Windows and Raspberry Pi planned).
-The phone finds it on the Wi-Fi by itself, asks you once "Trust this computer?", and then sends it the AI work it
-is slow at: notes and answers (about 90 tokens a second on an RTX 4060 against about 15 on the phone) and search
-vectors (hundreds a second against one). If no computer is around, or one stops answering, the phone does the work
-itself, so nothing depends on it. Nodes keep nothing about a job and show only counts and timings. See
-`compute-node/README.md` for how it works and `compute-node/DESIGN.md` for the plan (nodes that find and share
-work with each other).
+**A compute node on Linux**
 
 ```bash
-compute-node/build.sh          # CUDA build, or --cpu-only
-target/release/marginalia-node run
+compute-node/build.sh                      # CUDA build, or --cpu-only
+target/release/marginalia-node models download
+compute-node/packaging/install-linux.sh    # user service and tray icon at login
 ```
 
-## Build
+**A compute node on Windows**: `compute-node\windows\setup.ps1` (PowerShell, no bash). See [docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md).
 
-```bash
-# 1. Native libraries (needs the Android NDK and the Rust Android targets; cargo-ndk)
-scripts/build-native.sh            # arm64 (baseline + i8mm) and x86_64 (emulator)
+Open the app, **Settings, Compute nodes** (or the banner on the main screen), tap **Connect**. That is all.
 
-# 2. Models
-scripts/stage-models.sh            # link the models so Gradle embeds them in the APK
-./gradlew assembleRelease          # embedded models (about 3.1 GB)
+## Repository map
 
-# or, for development: a small APK and models pushed over USB
-./gradlew assembleDebug -Pmarginalia.embedModels=false
-scripts/push-models.sh
+```
+app/            Android app
+core/           Rust core for the phone
+compute-node/   protocol, node daemon, tray icon, Linux and Windows packaging
+scripts/        build and device helpers for the app
+vendor/         ggml and whisper.cpp for the phone core
+docs/           architecture, measurements, plans
 ```
 
-Models used: `gemma-4-E2B-it.litertlm` (litert-community/gemma-4-E2B-it-litert-lm),
-`embeddinggemma-2-text-270m.litertlm` (litert-community/embeddinggemma-2-text-270m-litert-lm),
-`ggml-small-q8_0.bin` (whisper.cpp).
+## Tests
 
-## Things worth knowing
+`cd core && cargo test --lib` (phone core), `cargo test -p marginalia-proto` (pairing, pinning, framing), `cargo test -p marginalia-node-tray`,
+`./gradlew :app:testDebugUnitTest`. Measurements on a real phone and the bugs found are in [docs/AUDIT.md](docs/AUDIT.md).
 
-- **Real time.** Live speech gets the processor first. Whisper decodes each snippet in well under its
-  own duration, so captions follow speech by under a second. Gemma runs on the GPU, so it does not
-  compete for the CPU cores speech needs.
-- **Closing the app.** Notes are written by a foreground service. Swipe the app away and the work
-  continues, and a notification says when it is done. If Android kills the process anyway, the next launch
-  finishes any meeting that was left half done.
-- **Long meetings.** Notes on finished stretches are written while recording, merged at the end, and
-  the summary is built from those, so nothing earlier is lost to the context window.
-- **Folders.** Meetings and documents can be filed in folders; Ask and Live Assistance can be limited to
-  one folder.
+## Status
 
-See `AUDIT.md` for the design and testing notes.
+Working and tested on an Android phone and Ubuntu: everything above. The compute node on Windows and the tray icon on Windows are written but
+not yet verified (see [compute-node/STATUS.md](compute-node/STATUS.md)). Planned: nodes that find and share work with each other,
+speech to text on nodes.
 
-## Tools
+## License
 
-```bash
-scripts/fetch-sherpa.sh     # the speaker separation library (about 50 MB, not committed)
-cd core && cargo test --lib # Rust tests, on the host
-./gradlew :app:testDebugUnitTest
-```
-
-Development switches (debug builds): a `tune.properties` file in the app's files folder accepts `mtp=true|false|auto`,
-`maxTokens=2048` and `embedGpu=true`. Debug intents are listed in `MainActivity.kt`.
+Apache-2.0. Third-party code under `vendor/` and `compute-node/vendor/` keeps its own licenses.

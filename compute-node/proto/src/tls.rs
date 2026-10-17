@@ -80,7 +80,7 @@ impl ServerCertVerifier for PinVerifier {
         let fp = fingerprint(end_entity.as_ref());
         *self.seen.lock().unwrap() = Some(fp.clone());
         match &self.pin {
-            Some(p) if *p != fp => Err(rustls::Error::General("this is not the paired computer".into())),
+            Some(p) if *p != fp => Err(rustls::Error::General("this is not the paired compute node".into())),
             _ => Ok(rustls::client::danger::ServerCertVerified::assertion()),
         }
     }

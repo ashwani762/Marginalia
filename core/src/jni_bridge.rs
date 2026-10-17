@@ -164,7 +164,7 @@ pub extern "system" fn Java_app_marginalia_Native_call<'l>(
 
 #[no_mangle]
 pub extern "system" fn Java_app_marginalia_Native_pushAudio<'l>(
-    mut env: JNIEnv<'l>,
+    env: JNIEnv<'l>,
     _class: JClass<'l>,
     samples: JShortArray<'l>,
     len: jint,
@@ -313,7 +313,7 @@ fn external_llm() -> LlmHandle {
         });
         let result = (|| {
             let vm = VM.get().ok_or_else(|| anyhow::anyhow!("no JVM"))?;
-            let mut env = vm.attach_current_thread()?;
+            let env = vm.attach_current_thread()?;
             let s = env.new_string(body.to_string())?;
             call_generator("start", "(JLjava/lang/String;)V", &[JValue::Long(id as i64), JValue::Object(&s)])?;
             let mut cancelled = false;

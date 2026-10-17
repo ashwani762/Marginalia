@@ -213,7 +213,7 @@ fn office_paragraphs(xml: &str, para_tag: &str, text_tag: &str, style_tag: Optio
                     if name == st {
                         for a in e.attributes().flatten() {
                             if a.key.as_ref() == "w:val" {
-                                style = a.unescape_value().map(|v| v.to_string()).unwrap_or_default();
+                                style = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).map(|v| v.to_string()).unwrap_or_default();
                             }
                         }
                     }
@@ -349,7 +349,7 @@ fn extract_xlsx(path: &Path, stem: &str) -> Result<Extracted> {
                         cell_type.clear();
                         for a in e.attributes().flatten() {
                             if a.key.as_ref() == "t" {
-                                cell_type = a.unescape_value().map(|v| v.to_string()).unwrap_or_default();
+                                cell_type = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).map(|v| v.to_string()).unwrap_or_default();
                             }
                         }
                     }
@@ -540,7 +540,7 @@ fn extract_opendocument(path: &Path, stem: &str, ext: &str) -> Result<Extracted>
                         let mut level = 1u8;
                         for a in e.attributes().flatten() {
                             if a.key.as_ref() == "text:outline-level" {
-                                level = a.unescape_value().ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+                                level = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok().and_then(|v| v.parse().ok()).unwrap_or(1);
                             }
                         }
                         heading_level = Some(level.clamp(1, 6));

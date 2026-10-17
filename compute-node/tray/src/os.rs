@@ -11,13 +11,17 @@ fn in_path(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&paths).map(|d| d.join(name)).find(|p| p.is_file())
 }
 
-/// The node program: next to this one first, then PATH, then `~/.local/bin` (a login session often
-/// does not have it in PATH).
+/// The node program: next to this one first, then PATH, then the Windows install folder, then `~/.local/bin` (a login
+/// session often does not have it in PATH).
 pub fn find_node() -> Option<PathBuf> {
     let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(NODE_EXE))).filter(|p| p.is_file());
     beside.or_else(|| in_path(NODE_EXE)).or_else(|| {
-        let home = std::env::var_os("HOME").map(PathBuf::from)?;
-        Some(home.join(".local/bin").join(NODE_EXE)).filter(|p| p.is_file())
+        // Where setup.ps1 installs it on Windows.
+        let installed = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("MarginaliaNode").join(NODE_EXE)).filter(|p| p.is_file());
+        installed.or_else(|| {
+            let home = std::env::var_os("HOME").map(PathBuf::from)?;
+            Some(home.join(".local/bin").join(NODE_EXE)).filter(|p| p.is_file())
+        })
     })
 }
 

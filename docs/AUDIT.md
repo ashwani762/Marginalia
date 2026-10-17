@@ -21,7 +21,7 @@ llama.cpp was tried first and has been removed.
 - Gemma E2B on the GPU: decode 8.7 to 9.7 tokens a second, 12.0 to 12.6 with speculative decoding (MTP). MTP is on by
   default on the GPU and is a switch in Settings.
 - Gemma E2B on the CPU: prefill 103, decode 10.2. First GPU start takes 17 to 35 s, about 10 s once the program cache exists.
-- Speech accuracy (small q8, FLEURS, 20 clips each, computer CPU): English 7.0% word error, German 7.8%, French 13.9%, Spanish 5.4%, Hindi 56.5%. Auto-detect picked the right language on 98 of 100 clips (two Hindi clips came out as Urdu), so the language is now settled from the first few sentences of each recording. The larger large-v3-turbo model reads Hindi clearly better but ran at 4.5 times real time on this phone, so it is not shipped.
+- Speech accuracy (small q8, FLEURS, 20 clips each, PC CPU): English 7.0% word error, German 7.8%, French 13.9%, Spanish 5.4%, Hindi 56.5%. Auto-detect picked the right language on 98 of 100 clips (two Hindi clips came out as Urdu), so the language is now settled from the first few sentences of each recording. The larger large-v3-turbo model reads Hindi clearly better but ran at 4.5 times real time on this phone, so it is not shipped.
 - Memory: 1.2 to 1.5 GB PSS with both models loaded. The models are unloaded a minute after all work ends.
 - Photo read while recording: about 12 s, no queueing.
 - A 120 minute test meeting was written up with the app closed and the screen off (about 12 minutes, no crash).
@@ -96,7 +96,7 @@ Bugs this found, all fixed:
 - Document viewer with the original PDF or picture.
 - Notes use the names given to speakers.
 
-## Home computers
+## Compute nodes
 
 - Phone to node over the real Wi-Fi: pairing, status (7 to 14 ms round trip), search and chat jobs, discovery with
   Android NSD (found by itself in about a second), trust, lock and approve, block.
@@ -104,7 +104,7 @@ Bugs this found, all fixed:
   passages: 0.06 s against 0.68 s.
 - The node's search vectors and the phone's own agree with a cosine of 0.98 to 0.99 for the same text (different
   quantisation), so documents embedded in either place still search together.
-- The phone could not reach the PC once because its network neighbour entry had failed until the PC sent it a packet.
+- The phone could not reach the node machine once because its network neighbour entry had failed until the node machine sent it a packet.
   The phone retries every 20 seconds and does the work itself in the meantime.
 - A block follows the phone's certificate, so a phone that clears the app's data gets a new identity. Lock the node to stop that.
 

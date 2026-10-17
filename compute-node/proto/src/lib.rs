@@ -1,4 +1,4 @@
-//! What the phone app and a home compute node say to each other.
+//! What the phone app and a helper compute node say to each other.
 //!
 //! One QUIC connection per pair of devices, one stream per request. Both sides prove who they are
 //! with a self-signed certificate that the other side has pinned when they were paired (see [`pair`]).

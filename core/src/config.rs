@@ -50,7 +50,6 @@ pub enum NoteStyle {
 pub struct Settings {
     pub chat_model: ChatModel,
     pub whisper_model: WhisperModel,
-    pub use_gpu: bool,
     /// ISO language code or "auto".
     pub language: String,
     pub note_style: NoteStyle,
@@ -69,7 +68,6 @@ impl Default for Settings {
         Self {
             chat_model: ChatModel::GemmaE2B,
             whisper_model: WhisperModel::Small,
-            use_gpu: false,
             language: "auto".into(),
             note_style: NoteStyle::Standard,
             live_assistance: true,

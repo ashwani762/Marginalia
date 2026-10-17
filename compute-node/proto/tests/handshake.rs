@@ -300,7 +300,7 @@ async fn an_impostor_at_the_paired_address_is_rejected() {
         let ep = client::new_endpoint().unwrap();
         let (_, pin) = try_pairing(&ep, &phone, real.addr, "K7QM-4TDX").await.unwrap();
 
-        // Another computer takes over the address (or answers instead). Same name, other key.
+        // Another device takes over the address (or answers instead). Same name, other key.
         let impostor = FakeNode::start("K7QM-4TDX");
         assert_ne!(impostor.fp(), pin);
         assert!(pinned_status(&ep, &phone, impostor.addr, &pin).await.is_err());
@@ -582,7 +582,7 @@ async fn pair_and_status_replies_round_trip() {
     within(roundtrip(vec![PairReply::Ok { node_name: "n".into(), proof: [1; 32] }, PairReply::Refused("no".into())])).await;
     within(roundtrip(vec![StatusReply {
         proto: PROTO_VERSION,
-        node_name: "home".into(),
+        node_name: "node".into(),
         version: "0.1.0".into(),
         caps: Capabilities { chat: Some("gemma".into()), embed: Some("emb".into()), embed_dim: 768, chat_tok_s: 41.5, embed_per_s: 250.0 },
         running: 1,

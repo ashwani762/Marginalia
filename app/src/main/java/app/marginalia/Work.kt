@@ -1,3 +1,5 @@
+// Background work bookkeeping: the foreground service, restart job and notifications for long jobs.
+
 package app.marginalia
 
 import android.app.Notification
@@ -204,7 +206,6 @@ object Notifier {
     const val WORK = "work"
     const val READY = "ready"
     const val ACTION_OPEN_MEETING = "app.marginalia.OPEN_MEETING"
-    const val ACTION_OPEN_KNOWLEDGE = "app.marginalia.OPEN_KNOWLEDGE"
 
     fun channels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)

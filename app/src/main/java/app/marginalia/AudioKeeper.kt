@@ -1,3 +1,5 @@
+// Writes the meeting audio to a small AAC file so it can be played back and used to tell speakers apart.
+
 package app.marginalia
 
 import android.content.Context

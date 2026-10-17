@@ -360,8 +360,7 @@ impl Kb {
         emit(IngestStage::Embedding { done: 0, total: 1 });
         let text = if caption.is_empty() { format!("Image: {title}") } else { caption.clone() };
         // The caption lives in the text embedding space, which is what queries use.
-        // (A raw projector embedding is available via EmbedHandle::embed_image, but
-        // mean-pooling only the vision tokens is not aligned with text queries.)
+        // (A raw image embedding would not be aligned with text queries.)
         let vector = embed.embed_one(&format_document(&title, &text), EmbedKind::Raw)?;
         let doc_id = self.store.insert_document(&title, &path.display().to_string(), DocKind::Image, hash, bytes, text.split_whitespace().count() as i64)?;
         let new = vec![NewChunk {
@@ -724,10 +723,6 @@ impl Kb {
         }
         tracing::debug!("search '{}' -> {} hits in {:?}", snippet_of(query, 40), selected.len(), started.elapsed());
         Ok(selected)
-    }
-
-    pub fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        self.embedder()?.embed_one(text, EmbedKind::Query)
     }
 }
 

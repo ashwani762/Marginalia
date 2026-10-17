@@ -1,3 +1,6 @@
+// The one view model of the app. It holds the state every screen shows, sends commands to the native core
+// through Backend and turns the core's JSON events into that state.
+
 package app.marginalia
 
 import android.app.Application
@@ -36,6 +39,8 @@ class AppVm(private val app: Application) {
     /** Lives as long as the process, not as long as a screen. */
     private val viewModelScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     val backend = Backend()
+
+    // ------------------------------------------------------------------ state shown by the screens
 
     private val _boot = MutableStateFlow<Boot>(Boot.Loading("Starting", 0, 3))
     val boot: StateFlow<Boot> = _boot.asStateFlow()
@@ -496,9 +501,9 @@ class AppVm(private val app: Application) {
         resumeUnfinished()
     }
 
-    /** The window left the screen: stop listening for home computers. */
+    /** The window left the screen: stop listening for home compute nodes. */
     fun onBackground() {
-        // While notes are being written in the background the computers are still looked for, because the
+        // While notes are being written in the background the compute nodes are still looked for, because the
         // write-up may be running on one of them and one may have moved to a new address.
         if (!Work.busy) discovery.stop()
         nodeWatch?.cancel(); nodeWatch = null
@@ -516,9 +521,6 @@ class AppVm(private val app: Application) {
             Work.done("resume")
         }
     }
-
-    private fun enginePref(): String =
-        ctx.getSharedPreferences("engine", Context.MODE_PRIVATE).getString("chat", "auto") ?: "auto"
 
     /** Chooses how Gemma runs: "auto", "litert-cpu" or "litert-gpu". Takes effect on the next start. */
     fun setEngine(name: String) {
@@ -647,7 +649,7 @@ class AppVm(private val app: Application) {
         }
     }
 
-    // ------------------------------------------------------------------ meetings
+    // ------------------------------------------------------------------ refresh
 
     fun refreshAll() {
         refreshMeetings(); refreshDocs(); refreshStats(); refreshSuggestions(); refreshPrefs(); refreshFolders()
@@ -719,6 +721,8 @@ class AppVm(private val app: Application) {
         askFolder.value = folder
         refreshSuggestions()
     }
+
+    // ------------------------------------------------------------------ meetings: list, recording, review, delete
 
     fun refreshMeetings() {
         viewModelScope.launch {
@@ -823,19 +827,6 @@ class AppVm(private val app: Application) {
             }
         }
     }
-
-    private var notesJob: Job? = null
-
-    fun setNotes(text: String) {
-        _live.update { it?.copy(notes = text) }
-        notesJob?.cancel()
-        notesJob = viewModelScope.launch {
-            delay(250)
-            runCatching { backend.call("meeting.notes", JSONObject().put("text", text)) }
-        }
-    }
-
-    fun clearNewAssist() = _live.update { it?.copy(newAssist = false) }
 
     fun setStyle(style: String) {
         _prefs.update { it.copy(noteStyle = style) }
@@ -1129,6 +1120,8 @@ class AppVm(private val app: Application) {
         _ingest.update { l -> if (l.any { it.job == job.job }) l.map { if (it.job == job.job) job else it } else l + job }
     }
 
+    // ------------------------------------------------------------------ photos, jots and questions during a meeting
+
     /**
      * A photo from the camera or gallery. It joins the meeting being recorded, or the one open
      * for review; Gemma describes it and the description becomes searchable.
@@ -1222,6 +1215,8 @@ class AppVm(private val app: Application) {
         _review.update { d -> d?.copy(photos = d.photos.filter { it.id != p.id }) }
         viewModelScope.launch { runCatching { backend.call("meeting.photo_delete", JSONObject().put("id", p.id)) } }
     }
+
+    // ------------------------------------------------------------------ adding to the library
 
     fun ingestUrl(url: String) {
         val u = url.trim()
@@ -1341,17 +1336,17 @@ class AppVm(private val app: Application) {
         setPref("appearance", v)
     }
 
-    // ------------------------------------------------------------------ home computers
+    // ------------------------------------------------------------------ home compute nodes
 
     private val _nodes = MutableStateFlow(HomeComputers())
     val nodes: StateFlow<HomeComputers> = _nodes.asStateFlow()
     private val _pairing = MutableStateFlow(false)
     val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
 
-    /** Reports each computer that network discovery finds to the core. */
+    /** Reports each compute node that network discovery finds to the core. */
     private val discovery = NodeDiscovery(app) { n ->
         viewModelScope.launch(Dispatchers.Default) {
-            // A computer found while the app is still starting is reported as soon as the core is up.
+            // A compute node found while the app is still starting is reported as soon as the core is up.
             var waited = 0
             while (!nativeReady && waited < 120_000) { delay(250); waited += 250 }
             if (!nativeReady) return@launch
@@ -1362,8 +1357,8 @@ class AppVm(private val app: Application) {
     }
 
     /**
-     * Tells the core when the network under the phone changes, so work running on a home computer
-     * moves to another computer or back to the phone at once instead of after a timeout.
+     * Tells the core when the network under the phone changes, so work running on a home compute node
+     * moves to another compute node or back to the phone at once instead of after a timeout.
      */
     private val netWatch = object : android.net.ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: android.net.Network) { reportNetwork(true) }
@@ -1380,7 +1375,7 @@ class AppVm(private val app: Application) {
     }
 
     init {
-        // Background work (notes being written with the app closed) keeps looking for home computers so
+        // Background work (notes being written with the app closed) keeps looking for home compute nodes so
         // it can use them, and the search stops again when the work ends and the app is not on screen.
         viewModelScope.launch {
             Work.items.collect { items ->
@@ -1395,7 +1390,7 @@ class AppVm(private val app: Application) {
     /** Phones (by id) the person said "Not now" to or already answered. They are forgotten once the phone stops asking. */
     private val _dismissed = MutableStateFlow<Set<String>>(emptySet())
 
-    /** The next phone waiting for the person's yes or no, from any approved computer. */
+    /** The next phone waiting for the person's yes or no, from any approved compute node. */
     val approvalAsk: StateFlow<ApprovalAsk?> = combine(_nodes, _dismissed) { n, gone -> groupApprovals(n.paired, gone) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
@@ -1410,20 +1405,41 @@ class AppVm(private val app: Application) {
 
     private var nodeWatch: Job? = null
 
-    /** While the app is on screen and a computer is paired, look at the list now and then so a phone's request shows up wherever the person is. */
+    /** Found compute nodes the person said "Not now" to, by [foundKey]. Kept on the phone so they are not asked again on every launch. */
+    private val _foundGone = MutableStateFlow(enginePrefs.getStringSet("found_dismissed", emptySet()).orEmpty().toSet())
+
+    /** Found compute nodes the Meetings banner should offer to connect to. */
+    val connectOffer: StateFlow<List<FoundComputer>> = combine(_nodes, _foundGone) { n, gone -> computersToOffer(n, gone) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** "Not now" on the banner: these compute nodes are not offered again. A new compute node is. */
+    fun dismissOffer(list: List<FoundComputer>) {
+        val keys = list.map { foundKey(it) }.toSet()
+        _foundGone.update { it + keys }
+        enginePrefs.edit().putStringSet("found_dismissed", _foundGone.value).apply()
+    }
+
+    /**
+     * While the app is on screen, look at the list of home compute nodes every few seconds, also when none is paired,
+     * so a request from another phone and a new compute node on the network both show up wherever the person is.
+     * It stops when the app goes to the background.
+     */
     private fun startNodeWatch() {
         if (nodeWatch?.isActive == true) return
         nodeWatch = viewModelScope.launch {
             while (!nativeReady) delay(250)
             loadNodes()
+            // The search was only just started, so look once more soon for what it found.
+            delay(1500)
+            loadNodes()
             while (true) {
                 delay(5000)
-                if (_nodes.value.paired.isNotEmpty()) loadNodes()
+                loadNodes()
             }
         }
     }
 
-    /** Keeps the list of home computers fresh. Call it from a screen that shows them, and cancel it when that screen closes. */
+    /** Keeps the list of home compute nodes fresh. Call it from a screen that shows them, and cancel it when that screen closes. */
     suspend fun watchNodes() {
         while (!nativeReady) delay(250)
         while (true) {
@@ -1432,7 +1448,7 @@ class AppVm(private val app: Application) {
         }
     }
 
-    /** Pairs with a computer. [onDone] says whether it worked. */
+    /** Pairs with a compute node. [onDone] says whether it worked. */
     fun pairNode(addr: String, id: String, code: String, onDone: (Boolean) -> Unit = {}) {
         if (_pairing.value) return
         _pairing.value = true
@@ -1448,7 +1464,7 @@ class AppVm(private val app: Application) {
                 } else {
                     ok = true
                     val name = (res as? JSONObject)?.optString("name").orEmpty()
-                    toast("success", if (name.isBlank()) "Computer added." else "$name is added.")
+                    toast("success", if (name.isBlank()) "Compute node added." else "$name is added.")
                 }
             } catch (e: Exception) {
                 toast("error", e.message?.takeIf { it.isNotBlank() } ?: "That did not work. Check the code and try again.")
@@ -1459,7 +1475,7 @@ class AppVm(private val app: Application) {
         }
     }
 
-    /** Asks a computer to trust this phone. The person has already said yes. [onDone] says whether it worked. */
+    /** Asks a compute node to trust this phone. The person has already said yes. [onDone] says whether it worked. */
     fun trustNode(addr: String, id: String, onDone: (Boolean) -> Unit = {}) {
         if (_pairing.value) return
         _pairing.value = true
@@ -1488,7 +1504,7 @@ class AppVm(private val app: Application) {
         }
     }
 
-    /** Answers another phone's request on every computer where it is pending. */
+    /** Answers another phone's request on every compute node where it is pending. */
     fun decideNode(ask: ApprovalAsk, allow: Boolean) {
         _dismissed.update { it + ask.who }
         viewModelScope.launch {
@@ -1504,13 +1520,13 @@ class AppVm(private val app: Application) {
                 _dismissed.update { it - ask.who }
                 toast("error", failed)
             } else if (allow) {
-                toast("success", "${ask.phone.ifBlank { "That phone" }} can use ${ask.computers.size.let { if (it == 1) "the computer" else "$it computers" }}")
+                toast("success", "${ask.phone.ifBlank { "That phone" }} can use ${ask.computers.size.let { if (it == 1) "the compute node" else "$it compute nodes" }}")
             }
             loadNodes()
         }
     }
 
-    /** Asks each computer in turn to trust this phone, then says how it went in one toast. */
+    /** Asks each compute node in turn to trust this phone, then says how it went in one toast. */
     fun trustAll(targets: List<FoundComputer>, onDone: (Boolean) -> Unit = {}) {
         if (_pairing.value || targets.isEmpty()) return
         _pairing.value = true
@@ -1540,9 +1556,9 @@ class AppVm(private val app: Application) {
         viewModelScope.launch {
             try {
                 backend.call("nodes.forget", JSONObject().put("fp", fp))
-                toast("info", "Computer removed.")
+                toast("info", "Compute node removed.")
             } catch (e: Exception) {
-                toast("error", e.message ?: "Could not remove that computer.")
+                toast("error", e.message ?: "Could not remove that compute node.")
             }
             loadNodes()
         }
@@ -1577,12 +1593,12 @@ fun formatClock(secs: Double): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
 }
 
-/** One sentence for the result of trusting several computers. Needs at least one that answered. */
+/** One sentence for the result of trusting several compute nodes. Needs at least one that answered. */
 fun trustSummary(approved: Int, waiting: Int): String {
-    fun computers(n: Int) = if (n == 1) "1 computer" else "$n computers"
+    fun computers(n: Int) = if (n == 1) "1 compute node" else "$n compute nodes"
     return when {
         waiting == 0 -> "Connected to ${computers(approved)}"
-        approved == 0 -> if (waiting == 1) "Waiting for approval" else "Waiting for approval on $waiting computers"
+        approved == 0 -> if (waiting == 1) "Waiting for approval" else "Waiting for approval on $waiting compute nodes"
         else -> "Connected to ${computers(approved)}, $waiting ${if (waiting == 1) "is" else "are"} waiting for approval"
     }
 }

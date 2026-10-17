@@ -1,3 +1,5 @@
+// Photo shrinking and audio or video conversion helpers.
+
 package app.marginalia
 
 import android.content.Context

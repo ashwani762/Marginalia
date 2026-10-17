@@ -1,3 +1,5 @@
+// The single activity. It hosts the Compose UI and handles share intents and the debug-only test intents.
+
 package app.marginalia
 
 import android.content.Intent
@@ -15,7 +17,6 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import app.marginalia.ui.App
-import app.marginalia.ui.MarginaliaTheme
 import app.marginalia.ui.isDark
 
 class MainActivity : ComponentActivity() {

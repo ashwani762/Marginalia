@@ -1,6 +1,6 @@
 # Compute nodes: design
 
-The phone app always works alone. A compute node is an optional helper on the home network that does the
+The phone app always works alone. A compute node is an optional helper on the local network that does the
 slow AI work faster. Nodes keep no user data: a job's text, audio and answer live in memory for the length
 of the request and are gone after it.
 

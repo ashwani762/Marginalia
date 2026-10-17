@@ -358,7 +358,7 @@ impl Panel {
         card(ui, |ui| {
             heading(ui, &format!("PHONES ({})", phones.len()));
             if phones.is_empty() {
-                ui.label(dim("No phones yet. Open the app on a phone, Settings, Home computers, or use Show pairing code."));
+                ui.label(dim("No phones yet. Open the app on a phone, Settings, Compute nodes, or use Show pairing code."));
             }
             let now = now_epoch();
             for p in phones {
@@ -433,7 +433,7 @@ impl Panel {
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new(code).font(FontId::monospace(30.0)).strong().color(TEXT));
             });
-            ui.label(dim("On the phone open Settings, Home computers, Add a computer, then type this code."));
+            ui.label(dim("On the phone open Settings, Compute nodes, Add a compute node, then type this code."));
             if let Some(a) = addresses.first() {
                 ui.label(dim(format!("Or add it by address: {a}")));
             }
@@ -498,7 +498,7 @@ impl Panel {
             ui.add_space(4.0);
             ui.label(dim(if starting { "It is loading its models. This can take a minute." } else { "Your phone uses its own speed until it is back." }));
             ui.add_space(14.0);
-            if !starting && finish(ui.add(egui::Button::new(RichText::new("Start node").size(14.0).color(TEXT)).fill(GREEN_BTN).min_size(Vec2::new(150.0, 34.0))), "Start marginalia-node on this computer") {
+            if !starting && finish(ui.add(egui::Button::new(RichText::new("Start node").size(14.0).color(TEXT)).fill(GREEN_BTN).min_size(Vec2::new(150.0, 34.0))), "Start marginalia-node on this machine") {
                 self.send(Cmd::Click(Action::Start));
             }
         });

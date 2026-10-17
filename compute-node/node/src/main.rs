@@ -6,6 +6,7 @@ mod discovery;
 mod engine;
 mod host;
 mod metrics;
+mod models_dl;
 mod probe;
 mod server;
 mod state;
@@ -23,7 +24,7 @@ struct Cli {
     /// Where the node keeps its identity and its list of paired phones.
     #[arg(long, global = true)]
     state_dir: Option<PathBuf>,
-    /// Port the local control channel listens on (this computer only).
+    /// Port the local control channel listens on (this machine only).
     #[arg(long, global = true, default_value_t = DEFAULT_PORT + 1)]
     admin_port: u16,
     #[command(subcommand)]
@@ -36,7 +37,7 @@ enum Cmd {
     Run {
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
-        /// The name phones see. Defaults to this computer's name.
+        /// The name phones see. Defaults to this machine's name.
         #[arg(long)]
         name: Option<String>,
         /// Folder holding gemma-4-E2B-it-Q4_0.gguf and embeddinggemma-2-Q8_0.gguf.
@@ -56,9 +57,9 @@ enum Cmd {
         #[arg(long)]
         lock: bool,
     },
-    /// New phones must be allowed before they can use this computer.
+    /// New phones must be allowed before they can use this compute node.
     Lock,
-    /// Any phone whose owner trusts this computer may use it (the default).
+    /// Any phone whose owner trusts this compute node may use it (the default).
     Unlock,
     /// Turn new chat and search jobs away for now. The models stay loaded and running jobs finish.
     Pause,
@@ -66,6 +67,11 @@ enum Cmd {
     Resume,
     /// Stop the running node: finish running jobs (up to 10 seconds), leave the network, exit.
     Stop,
+    /// List or download the model files the node serves.
+    Models {
+        #[command(subcommand)]
+        cmd: ModelsCmd,
+    },
     /// Show a one-time code to type on the phone.
     Pair,
     /// Show what the running node serves and which phones are paired.
@@ -98,6 +104,29 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ModelsCmd {
+    /// Show which model files are present, their sizes and the folder.
+    List {
+        /// The models folder. Defaults to the one `run` uses.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Download the model files from Hugging Face. Safe to stop and run again, it continues where it stopped.
+    /// Set the HF_TOKEN environment variable if a repository asks for a login.
+    Download {
+        /// The models folder. Defaults to the one `run` uses.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Only the chat model or only the search model.
+        #[arg(long, value_enum)]
+        only: Option<models_dl::Only>,
+        /// Which chat model. The node itself loads gemma-4-E2B-it-Q4_0.gguf unless told otherwise with `run --chat-model`.
+        #[arg(long, value_enum, default_value = "e2b")]
+        chat_model: models_dl::ChatChoice,
+    },
+}
+
 /// Resolves when the system asks the process to end (systemd stop, `kill`). Never on Windows.
 async fn terminated() {
     #[cfg(unix)]
@@ -120,10 +149,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let dir = state_dir(&cli);
     match &cli.cmd {
+        Cmd::Models { cmd } => match cmd {
+            ModelsCmd::List { dir } => models_dl::list(dir.clone())?,
+            ModelsCmd::Download { dir, only, chat_model } => models_dl::download(dir.clone(), *only, *chat_model)?,
+        },
         Cmd::Pair => {
             let r = admin::ask(cli.admin_port, json!({"cmd": "pair"})).await?;
-            println!("On the phone: Settings, Home computers, Add a computer. Type this code within {} minutes:\n\n    {}\n", r["minutes"], r["code"].as_str().unwrap_or(""));
-            println!("This computer is called {} and can be reached at:", r["name"]);
+            println!("On the phone: Settings, Compute nodes, Add a compute node. Type this code within {} minutes:\n\n    {}\n", r["minutes"], r["code"].as_str().unwrap_or(""));
+            println!("This node is called {} and can be reached at:", r["name"]);
             for a in r["addresses"].as_array().into_iter().flatten() {
                 println!("    {}", a.as_str().unwrap_or(""));
             }
@@ -157,8 +190,15 @@ async fn main() -> Result<()> {
                 store.set_locked(true)?;
             }
             let locked_before = store.locked();
-            let name = name.clone().unwrap_or_else(|| hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|_| "home-node".into()));
-            let models_dir = models.clone().or_else(|| dirs::data_dir().map(|d| d.join("marginalia/models"))).unwrap_or_default();
+            let name = name.clone().unwrap_or_else(|| hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|_| "helper-node".into()));
+            let models_dir = models.clone().unwrap_or_else(models_dl::default_dir);
+            let missing = models_dl::missing_for_run(&models_dir, chat_model.is_some(), embed_model.is_some());
+            if missing.len() == 2 {
+                anyhow::bail!("{}", models_dl::missing_message(&models_dir));
+            }
+            for m in &missing {
+                tracing::warn!("the {} model {} is not in {}, so this node will not do {} jobs. Get it with: marginalia-node models download --only {}", m.role, m.file, models_dir.display(), m.role, m.role);
+            }
             tracing::info!("loading models from {}", models_dir.display());
             let opts = host::Options { models_dir, chat_model: chat_model.clone(), embed_model: embed_model.clone(), cpu_only: *cpu, ctx: *ctx };
             let host = Arc::new(tokio::task::spawn_blocking(move || host::Host::start(&opts)).await??);

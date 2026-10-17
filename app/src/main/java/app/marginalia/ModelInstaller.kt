@@ -1,3 +1,5 @@
+// Unpacks the bundled models on first launch and says where they live.
+
 package app.marginalia
 
 import android.content.Context

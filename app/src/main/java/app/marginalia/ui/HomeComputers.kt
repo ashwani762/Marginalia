@@ -1,3 +1,5 @@
+// Settings and prompts for home computers that can do the AI work faster than the phone.
+
 @file:OptIn(ExperimentalMaterial3Api::class)
 
 package app.marginalia.ui
@@ -66,7 +68,9 @@ import androidx.compose.ui.unit.dp
 import app.marginalia.AppVm
 import app.marginalia.FoundComputer
 import app.marginalia.HomeComputer
-import app.marginalia.HomeComputers
+import app.marginalia.offerTitle
+import app.marginalia.onlineChipText
+import app.marginalia.unpairedFound
 import kotlin.math.roundToInt
 
 /** Words a second, worked out from the AI's tokens a second (a word is a little over one token). */
@@ -75,7 +79,7 @@ internal fun wordsPerSecond(tokPerSec: Double): Int = (tokPerSec * 0.75).roundTo
 /** What the phone says about one paired computer: a status line, and a detail line if there is one. */
 internal fun statusOf(c: HomeComputer): Pair<String, String?> {
     if (c.state == "waiting") return "Waiting" to null
-    if (c.state == "refused") return "Not allowed by this computer" to null
+    if (c.state == "refused") return "Not allowed by this compute node" to null
     val status = when {
         !c.online -> "Not reachable on this network"
         c.chatTokPerSec >= 20.0 -> "Online, fast"
@@ -89,11 +93,7 @@ internal fun statusOf(c: HomeComputer): Pair<String, String?> {
     return status to detail
 }
 
-internal const val WAITING_HELP = "Waiting for approval. Open the app on a phone that already uses these computers, or run marginalia-node approve on the computer."
-
-/** Computers the network search has seen that are not paired yet. */
-internal fun unpairedFound(n: HomeComputers): List<FoundComputer> =
-    n.found.filter { f -> n.paired.none { f.id.isNotBlank() && it.fp.startsWith(f.id, ignoreCase = true) } }
+internal const val WAITING_HELP = "Waiting for approval. Open the app on a phone that already uses these compute nodes, or run marginalia-node approve on the compute node."
 
 /** "falcon", "falcon and hawk", "a, b and c". */
 internal fun joinNames(names: List<String>): String = when (names.size) {
@@ -102,13 +102,13 @@ internal fun joinNames(names: List<String>): String = when (names.size) {
     else -> names.dropLast(1).joinToString(", ") + " and " + names.last()
 }
 
-/** The first 8 characters of a computer's id in two groups, like "76a8 ae41". Empty when there is no id. */
+/** The first 8 characters of a compute node's id in two groups, like "76a8 ae41". Empty when there is no id. */
 internal fun shortId(id: String): String = id.trim().take(8).chunked(4).joinToString(" ")
 
-/** The code the person types may have any case and a dash. The computer wants 8 letters and digits. */
+/** The code the person types may have any case and a dash. The compute node wants 8 letters and digits. */
 internal fun cleanCode(raw: String): String = raw.filter { it.isLetterOrDigit() }.uppercase().take(8)
 
-/** Text from the computer goes on screen, so it is kept to the house style. */
+/** Text from the compute node goes on screen, so it is kept to the house style. */
 private fun plain(s: String): String = s.replace("—", ", ").replace(";", ".").trim()
 
 @Composable
@@ -122,20 +122,20 @@ private fun NodeSwitch(checked: Boolean, onChange: (Boolean) -> Unit) {
     )
 }
 
-/** The "Home computers" part of the settings sheet. It keeps the list fresh for as long as it is on screen. */
+/** The "Compute nodes" part of the settings sheet. It keeps the list fresh for as long as it is on screen. */
 @Composable
-fun HomeComputersSection(vm: AppVm) {
+fun HomeComputersSection(vm: AppVm, modifier: Modifier = Modifier) {
     val p = pal
     val nodes by vm.nodes.collectAsState()
     var adding by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<HomeComputer?>(null) }
     LaunchedEffect(Unit) { vm.watchNodes() }
 
-    Column {
-        SectionLabel("Home computers", Modifier.padding(top = 22.dp), flush = true)
-        Text("Use a computer on your home network to make the AI faster. The phone keeps working on its own when none is around.", style = type.caption)
+    Column(modifier) {
+        SectionLabel("Compute nodes", Modifier.padding(top = 22.dp), flush = true)
+        Text("Use a compute node on your network to make the AI faster. The phone keeps working on its own when none is around.", style = type.caption)
         Spacer(Modifier.height(4.dp))
-        SettingRow("Use home computers when available") { NodeSwitch(nodes.enabled) { vm.setNodesEnabled(it) } }
+        SettingRow("Use compute nodes when available") { NodeSwitch(nodes.enabled) { vm.setNodesEnabled(it) } }
 
         nodes.paired.forEach { c ->
             Spacer(Modifier.height(8.dp))
@@ -155,14 +155,14 @@ fun HomeComputersSection(vm: AppVm) {
                 Modifier.fillMaxWidth().clip(shape).background(p.surface3).border(1.dp, p.line, shape).padding(start = 14.dp, top = 8.dp, bottom = 8.dp, end = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(if (newFound.size == 1) "1 computer found" else "${newFound.size} computers found on your network", style = type.headline, modifier = Modifier.weight(1f))
+                Text(if (newFound.size == 1) "1 compute node found" else "${newFound.size} compute nodes found on your network", style = type.headline, modifier = Modifier.weight(1f))
                 TonalButton("Review") { adding = true }
             }
         }
 
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            TonalButton("Add a computer", icon = Icons.Rounded.Add) { adding = true }
+            TonalButton("Add a compute node", icon = Icons.Rounded.Add) { adding = true }
             if (nodes.paired.isNotEmpty()) TonalButton("Check again") { vm.refreshNodes() }
         }
     }
@@ -173,7 +173,7 @@ fun HomeComputersSection(vm: AppVm) {
         AlertDialog(
             onDismissRequest = { removing = null },
             containerColor = p.surface2,
-            title = { Text("Remove ${c.name.ifBlank { "this computer" }}?", style = type.title) },
+            title = { Text("Remove ${c.name.ifBlank { "this compute node" }}?", style = type.title) },
             text = { Text("The phone will stop using it. You can add it again later.", style = type.callout) },
             confirmButton = { TextButton(onClick = { vm.forgetNode(c.fp); removing = null }) { Text("Remove", color = p.danger) } },
             dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel", color = p.textDim) } },
@@ -196,7 +196,7 @@ private fun ComputerRow(c: HomeComputer, onRemove: () -> Unit) {
             Spacer(Modifier.width(12.dp))
         }
         Column(Modifier.weight(1f)) {
-            Text(c.name.ifBlank { "Computer" }, style = type.headline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(c.name.ifBlank { "Compute node" }, style = type.headline, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(status, style = type.caption.copy(color = if (answered && c.online) p.success else p.textDim))
             if (detail != null) Text(detail, style = type.caption)
             if (c.problem.isNotBlank()) Text(plain(c.problem), style = type.caption.copy(color = p.warning))
@@ -219,10 +219,10 @@ private fun Field(value: String, onChange: (String) -> Unit, hint: String, modif
     }
 }
 
-/** A computer the person is being asked to trust. [id] is empty when only an address is known. */
-private data class TrustTarget(val name: String, val id: String, val addr: String)
+/** A compute node the person is being asked to trust. [id] is empty when only an address is known. */
+internal data class TrustTarget(val name: String, val id: String, val addr: String)
 
-/** Pick a computer the phone has seen, or type its address, then say yes to trusting it. A code is the other way in. */
+/** Pick a compute node the phone has seen, or type its address, then say yes to trusting it. A code is the other way in. */
 @Composable
 fun AddComputerSheet(vm: AppVm, onDismiss: () -> Unit) {
     val p = pal
@@ -235,7 +235,7 @@ fun AddComputerSheet(vm: AppVm, onDismiss: () -> Unit) {
     var codeOpen by remember { mutableStateOf(false) }
     val found = unpairedFound(nodes)
     var askingAll by remember { mutableStateOf(false) }
-    // With one computer on the list there is no need to pick it for the code route.
+    // With one compute node on the list there is no need to pick it for the code route.
     val target = picked ?: found.singleOrNull()
     val codeReady = code.length == 8 && (target != null || addr.isNotBlank()) && !pairing
     fun submitCode() {
@@ -251,18 +251,18 @@ fun AddComputerSheet(vm: AppVm, onDismiss: () -> Unit) {
         dragHandle = { SheetHandle() },
     ) {
         Column(Modifier.imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).navigationBarsPadding().padding(bottom = 20.dp)) {
-            Text("Add a computer", style = type.title)
+            Text("Add a compute node", style = type.title)
             Spacer(Modifier.height(6.dp))
-            Text("Tap a computer on your network to use it. You will be asked if you trust it.", style = type.callout)
+            Text("Tap a compute node on your network to use it. You will be asked if you trust it.", style = type.callout)
 
             if (found.size > 1) {
                 Spacer(Modifier.height(14.dp))
-                PrimaryButton("Trust all ${found.size} computers", Modifier.fillMaxWidth(), enabled = !pairing) { askingAll = true }
+                PrimaryButton("Trust all ${found.size} compute nodes", Modifier.fillMaxWidth(), enabled = !pairing) { askingAll = true }
             }
 
             SectionLabel(if (found.size > 1) "Or choose one" else "Found on this network", Modifier.padding(top = 14.dp), flush = true)
             if (found.isEmpty()) {
-                Text("Nothing found yet. Make sure the computer is on and uses the same Wi-Fi. You can also type its address below.", style = type.caption)
+                Text("Nothing found yet. Make sure the compute node is on and uses the same Wi-Fi. You can also type its address below.", style = type.caption)
             } else {
                 found.forEach { f ->
                     Row(
@@ -273,7 +273,7 @@ fun AddComputerSheet(vm: AppVm, onDismiss: () -> Unit) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Column(Modifier.weight(1f)) {
-                            Text(f.name.ifBlank { "Computer" }, style = type.headline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(f.name.ifBlank { "Compute node" }, style = type.headline, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             if (f.addrs.isNotEmpty()) Text(f.addrs.first(), style = type.caption)
                         }
                     }
@@ -284,11 +284,11 @@ fun AddComputerSheet(vm: AppVm, onDismiss: () -> Unit) {
             Field(
                 addr, { addr = it.take(60) }, "Like 192.168.1.20",
                 keyboard = KeyboardOptions(keyboardType = KeyboardType.Uri, capitalization = KeyboardCapitalization.None, imeAction = ImeAction.Go),
-                onDone = { if (addr.isNotBlank() && !pairing) asking = TrustTarget("the computer at ${addr.trim()}", "", addr.trim()) },
+                onDone = { if (addr.isNotBlank() && !pairing) asking = TrustTarget("the compute node at ${addr.trim()}", "", addr.trim()) },
             )
             Spacer(Modifier.height(10.dp))
             val canContinue = addr.isNotBlank() && !pairing
-            TonalButton("Continue", Modifier.alpha(if (canContinue) 1f else 0.4f)) { if (canContinue) asking = TrustTarget("the computer at ${addr.trim()}", "", addr.trim()) }
+            TonalButton("Continue", Modifier.alpha(if (canContinue) 1f else 0.4f)) { if (canContinue) asking = TrustTarget("the compute node at ${addr.trim()}", "", addr.trim()) }
 
             if (pairing) {
                 Spacer(Modifier.height(16.dp))
@@ -310,9 +310,9 @@ fun AddComputerSheet(vm: AppVm, onDismiss: () -> Unit) {
             }
             AnimatedVisibility(codeOpen) {
                 Column {
-                    Text("On the computer run: marginalia-node pair", style = type.callout)
+                    Text("On the compute node run: marginalia-node pair", style = type.callout)
                     if (found.size > 1) {
-                        SectionLabel("Which computer", Modifier.padding(top = 12.dp), flush = true)
+                        SectionLabel("Which compute node", Modifier.padding(top = 12.dp), flush = true)
                         found.forEach { f ->
                             val sel = picked?.id == f.id && picked?.name == f.name
                             Row(
@@ -322,12 +322,12 @@ fun AddComputerSheet(vm: AppVm, onDismiss: () -> Unit) {
                                     .padding(vertical = 10.dp, horizontal = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Text(f.name.ifBlank { "Computer" }, style = type.body, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                Text(f.name.ifBlank { "Compute node" }, style = type.body, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                                 if (sel) Icon(Icons.Rounded.Check, "Selected", tint = p.accentInk, modifier = Modifier.size(22.dp))
                             }
                         }
                     }
-                    SectionLabel("Code shown on the computer", Modifier.padding(top = 12.dp), flush = true)
+                    SectionLabel("Code shown on the compute node", Modifier.padding(top = 12.dp), flush = true)
                     Field(
                         code, { code = cleanCode(it) }, "8 letters and numbers",
                         keyboard = KeyboardOptions(capitalization = KeyboardCapitalization.Characters, keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Done),
@@ -335,7 +335,7 @@ fun AddComputerSheet(vm: AppVm, onDismiss: () -> Unit) {
                     )
                     Spacer(Modifier.height(14.dp))
                     if (!pairing && target == null && addr.isBlank()) {
-                        Text("Pick a computer above or type its address.", style = type.caption)
+                        Text("Pick a compute node above or type its address.", style = type.caption)
                         Spacer(Modifier.height(8.dp))
                     }
                     PrimaryButton(if (pairing) "Pairing" else "Pair", Modifier.fillMaxWidth(), enabled = codeReady) { submitCode() }
@@ -345,64 +345,153 @@ fun AddComputerSheet(vm: AppVm, onDismiss: () -> Unit) {
     }
 
     if (askingAll) {
-        val names = found.map { f -> listOf(f.name.ifBlank { "Computer" }, shortId(f.id).takeIf { it.isNotBlank() }?.let { "ID $it" }).filterNotNull().joinToString(", ") }
-        AlertDialog(
-            onDismissRequest = { askingAll = false },
-            containerColor = p.surface2,
-            title = { Text("Trust these computers?", style = type.title) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    names.forEach { Text(it, style = type.headline) }
-                    Text("They will be able to read the text the phone sends them, such as your notes and questions, and they keep none of it.", style = type.callout)
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    askingAll = false
-                    vm.trustAll(found) { ok -> if (ok) onDismiss() }
-                }) { Text("Trust all", color = p.accentInk) }
-            },
-            dismissButton = { TextButton(onClick = { askingAll = false }) { Text("Not now", color = p.textDim) } },
-        )
+        TrustTheseDialog(found, onCancel = { askingAll = false }) {
+            askingAll = false
+            vm.trustAll(found) { ok -> if (ok) onDismiss() }
+        }
     }
 
     asking?.let { t ->
-        AlertDialog(
-            onDismissRequest = { asking = null },
-            containerColor = p.surface2,
-            title = { Text("Trust this computer?", style = type.title) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(t.name.ifBlank { "Computer" }, style = type.headline)
-                    val where = listOf(t.addr, shortId(t.id).takeIf { it.isNotBlank() }?.let { "ID $it" }).filterNotNull().filter { it.isNotBlank() }.joinToString("  ")
-                    if (where.isNotBlank()) Text(where, style = type.caption)
-                    Text("It will be able to read the text the phone sends it, such as your notes and questions, and it keeps none of it.", style = type.callout)
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    asking = null
-                    vm.trustNode(if (t.id.isBlank()) t.addr else "", t.id) { ok -> if (ok) onDismiss() }
-                }) { Text("Trust", color = p.accentInk) }
-            },
-            dismissButton = { TextButton(onClick = { asking = null }) { Text("Not now", color = p.textDim) } },
-        )
+        TrustThisDialog(t, onCancel = { asking = null }) {
+            asking = null
+            vm.trustNode(if (t.id.isBlank()) t.addr else "", t.id) { ok -> if (ok) onDismiss() }
+        }
     }
 }
 
-/** Asks whether another phone may use home computers. One question per phone, wherever the person is in the app. */
+/** The question for several compute nodes at once. */
+@Composable
+internal fun TrustTheseDialog(found: List<FoundComputer>, onCancel: () -> Unit, onTrust: () -> Unit) {
+    val p = pal
+    val names = found.map { f -> listOf(f.name.ifBlank { "Compute node" }, shortId(f.id).takeIf { it.isNotBlank() }?.let { "ID $it" }).filterNotNull().joinToString(", ") }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        containerColor = p.surface2,
+        title = { Text("Trust these compute nodes?", style = type.title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                names.forEach { Text(it, style = type.headline) }
+                Text("They will be able to read the text the phone sends them, such as your notes and questions, and they keep none of it.", style = type.callout)
+            }
+        },
+        confirmButton = { TextButton(onClick = onTrust) { Text("Trust all", color = p.accentInk) } },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Not now", color = p.textDim) } },
+    )
+}
+
+/** The question for one compute node. */
+@Composable
+internal fun TrustThisDialog(t: TrustTarget, onCancel: () -> Unit, onTrust: () -> Unit) {
+    val p = pal
+    AlertDialog(
+        onDismissRequest = onCancel,
+        containerColor = p.surface2,
+        title = { Text("Trust this compute node?", style = type.title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(t.name.ifBlank { "Compute node" }, style = type.headline)
+                val where = listOf(t.addr, shortId(t.id).takeIf { it.isNotBlank() }?.let { "ID $it" }).filterNotNull().filter { it.isNotBlank() }.joinToString("  ")
+                if (where.isNotBlank()) Text(where, style = type.caption)
+                Text("It will be able to read the text the phone sends it, such as your notes and questions, and it keeps none of it.", style = type.callout)
+            }
+        },
+        confirmButton = { TextButton(onClick = onTrust) { Text("Trust", color = p.accentInk) } },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Not now", color = p.textDim) } },
+    )
+}
+
+/**
+ * The banner on the Meetings screen: compute nodes were found and the person has not answered yet.
+ * Connect opens the same questions as Settings. It never blocks anything.
+ */
+@Composable
+fun ConnectBanner(vm: AppVm, modifier: Modifier = Modifier) {
+    val p = pal
+    val offer by vm.connectOffer.collectAsState()
+    val pairing by vm.pairing.collectAsState()
+    var asking by remember { mutableStateOf(false) }
+    // Keep showing the last offer while it fades out, so the text does not jump to empty.
+    var last by remember { mutableStateOf(offer) }
+    if (offer.isNotEmpty()) last = offer
+    AnimatedVisibility(
+        visible = offer.isNotEmpty(),
+        enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandVertically(Motion.soft()),
+        exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkVertically(Motion.soft()),
+        modifier = modifier,
+    ) {
+        val shape = RoundedCornerShape(p.rMid)
+        Column(
+            Modifier.padding(horizontal = 16.dp).padding(bottom = 10.dp).fillMaxWidth().clip(shape).background(p.surface3).border(1.dp, p.line, shape)
+                .padding(start = 14.dp, top = 12.dp, end = 8.dp, bottom = 6.dp),
+        ) {
+            Text(offerTitle(last.size), style = type.headline)
+            Spacer(Modifier.height(2.dp))
+            Text("Connect to make the AI faster.", style = type.caption)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { vm.dismissOffer(last) }) { Text("Not now", color = p.textDim) }
+                TextButton(onClick = { asking = true }, enabled = !pairing) { Text("Connect", color = p.accentInk) }
+            }
+        }
+    }
+    if (asking) {
+        val list = offer
+        if (list.isEmpty()) asking = false
+        else if (list.size == 1) {
+            val f = list[0]
+            val t = TrustTarget(f.name, f.id, f.addrs.firstOrNull().orEmpty())
+            TrustThisDialog(t, onCancel = { asking = false }) {
+                asking = false
+                vm.trustNode(if (t.id.isBlank()) t.addr else "", t.id)
+            }
+        } else {
+            TrustTheseDialog(list, onCancel = { asking = false }) {
+                asking = false
+                vm.trustAll(list)
+            }
+        }
+    }
+}
+
+/** A small calm line that says a home compute node is helping. Nothing at all when none is online. */
+@Composable
+fun HomeComputerChip(vm: AppVm, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val p = pal
+    val nodes by vm.nodes.collectAsState()
+    val text = onlineChipText(nodes.paired)
+    var last by remember { mutableStateOf("") }
+    if (text != null) last = text
+    AnimatedVisibility(
+        visible = text != null,
+        enter = androidx.compose.animation.fadeIn(),
+        exit = androidx.compose.animation.fadeOut(),
+        modifier = modifier,
+    ) {
+        Row(
+            Modifier.padding(horizontal = 20.dp).padding(bottom = 10.dp).height(32.dp).clip(CircleShape).background(p.surface3).border(1.dp, p.line, CircleShape)
+                .pressable(onClick = onClick).semantics { role = Role.Button }
+                .padding(horizontal = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(p.success))
+            Spacer(Modifier.width(8.dp))
+            Text(last, style = type.caption.copy(color = p.textDim), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+/** Asks whether another phone may use home compute nodes. One question per phone, wherever the person is in the app. */
 @Composable
 fun ApprovalPrompt(vm: AppVm) {
     val p = pal
     val ask by vm.approvalAsk.collectAsState()
     ask?.let { a ->
         val phone = a.phone.ifBlank { "A phone" }
-        val names = joinNames(a.computers.map { plain(it.name.ifBlank { "this computer" }) })
+        val names = joinNames(a.computers.map { plain(it.name.ifBlank { "this compute node" }) })
         AlertDialog(
             onDismissRequest = { vm.decideNode(a, false) },
             containerColor = p.surface2,
             title = { Text("Let ${plain(phone)} use $names?", style = type.title) },
-            text = { Text("It will be able to send text to ${if (a.computers.size == 1) "this computer" else "these computers"} for the AI to read, such as notes and questions.", style = type.callout) },
+            text = { Text("It will be able to send text to ${if (a.computers.size == 1) "this compute node" else "these compute nodes"} for the AI to read, such as notes and questions.", style = type.callout) },
             confirmButton = { TextButton(onClick = { vm.decideNode(a, true) }) { Text("Allow", color = p.accentInk) } },
             dismissButton = { TextButton(onClick = { vm.decideNode(a, false) }) { Text("Not now", color = p.textDim) } },
         )

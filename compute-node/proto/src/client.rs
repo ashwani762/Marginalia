@@ -47,7 +47,7 @@ pub async fn status(conn: &quinn::Connection) -> Result<StatusReply> {
 /// Returns the node's name; the caller pins `node_fp` when this succeeds.
 pub async fn pair(conn: &quinn::Connection, id: &tls::Identity, node_fp: &str, name: &str, code: &str) -> Result<String> {
     if tls::peer_fingerprint(conn).as_deref() != Some(node_fp) {
-        bail!("the computer on this connection is not the one being paired");
+        bail!("the compute node on this connection is not the one being paired");
     }
     let exp = pair::exporter(conn).ok_or_else(|| anyhow!("no session secret"))?;
     let proof = pair::proof(code, pair::Side::Phone, &exp, &id.fingerprint(), node_fp);
@@ -55,7 +55,7 @@ pub async fn pair(conn: &quinn::Connection, id: &tls::Identity, node_fp: &str, n
         PairReply::Ok { node_name, proof } => {
             let expect = pair::proof(code, pair::Side::Node, &exp, &id.fingerprint(), node_fp);
             if !pair::proofs_equal(&proof, &expect) {
-                bail!("this computer did not know the code");
+                bail!("this compute node did not know the code");
             }
             Ok(node_name)
         }
@@ -64,7 +64,7 @@ pub async fn pair(conn: &quinn::Connection, id: &tls::Identity, node_fp: &str, n
 }
 
 /// Asks to be let in without a code. The caller has already asked the person whether they trust
-/// the computer, and pins `node_fp` (returned by [`connect`]) when this does not fail.
+/// the compute node, and pins `node_fp` (returned by [`connect`]) when this does not fail.
 pub async fn knock(conn: &quinn::Connection, name: &str) -> Result<KnockReply> {
     call(conn, &Request::Knock { name: name.to_string() }).await
 }

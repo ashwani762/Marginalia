@@ -1,3 +1,5 @@
+// The screen that shows one imported document or image.
+
 package app.marginalia.ui
 
 import androidx.activity.compose.BackHandler
@@ -7,8 +9,7 @@ import android.graphics.pdf.PdfRenderer
 import android.os.ParcelFileDescriptor
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.rounded.OpenInNew
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.graphics.asImageBitmap
@@ -27,7 +28,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
@@ -74,7 +74,7 @@ fun DocumentScreen(vm: AppVm, d: DocDetail, onAsk: (String) -> Unit) {
             Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconAction(Icons.Rounded.ArrowBackIosNew, "Back", tint = p.text) { vm.closeDoc() }
                 Spacer(Modifier.weight(1f))
-                if (file != null) IconAction(Icons.Rounded.OpenInNew, "Open in another app") { openElsewhere(ctx, file) }
+                if (file != null) IconAction(Icons.AutoMirrored.Rounded.OpenInNew, "Open in another app") { openElsewhere(ctx, file) }
                 IconAction(Icons.Rounded.ContentCopy, "Copy the text") {
                     val text = d.chunks.joinToString("\n\n") { it.text }
                     (ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)

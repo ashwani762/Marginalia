@@ -1,6 +1,7 @@
+// Colours, type and spacing for the light and dark looks.
+
 package app.marginalia.ui
 
-import android.content.Context
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.spring
@@ -119,8 +120,6 @@ class Type(val dark: Boolean, val p: Pal) {
     val micro = TextStyle(fontFamily = Inter, fontWeight = FontWeight.SemiBold, fontSize = 11.sp, lineHeight = 14.sp, letterSpacing = 1.1.sp, color = p.textFaint)
     /** Studio timecode: tabular figures so digits do not jitter. */
     val time = TextStyle(fontFamily = Inter, fontWeight = FontWeight.Medium, fontSize = 12.sp, lineHeight = 16.sp, fontFeatureSettings = "tnum", color = p.textFaint)
-    /** The running clock: large, light and tabular. */
-    val timer = TextStyle(fontFamily = Inter, fontWeight = FontWeight.Light, fontSize = 56.sp, lineHeight = 60.sp, fontFeatureSettings = "tnum", letterSpacing = (-1.5).sp, color = p.text)
     /** Transcript text: a touch larger than body for reading at arm's length. */
     val reading = TextStyle(fontFamily = Inter, fontWeight = FontWeight.Normal, fontSize = 18.sp, lineHeight = 28.sp, letterSpacing = (-0.1).sp, color = p.text)
 }
@@ -191,11 +190,4 @@ private fun ProportionalDensity(content: @Composable () -> Unit) {
     }
     val scaled = androidx.compose.ui.unit.Density(base.density * scale, base.fontScale)
     CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides scaled) { content() }
-}
-
-@Suppress("unused")
-fun appearanceDark(context: Context, appearance: String): Boolean = when (appearance) {
-    "Light" -> false
-    "Dark" -> true
-    else -> (context.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
 }

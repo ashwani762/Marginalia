@@ -1,8 +1,9 @@
+// The live meeting screen: transcript, jots, question cards and the stop control.
+
 @file:OptIn(ExperimentalFoundationApi::class)
 
 package app.marginalia.ui
 
-import android.content.Context
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler

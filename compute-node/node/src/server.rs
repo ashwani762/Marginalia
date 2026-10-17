@@ -38,7 +38,7 @@ pub struct Shared {
     pub denied: Mutex<HashMap<String, Instant>>,
     /// Locked: a phone that asks has to be allowed (from a paired phone or `marginalia-node approve`)
     /// instead of being let in. By default any phone on the network that its owner trusts this
-    /// computer from may use it. The node keeps nothing, so a phone that gets in can only borrow its speed.
+    /// compute node from may use it. The node keeps nothing, so a phone that gets in can only borrow its speed.
     pub locked: std::sync::atomic::AtomicBool,
     /// Paused: models stay loaded, new chat and search jobs are turned away, running jobs finish.
     /// Kept in memory only, so a restart is never paused.
@@ -89,7 +89,7 @@ impl Shared {
         let name: String = name.chars().filter(|c| !c.is_control()).take(40).collect();
         let name = if name.trim().is_empty() { "A phone".to_string() } else { name };
         if self.denied.lock().get(fp).map(|t| t.elapsed() < Duration::from_secs(10 * 60)).unwrap_or(false) {
-            return KnockReply::Refused("This computer did not allow that phone.".into());
+            return KnockReply::Refused("This compute node did not allow that phone.".into());
         }
         if !self.locked.load(Ordering::Relaxed) {
             if self.store.add(fp.to_string(), name.clone()).is_ok() {
@@ -103,7 +103,7 @@ impl Shared {
             return KnockReply::Refused("Too many phones are waiting. Try again later.".into());
         }
         w.entry(fp.to_string()).or_insert_with(|| {
-            tracing::info!("{name} is asking to use this computer. Allow it from a phone that is already paired, or run `marginalia-node approve`.");
+            tracing::info!("{name} is asking to use this compute node. Allow it from a phone that is already paired, or run `marginalia-node approve`.");
             Waiting { name, since: Instant::now() }
         });
         KnockReply::Pending { node_name: self.name.clone() }
@@ -200,9 +200,9 @@ async fn request(sh: Arc<Shared>, conn: quinn::Connection, fp: String, mut send:
             let reply = if sh.waiting.lock().contains_key(&fp) {
                 KnockReply::Pending { node_name: sh.name.clone() }
             } else if sh.denied.lock().contains_key(&fp) {
-                KnockReply::Refused("This computer did not allow that phone.".into())
+                KnockReply::Refused("This compute node did not allow that phone.".into())
             } else {
-                KnockReply::Refused("This computer does not know that phone. Ask to connect again.".into())
+                KnockReply::Refused("This compute node does not know that phone. Ask to connect again.".into())
             };
             wire::write_frame(&mut send, &reply).await?;
         }
@@ -232,7 +232,7 @@ async fn request(sh: Arc<Shared>, conn: quinn::Connection, fp: String, mut send:
 fn try_pair(sh: &Shared, conn: &quinn::Connection, fp: &str, name: String, proof: [u8; 32]) -> PairReply {
     let mut guard = sh.pairing.lock();
     let Some(p) = guard.as_mut() else {
-        return PairReply::Refused("Pairing is not open on this computer. Run `marginalia-node pair` first.".into());
+        return PairReply::Refused("Pairing is not open on this compute node. Run `marginalia-node pair` first.".into());
     };
     if Instant::now() > p.until {
         *guard = None;
@@ -266,7 +266,7 @@ async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut qui
         return Ok(());
     }
     let Some(llm) = sh.host.llm.clone() else {
-        wire::write_frame(send, &ChatEvent::Error("This computer does not serve chat.".into())).await?;
+        wire::write_frame(send, &ChatEvent::Error("This compute node does not serve chat.".into())).await?;
         return Ok(());
     };
     let jobs = sh.host.chat_jobs.clone();
@@ -338,7 +338,7 @@ async fn embed(sh: &Arc<Shared>, r: marginalia_proto::EmbedRequest, send: &mut q
         return Ok(());
     }
     let Some(handle) = sh.host.embed.clone() else {
-        wire::write_frame(send, &EmbedReply::Error("This computer does not serve search.".into())).await?;
+        wire::write_frame(send, &EmbedReply::Error("This compute node does not serve search.".into())).await?;
         return Ok(());
     };
     let jobs = sh.host.embed_jobs.clone();

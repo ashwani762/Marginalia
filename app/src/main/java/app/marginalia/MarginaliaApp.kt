@@ -1,3 +1,5 @@
+// The Application class. It creates the view model so work continues after the last window is gone.
+
 package app.marginalia
 
 import android.app.Application

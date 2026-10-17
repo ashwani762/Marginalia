@@ -1,38 +1,23 @@
+// Shared building blocks: press feedback, chips, buttons, toasts and similar.
+
 @file:OptIn(ExperimentalFoundationApi::class)
 
 package app.marginalia.ui
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.gestures.draggable
-import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -47,8 +32,6 @@ import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -60,12 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
@@ -86,14 +64,11 @@ import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.vector.ImageVector
 import kotlinx.coroutines.launch
-import kotlin.math.abs
-import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -116,11 +91,6 @@ fun Modifier.pressable(
             onLongClick = onLongClick?.let { lc -> { h.performHapticFeedback(HapticFeedbackType.LongPress); lc() } },
             onClick = { if (haptic != null) h.performHapticFeedback(haptic); onClick() },
         )
-}
-
-@Composable
-fun Hairline(modifier: Modifier = Modifier) {
-    Box(modifier.fillMaxWidth().height(1.dp).background(pal.line))
 }
 
 @Composable
@@ -150,23 +120,6 @@ fun Chip(
         }
         Text(text, style = type.label.copy(color = fg), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
-}
-
-/** A raised surface: the basic container for grouped content. */
-@Composable
-fun Surface(
-    modifier: Modifier = Modifier,
-    shape: Shape = RoundedCornerShape(pal.rMid),
-    color: Color = pal.surface3,
-    border: Boolean = true,
-    content: @Composable () -> Unit,
-) {
-    Box(
-        modifier
-            .clip(shape)
-            .background(color)
-            .then(if (border) Modifier.border(1.dp, pal.line, shape) else Modifier),
-    ) { content() }
 }
 
 @Composable
@@ -319,86 +272,6 @@ fun SwipeToDelete(
                     }
                 },
         ) { content() }
-    }
-}
-
-private fun Modifier.fillMaxSize(): Modifier = this.then(Modifier.fillMaxSize())
-
-// ---------------------------------------------------------------------------------------------
-// Draggable bottom sheet with detents
-// ---------------------------------------------------------------------------------------------
-
-@Stable
-class DetentState(initial: Float = 0f) {
-    /** 0 = peek, 1 = fully expanded. Follows the finger while dragging, springs to a detent after. */
-    val progress = Animatable(initial)
-    suspend fun expand() = progress.animateTo(1f, Motion.snappy())
-    suspend fun collapse() = progress.animateTo(0f, Motion.snappy())
-    val expanded: Boolean get() = progress.value > 0.5f
-}
-
-@Composable
-fun rememberDetentState() = remember { DetentState() }
-
-/**
- * Sheet that rests at [peek] and can be dragged up by its header to [maxFraction] of the
- * container. A flick is enough to commit it either way.
- */
-@Composable
-fun DetentSheet(
-    state: DetentState,
-    peek: Dp,
-    modifier: Modifier = Modifier,
-    maxFraction: Float = 0.72f,
-    header: @Composable () -> Unit,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    val p = pal
-    val scope = rememberCoroutineScope()
-    val haptic = LocalHapticFeedback.current
-    BoxWithConstraints(modifier.fillMaxSize(), contentAlignment = Alignment.BottomCenter) {
-        val density = LocalDensity.current
-        val peekPx = with(density) { peek.toPx() }
-        val maxPx = with(density) { maxHeight.toPx() } * maxFraction
-        val range = (maxPx - peekPx).coerceAtLeast(1f)
-        val h = with(density) { (peekPx + range * state.progress.value).toDp() }
-        val shape = RoundedCornerShape(topStart = p.rLarge, topEnd = p.rLarge)
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .height(h)
-                .shadow(if (p.dark) 0.dp else 12.dp, shape)
-                .clip(shape)
-                .background(p.surface2)
-                .border(1.dp, p.line, shape),
-        ) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .draggable(
-                        orientation = Orientation.Vertical,
-                        state = rememberDraggableState { dy ->
-                            scope.launch { state.progress.snapTo((state.progress.value - dy / range).coerceIn(0f, 1f)) }
-                        },
-                        onDragStopped = { v ->
-                            val target = when {
-                                v < -900f -> 1f
-                                v > 900f -> 0f
-                                else -> if (state.progress.value > 0.5f) 1f else 0f
-                            }
-                            haptic.performHapticFeedback(HapticFeedbackType.GestureEnd)
-                            scope.launch { state.progress.animateTo(target, Motion.snappy(), initialVelocity = -v / range) }
-                        },
-                    )
-                    .pressable(pressedScale = 1f, onClick = { scope.launch { if (state.expanded) state.collapse() else state.expand() } }),
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(Modifier.padding(top = 8.dp).width(40.dp).height(4.dp).clip(CircleShape).background(p.lineStrong))
-                    header()
-                }
-            }
-            Column(Modifier.fillMaxWidth().weight(1f)) { content() }
-        }
     }
 }
 
