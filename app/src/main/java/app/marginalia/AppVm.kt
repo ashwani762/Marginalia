@@ -82,6 +82,17 @@ class AppVm(private val app: Application) {
 
     val modelInfo = MutableStateFlow("")
 
+    /**
+     * The loading screen shown while Gemma loads at app start, so the pause happens behind a still screen and not on the main
+     * screen. When the last time the phone had no compute node (or the app has never run), it is up from the very first frame, so
+     * the main screen never shows first and then jumps away.
+     */
+    private val _aiWarm = MutableStateFlow<AiWarm?>(
+        if (app.getSharedPreferences("engine", Context.MODE_PRIVATE).getBoolean("last_alone", true)) AiWarm("Getting the AI ready", 0f) else null,
+    )
+    val aiWarm: StateFlow<AiWarm?> = _aiWarm.asStateFlow()
+    @Volatile private var warmSkipped = false
+
     // ---- background write-ups: meeting id -> where it is
     private val _finishing = MutableStateFlow<Map<Long, WrapState>>(emptyMap())
     val finishing: StateFlow<Map<Long, WrapState>> = _finishing.asStateFlow()
@@ -536,7 +547,7 @@ class AppVm(private val app: Application) {
             _ingest.value.any { it.active } || _turns.value.any { it.busy }
 
     /**
-     * The models stay loaded for as long as anything is being written or read, and for a minute
+     * The models stay loaded for as long as anything is being written or read, and for ten minutes
      * after the last of it ends. Then they go, and come back when the app is opened again.
      */
     private fun watchIdle() {
@@ -544,7 +555,8 @@ class AppVm(private val app: Application) {
             kotlinx.coroutines.flow.combine(AppState.flow, Work.items, _live, _finishing) { fg, w, l, f -> !fg && w.isEmpty() && l == null && f.isEmpty() }
                 .collectLatest { idle ->
                     if (idle) {
-                        delay(60_000)
+                        // Ten minutes: loading Gemma on the GPU stalls the screen for seconds, so it is not dropped after a short pause.
+                        delay(600_000)
                         offloadModels()
                     }
                 }
@@ -555,6 +567,7 @@ class AppVm(private val app: Application) {
     fun onForeground() {
         discovery.start()
         startNodeWatch()
+        loadChatIfAlone()
         viewModelScope.launch(Dispatchers.Default) {
             if (nativeReady) ensureModels()
         }
@@ -837,6 +850,71 @@ class AppVm(private val app: Application) {
     private fun showCachedLists() {
         loadCache("meetings")?.let { a -> runCatching { _meetings.value = a.objects().map(MeetingItem::from) } }
         loadCache("docs")?.let { a -> runCatching { _docs.value = a.objects().map(DocItem::from) } }
+    }
+
+    private var aloneJob: Job? = null
+
+    /** "Keep going": the person does not want to wait. The load carries on behind the app. */
+    fun skipAiWarm() { warmSkipped = true; _aiWarm.value = null }
+
+    /** Gemma is loaded when the app opens even with a compute node nearby, so the phone can take over at once. Off by default. */
+    val keepAiReady = MutableStateFlow(enginePrefs.getBoolean("keep_ai_ready", false))
+    fun setKeepAiReady(on: Boolean) {
+        keepAiReady.value = on
+        enginePrefs.edit().putBoolean("keep_ai_ready", on).apply()
+        if (on) loadChatIfAlone()
+    }
+
+    /**
+     * With no compute node in reach the phone writes everything itself, so Gemma is loaded now, while the app is opening and
+     * nothing is being recorded. Loading it later, in the middle of a meeting, stalls the screen for about 5 seconds then.
+     * A compute node that is paired gets three seconds to answer first, and if one does Gemma stays unloaded.
+     */
+    fun loadChatIfAlone() {
+        aloneJob?.cancel()
+        warmSkipped = false
+        aloneJob = viewModelScope.launch(Dispatchers.Default) {
+            while (!nativeReady) delay(250)
+            var waited = 0
+            while (true) {
+                loadNodes()
+                val n = _nodes.value
+                val hasNode = n.enabled && n.paired.any { it.approved }
+                if (!hasNode || keepAiReady.value || computeNodeInReach() || waited >= 3000) break
+                delay(1000); waited += 1000
+            }
+            val alone = keepAiReady.value || !computeNodeInReach()
+            // Remembered for the next start: after a start with a compute node in reach the loading screen is not put up first.
+            enginePrefs.edit().putBoolean("last_alone", alone).apply()
+            if (alone && _live.value == null && chatModel == null) warmChat() else _aiWarm.value = null
+        }
+    }
+
+    /**
+     * Loads Gemma behind a loading screen with a bar. LiteRT-LM does not say how far it is, so the bar follows how long the last
+     * load took (20 seconds the first time) and stops short of the end until the load is really done.
+     */
+    private suspend fun warmChat() {
+        val expectedMs = enginePrefs.getLong("chat_load_ms", 20_000L).coerceIn(4_000L, 120_000L)
+        val began = android.os.SystemClock.elapsedRealtime()
+        if (!warmSkipped) _aiWarm.value = AiWarm("Getting the AI ready", 0f)
+        val ticker = viewModelScope.launch(Dispatchers.Default) {
+            while (true) {
+                if (!warmSkipped) {
+                    val f = ((android.os.SystemClock.elapsedRealtime() - began).toFloat() / expectedMs).coerceIn(0f, 0.94f)
+                    _aiWarm.value = AiWarm(kotlinLabel?.takeIf { it.isNotBlank() && it != "Starting" } ?: "Getting the AI ready", f)
+                }
+                delay(250)
+            }
+        }
+        val ok = ensureChat()
+        ticker.cancel()
+        if (ok) enginePrefs.edit().putLong("chat_load_ms", android.os.SystemClock.elapsedRealtime() - began).apply()
+        if (!warmSkipped) {
+            _aiWarm.value = AiWarm(if (ok) "Ready" else "Getting the AI ready", if (ok) 1f else 0f)
+            delay(350)
+        }
+        _aiWarm.value = null
     }
 
     /** True when a compute node is switched on, allowed for this phone and answering. */

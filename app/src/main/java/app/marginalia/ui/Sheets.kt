@@ -5,6 +5,7 @@
 package app.marginalia.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -51,6 +52,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import app.marginalia.AiWarm
 import app.marginalia.AppVm
 import app.marginalia.Boot
 import app.marginalia.Source
@@ -90,6 +92,45 @@ fun SetupScreen(boot: Boot, onRetry: () -> Unit) {
                 else -> {}
             }
             Spacer(Modifier.height(36.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Lock, null, tint = p.textFaint, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Nothing leaves this phone", style = type.caption.copy(color = p.textFaint))
+            }
+        }
+    }
+}
+
+/**
+ * Shown while the phone loads Gemma at app start. Loading takes the graphics chip for a few seconds and the screen cannot move
+ * smoothly meanwhile, so this screen is still and plain: a bar, a line of words and a way to carry on.
+ */
+@Composable
+fun AiWarmScreen(warm: AiWarm, onSkip: () -> Unit) {
+    val p = pal
+    Box(Modifier.fillMaxSize().background(p.surface), contentAlignment = Alignment.Center) {
+        Column(Modifier.padding(horizontal = 36.dp).navigationBarsPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
+            BrandMark(72.dp)
+            Spacer(Modifier.height(28.dp))
+            Text("Getting the AI ready", style = type.title, textAlign = TextAlign.Center)
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Gemma is loading onto this phone so it can write your notes and answers when no compute node is near. The screen may pause for a few seconds. This happens when the app opens, not in the middle of a meeting.",
+                style = type.callout, textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(32.dp))
+            val animated by animateFloatAsState(warm.fraction, tween(300), label = "warm")
+            Box(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(p.surface4)) {
+                Box(Modifier.fillMaxWidth(animated).fillMaxSize().clip(CircleShape).background(p.accentBrush))
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("${warm.label}  ·  ${(warm.fraction * 100).toInt()}%", style = type.time)
+            Spacer(Modifier.height(28.dp))
+            Text(
+                "Keep going", style = type.label.copy(color = p.accentInk),
+                modifier = Modifier.clip(RoundedCornerShape(p.rSmall)).pressable(pressedScale = 0.97f, onClick = onSkip).padding(horizontal = 18.dp, vertical = 10.dp),
+            )
+            Spacer(Modifier.height(24.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Rounded.Lock, null, tint = p.textFaint, modifier = Modifier.size(14.dp))
                 Spacer(Modifier.width(6.dp))
@@ -227,6 +268,15 @@ fun YouSheet(vm: AppVm, onDismiss: () -> Unit, scrollToHome: Boolean = false) {
                 Switch(
                     checked = fast,
                     onCheckedChange = { haptic.performHapticFeedback(if (it) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff); vm.setSpeedUp(it) },
+                    colors = SwitchDefaults.colors(checkedTrackColor = p.accent, checkedThumbColor = Color.White, uncheckedTrackColor = p.surface4, uncheckedThumbColor = p.textDim, uncheckedBorderColor = p.lineStrong),
+                )
+            }
+
+            val ready by vm.keepAiReady.collectAsState()
+            SettingRow("Keep the AI ready on this phone", "Loads Gemma when the app opens even with a compute node nearby, so the phone can take over the moment the node is lost. The app shows a loading screen for a few seconds") {
+                Switch(
+                    checked = ready,
+                    onCheckedChange = { haptic.performHapticFeedback(if (it) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff); vm.setKeepAiReady(it) },
                     colors = SwitchDefaults.colors(checkedTrackColor = p.accent, checkedThumbColor = Color.White, uncheckedTrackColor = p.surface4, uncheckedThumbColor = p.textDim, uncheckedBorderColor = p.lineStrong),
                 )
             }

@@ -149,6 +149,15 @@ fun App(vm: AppVm) {
                         is Boot.Unpacking, is Boot.Failed -> SetupScreen(b, onRetry = vm::retryBoot)
                         else -> if (introduced) Shell(vm) else Onboarding(onDone = vm::finishIntro)
                     }
+                    // While Gemma loads at app start the main screen is covered by a still loading screen with a bar.
+                    val warm by vm.aiWarm.collectAsState()
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = warm != null && boot !is Boot.Unpacking && boot !is Boot.Failed && introduced,
+                        enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(150)),
+                        exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(250)),
+                    ) {
+                        warm?.let { AiWarmScreen(it, onSkip = vm::skipAiWarm) }
+                    }
                 }
             }
         }

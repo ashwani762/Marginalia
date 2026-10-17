@@ -260,6 +260,9 @@ const val DEFAULT_CORRECTION_WINDOW_S = 20
 val CORRECTION_WINDOWS_S = listOf(20, 30, 45, 60)
 
 /** Where the engine is, from first launch to ready. */
+/** The loading screen while the phone gets Gemma ready: what it is doing and how far along it probably is (0 to 1). */
+data class AiWarm(val label: String, val fraction: Float)
+
 sealed interface Boot {
     data class Unpacking(val done: Long, val total: Long) : Boot
     data class Loading(val label: String, val step: Int, val steps: Int) : Boot

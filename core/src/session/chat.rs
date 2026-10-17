@@ -12,7 +12,16 @@ pub(super) fn scope_of(s: &str) -> Scope {
 
 impl Core {
     pub(super) fn suggestions(&self, folder: Option<i64>) -> Result<Value> {
-        let short = |t: &str| snippet_of(t.trim(), 38);
+        // A title cut to fit, at a whole word and without a trailing ellipsis: the suggestion is also the question that gets
+        // searched, and a literal "…" in it matches nothing.
+        let short = |t: &str| {
+            let t = t.trim();
+            if t.chars().count() <= 48 {
+                return t.to_string();
+            }
+            let cut: String = t.chars().take(48).collect();
+            cut.rsplit_once(' ').map(|x| x.0.to_string()).unwrap_or(cut)
+        };
         let mut out: Vec<String> = Vec::new();
         let mfolders = self.kb.store.meeting_folders().unwrap_or_default();
         let dfolders = self.kb.store.document_folders().unwrap_or_default();

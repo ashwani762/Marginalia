@@ -10,6 +10,8 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -224,12 +226,15 @@ fun SwipeToKeep(onKeep: () -> Unit, modifier: Modifier = Modifier, content: @Com
  * answer"), so nothing happens out of sight. It rests on "Listening" when there is no work.
  */
 @Composable
-fun ActivityStrip(items: List<String>, recording: Boolean, modifier: Modifier = Modifier) {
+fun ActivityStrip(items: List<String>, recording: Boolean, modifier: Modifier = Modifier, note: String? = null) {
     val p = pal
     val label = items.firstOrNull() ?: if (recording) "Listening" else "Working"
     val busy = items.isNotEmpty()
-    Row(modifier.fillMaxWidth().height(34.dp).padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(width = 44.dp, height = 12.dp), contentAlignment = Alignment.CenterStart) {
+    // The three moving dots need room, the quiet green dot does not: the text sits right next to whichever is shown.
+    val markWidth by androidx.compose.animation.core.animateDpAsState(if (busy) 44.dp else 17.dp, tween(220), label = "mark")
+    Column(modifier.fillMaxWidth()) {
+    Row(Modifier.fillMaxWidth().height(34.dp).padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(width = markWidth, height = 12.dp), contentAlignment = Alignment.CenterStart) {
             if (busy) ThinkingDots(color = p.accentInk) else Box(Modifier.size(7.dp).clip(CircleShape).background(p.success.copy(alpha = 0.8f)))
         }
         // The line fades and drifts in place; it must never be clipped to its own box (descenders!).
@@ -243,6 +248,15 @@ fun ActivityStrip(items: List<String>, recording: Boolean, modifier: Modifier = 
             label = "activity",
         ) { l -> Text(l, style = type.caption.copy(color = if (busy) p.text else p.textFaint, lineHeight = 20.sp()), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) }
         if (items.size > 1) Text("  +${items.size - 1}", style = type.caption.copy(color = p.textFaint))
+    }
+    // A line about what a compute node is doing (checking the captions) sits under the label, at the label's own left edge.
+    androidx.compose.animation.AnimatedVisibility(visible = note != null, enter = fadeIn(tween(250)) + expandVertically(), exit = fadeOut(tween(200)) + shrinkVertically()) {
+        Text(
+            note.orEmpty(), style = type.caption.copy(color = p.textFaint), maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(start = 20.dp + markWidth, end = 20.dp, bottom = 4.dp, top = 0.dp),
+        )
+    }
     }
 }
 

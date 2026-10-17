@@ -330,10 +330,9 @@ fun LiveScreen(vm: AppVm, onMinimize: () -> Unit, onCite: (Source) -> Unit) {
                 } else if (recording) {
                     Column(Modifier.fillMaxSize()) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.weight(1f)) { ActivityStrip(s.activity, s.recording) }
+                            Box(Modifier.weight(1f)) { ActivityStrip(s.activity, s.recording, note = if (showTranscript) correctionLabel(s.correctedBy, s.correctionPhase, s.workFrom, s.workTo, s.checkedUpto, prefsNow.liveCorrectionWindowS) else null) }
                             folderPill(Modifier.padding(end = 16.dp))
                         }
-                        CorrectionNote(if (showTranscript) s.correctedBy else null, s, prefsNow.liveCorrectionWindowS)
                         timeline(Modifier.weight(1f))
                     }
                 } else {
@@ -363,19 +362,6 @@ fun LiveScreen(vm: AppVm, onMinimize: () -> Unit, onCite: (Source) -> Unit) {
 }
 
 // ------------------------------------------------------------------------------------------------
-
-/** A calm line under the header while a compute node is fixing the captions. It is not there when none is. */
-@Composable
-private fun CorrectionNote(node: String?, s: LiveState, windowS: Int) {
-    val label = correctionLabel(node, s.correctionPhase, s.workFrom, s.workTo, s.checkedUpto, windowS)
-    AnimatedVisibility(visible = label != null, enter = fadeIn(tween(250)) + expandVertically(), exit = fadeOut(tween(200)) + shrinkVertically()) {
-        Text(
-            label.orEmpty(), style = type.caption.copy(color = pal.textFaint), maxLines = 1,
-            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 2.dp),
-        )
-    }
-}
 
 @Composable
 private fun Timeline(
