@@ -73,7 +73,7 @@ sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
 - **Live correction on the real phone** (a talk played into its microphone): windows reach the node about 36 s into a
   recording with a 30 s window, the corrected text replaces the draft and the phone logs `live correction on falcon: 1-27s, 2 lines became 1`.
   The live screen says what is happening (will check every 30 s, is checking 00:25 to 00:55, checked up to 00:55) and the fixed lines glow
-  for 4 s. A recording of 1 min 20 s was also corrected once it ended and the notes were written from the corrected text.
+  for 4 s.
 - **A window while Gemma writes on the same card**: a 44 s window takes 0.42 s alone and 0.64 to 0.66 s while four clients keep the chat
   model busy (chat falls from about 100 to 81 tokens a second while they share).
 - **Processor only** (`run --cpu`, speech model only, quiet machine, 20 cores): 11 s of audio in 9.7 s, a 44 s window in 19.7 s (2.2 times

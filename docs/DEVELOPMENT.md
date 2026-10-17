@@ -49,6 +49,19 @@ scripts/node/install-linux.sh   # user service and tray autostart
 On Windows use `scripts/windows/setup.ps1` (see `docs/WINDOWS-PLAN.md`). Node models are GGUF files, download them with
 `marginalia-node models download`.
 
+## Loading models on the phone
+
+Gemma on the GPU (LiteRT-LM, OpenCL) takes the phone's graphics chip for several seconds while it sets up, and the screen is drawn by the
+same chip. Measured on the test phone: frames waited 3 s or more for the GPU (`Fence waitForever ... didn't signal in 3000 ms` in
+`adb logcat`), the app skipped up to 600 frames in a row and Android killed other apps for memory. So:
+
+- The search model (processor, quick) loads at start. Gemma loads only when the phone itself has to write something (`AppVm.ensureChat`,
+  through the stand in generator `lazyChat`). With a compute node in reach that never happens.
+- Starting a recording with no compute node in reach loads Gemma at that moment instead of in the middle of the meeting.
+- Nothing may start a job at launch. The old vision warm-up did, and it loaded Gemma at every start.
+- To check a change: `adb logcat -v time | grep -E "Davey|Skipped [0-9]+ frames|didn't signal"` during a cold start. With a node in reach
+  there should be none. Phone alone, one stall of about 5 s remains when Gemma loads.
+
 ## Conventions
 
 - **User-visible text** (app, node, tray, scripts): plain wording, no semicolons and no em dashes. The chat model is "the AI".
