@@ -68,18 +68,47 @@ sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
   node frees the graphics memory (5141 MiB used, 2026 MiB after stop, 7166 MiB with E4B loaded), then the new model loads.
 - `cargo test` for proto (23), node (22) and tray (29) passes on Windows.
 
+## Measured on Linux later (RTX 4060, 20 core processor, real phone)
+
+- **Live correction on the real phone** (a talk played into its microphone): windows reach the node about 36 s into a
+  recording with a 30 s window, the corrected text replaces the draft and the phone logs `live correction on falcon: 1-27s, 2 lines became 1`.
+  The live screen says what is happening (will check every 30 s, is checking 00:25 to 00:55, checked up to 00:55) and the fixed lines glow
+  for 4 s. A recording of 1 min 20 s was also corrected once it ended and the notes were written from the corrected text.
+- **A window while Gemma writes on the same card**: a 44 s window takes 0.42 s alone and 0.64 to 0.66 s while four clients keep the chat
+  model busy (chat falls from about 100 to 81 tokens a second while they share).
+- **Processor only** (`run --cpu`, speech model only, quiet machine, 20 cores): 11 s of audio in 9.7 s, a 44 s window in 19.7 s (2.2 times
+  real time), a 121 s recording in 72 s (1.7 times). The earlier 0.5 times figure was taken while the machine was busy. A window of 30 s
+  would take about 13 s, so live correction works but runs further behind than on a graphics card.
+- **Vulkan** (built with `--features vulkan`, headers from the Khronos repositories because the system had none): on the RTX 4060 a 121 s
+  recording runs at 53 times real time and a 44 s window takes 1.0 s (CUDA: about 100 times and 0.42 s), output correct. On an Intel UHD 770
+  integrated GPU it is no faster than the processor (1.1 times real time on 121 s, start up takes 50 s while the self measurement runs).
+  Vulkan only pays off with a real graphics card.
+- **Other languages and noise** (FLEURS test recordings, 12 per language, language detected by the model, word error rate of the large
+  turbo model; the reference is the normalised FLEURS text so Hindi is inflated by spelling conventions):
+
+  | Language | Clean | White noise 10 dB | White noise 0 dB | Talk over it, 5 dB |
+  | --- | --- | --- | --- | --- |
+  | Spanish | 1.7% | 5.5% | 10.7% | 16.5% |
+  | German | 4.1% | 10.2% | 35.0% | 16.0% |
+  | French | 13.1% | 29.1% | 68.7% | 27.8% |
+  | Arabic | 16.7% | 23.5% | 46.2% | 27.7% |
+  | Hindi | 35.1% | 56.4% | 76.2% | 81.5% |
+
+  Language detection was right for 59 of 60 clips (one Hindi clip came back as Urdu, so the phone's language lock matters for Hindi).
+  Noise at 10 dB roughly doubles the errors and 0 dB is hard for every language except Spanish.
+- **Tray with a real mouse** (X11, real clicks sent through the X server): the icon opens its menu, Show details opens the details panel,
+  Pause turns the icon orange and the node says paused, Resume undoes it, and Use chat model E4B restarts the node on E4B and back.
+  On the GNOME top bar a left click opens the menu, it does not open the panel directly.
+- **E4B** next to the speech and search models on the 8 GB card: loads, 59 tokens a second (E2B 105), 5.4 GB of the card in use.
+
 ## Not verified yet
 
-- Windows is beta and will be finished later. Still to try by hand: the tray clicks (left click panel, right click menu, pause, resume, stop, start), a reboot
-  bringing the node and the tray back, mDNS announcements seen from a real phone, and a real phone getting an answer.
+- Windows is beta and will be finished later. Still to try by hand: the tray clicks on Windows, a reboot bringing the node and the tray
+  back, mDNS announcements seen from a real phone, and a real phone getting an answer.
 - Nodes finding and sharing work with each other (cluster) is designed in `DESIGN.md`, not built.
-- Live (streaming) speech to text on nodes is not built as one open stream. The node side of "live correction" exists (short windows with a prompt, own lane, see below) but no phone sends them yet.
-- The window lane was not tried with Gemma generating at the same time (the 8 GB card is shared with the running service, so a second Gemma did not fit). Windows were measured next to a long recording only.
-- The window lane on a processor (one shared lane) and prompts in other languages were not tried.
-- Transcription on the processor only (`run --cpu`) was tried once while the machine was busy: the 11 s sample took about 20 s (0.5 times real time, same correct text), so the large model is only practical on a graphics card. Vulkan and Windows were not tried.
-- A phone sending a real recording: only the `probe --transcribe` client (same protocol, written like the phone) was used, not the Android app.
-- Real meeting audio in other languages: only the English JFK sample was available, so accuracy on other languages and noisy rooms is not measured.
-- A left click on the tray icon opening the panel was only triggered over D-Bus, not with a real mouse click.
+- Live speech to text as one open stream is not built. Live correction in windows exists on both sides (phone and node) and works.
+- Wayland (the tray icon was only tried under X11) and a Raspberry Pi.
+- The phone alone still stalls the screen once for about 5 s when it has to load Gemma on the GPU (see docs/DEVELOPMENT.md).
 
 ## Building on Windows
 
