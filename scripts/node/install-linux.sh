@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # Installs the built node for the current user and sets it up to start at login.
-# Build first: compute-node/build.sh (or build.sh --cpu-only). Run this from anywhere.
+# Build first: scripts/node/build.sh (or build.sh --cpu-only). Run this from anywhere.
 # Pass --models DIR as extra arguments by editing ExecStart in the installed unit if you keep
 # the models somewhere other than ~/.local/share/marginalia/models.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
+pack="$root/compute-node/packaging"
 bin="$root/target/release/marginalia-node"
 tray="$root/target/release/marginalia-node-tray"
 
 if [[ ! -x "$bin" ]]; then
-  echo "No binary at $bin. Run compute-node/build.sh first." >&2
+  echo "No binary at $bin. Run scripts/node/build.sh first." >&2
   exit 1
 fi
 
@@ -25,10 +26,10 @@ install -m 755 "$bin" "$HOME/.local/bin/marginalia-node"
 if [[ -x "$tray" ]]; then
   mkdir -p "$HOME/.config/autostart"
   install -m 755 "$tray" "$HOME/.local/bin/marginalia-node-tray"
-  sed "s|@HOME@|$HOME|g" "$here/marginalia-node-tray.desktop" > "$HOME/.config/autostart/marginalia-node-tray.desktop"
+  sed "s|@HOME@|$HOME|g" "$pack/marginalia-node-tray.desktop" > "$HOME/.config/autostart/marginalia-node-tray.desktop"
   chmod 644 "$HOME/.config/autostart/marginalia-node-tray.desktop"
 fi
-install -m 644 "$here/marginalia-node.service" "$HOME/.config/systemd/user/marginalia-node.service"
+install -m 644 "$pack/marginalia-node.service" "$HOME/.config/systemd/user/marginalia-node.service"
 
 systemctl --user daemon-reload
 systemctl --user enable --now marginalia-node.service

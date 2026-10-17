@@ -138,7 +138,7 @@ class AppVm(private val app: Application) {
             if (missing.isNotEmpty()) {
                 if (!ModelInstaller.canInstall(ctx)) {
                     _boot.value = Boot.Failed(
-                        "The on-device models are not in this build.\nPush them with scripts/push-models.sh, then reopen the app.\n\nMissing: ${missing.joinToString()}",
+                        "The on-device models are not in this build.\nPush them with scripts/app/push-models.sh, then reopen the app.\n\nMissing: ${missing.joinToString()}",
                     )
                     return
                 }

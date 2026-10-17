@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Links the models into models-stage/models so Gradle packs them into the APK as assets.
 #
-#   scripts/stage-models.sh
+#   scripts/app/stage-models.sh
 #
 # Environment:
 #   MODELS   folder with the Whisper file       (default: ~/.local/share/marginalia/models)
@@ -9,7 +9,7 @@
 #   EMBED    EmbeddingGemma LiteRT-LM file      (default: ~/.litert-lm/models/embeddinggemma-2-text-270m.litertlm)
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
+root="$(cd "$(dirname "$0")/../.." && pwd)"
 src="${MODELS:-$HOME/.local/share/marginalia/models}"
 litert="${LITERT:-$HOME/.litert-lm/models/gemma-4-E2B-it.litertlm}"
 embed="${EMBED:-$HOME/.litert-lm/models/embeddinggemma-2-text-270m.litertlm}"

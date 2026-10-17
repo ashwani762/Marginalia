@@ -1,7 +1,7 @@
 # Removes what setup.ps1 made: the two scheduled tasks, the firewall rules, the installed programs.
 # The models and the node's identity and paired phones are kept unless you add -Purge.
-#   .\compute-node\windows\uninstall.ps1
-#   .\compute-node\windows\uninstall.ps1 -Purge     also delete the models and the node's state
+#   .\scripts\windows\uninstall.ps1
+#   .\scripts\windows\uninstall.ps1 -Purge     also delete the models and the node's state
 param([switch]$Purge)
 . (Join-Path $PSScriptRoot 'common.ps1')
 

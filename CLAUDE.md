@@ -2,8 +2,8 @@
 
 On Windows (working only on the compute node and its tray icon): read `docs/WINDOWS-PLAN.md` FIRST and nothing else until it
 sends you somewhere. It has the four commands to start, the list of likely Windows problems with the file for each, and what not to
-re-check. Run `.\compute-node\windows\verify.ps1`, fix the first failing line, use `.\compute-node\windows\dev.ps1` to rebuild and
-restart. After a `git pull` run `.\compute-node\windows\setup.ps1 -Quick`.
+re-check. Run `.\scripts\windows\verify.ps1`, fix the first failing line, use `.\scripts\windows\dev.ps1` to rebuild and
+restart. After a `git pull` run `.\scripts\windows\setup.ps1 -Quick`.
 
 Everywhere else read `docs/ARCHITECTURE.md` and `docs/DEVELOPMENT.md` first.
 

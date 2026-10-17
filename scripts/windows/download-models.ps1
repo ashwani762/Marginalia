@@ -1,8 +1,8 @@
 # Downloads the model files the node serves (about 3.7 GB: chat Gemma 4 E2B, search and speech to text). -ChatModel e4b fetches the larger chat model (4.6 GB) that the tray menu can switch to. Safe to stop and run again, it continues.
-#   .\compute-node\windows\download-models.ps1
-#   .\compute-node\windows\download-models.ps1 -Only search      (or chat, or speech)
-#   .\compute-node\windows\download-models.ps1 -SkipSpeech        leave out the speech model (570 MB)
-#   .\compute-node\windows\download-models.ps1 -Dir D:\models
+#   .\scripts\windows\download-models.ps1
+#   .\scripts\windows\download-models.ps1 -Only search      (or chat, or speech)
+#   .\scripts\windows\download-models.ps1 -SkipSpeech        leave out the speech model (570 MB)
+#   .\scripts\windows\download-models.ps1 -Dir D:\models
 # With a built node it simply runs  marginalia-node.exe models download.  Without one (before the first
 # build) it downloads the same files itself. If Hugging Face asks for a login, set $env:HF_TOKEN first.
 param(

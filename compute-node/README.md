@@ -36,9 +36,9 @@ One caveat to be straight about: the process necessarily sees the text while it 
 ## Build
 
 ```sh
-compute-node/build.sh              # CUDA build; CUDAARCHS defaults to 89 (RTX 40 series)
-CUDAARCHS=86 compute-node/build.sh # another card, e.g. RTX 30 series
-compute-node/build.sh --cpu-only   # no CUDA; also what a Raspberry Pi needs
+scripts/node/build.sh              # CUDA build; CUDAARCHS defaults to 89 (RTX 40 series)
+CUDAARCHS=86 scripts/node/build.sh # another card, e.g. RTX 30 series
+scripts/node/build.sh --cpu-only   # no CUDA; also what a Raspberry Pi needs
 ```
 
 The binary ends up at `target/release/marginalia-node` in the repository root. The first build takes a long time because it compiles llama.cpp. Build only the node with `cargo build --release -p marginalia-node`; do not build the whole workspace, the phone core in `core/` is built separately for Android.
@@ -111,7 +111,7 @@ A node with the speech model can write out a recording with a large Whisper mode
 
 ```sh
 cargo build --release -p marginalia-node-tray   # pure Rust, no system packages
-compute-node/packaging/install-linux.sh         # installs it and adds it to ~/.config/autostart
+scripts/node/install-linux.sh         # installs it and adds it to ~/.config/autostart
 marginalia-node-tray --print                    # prints the menu as text and exits, to check the setup
 ```
 
@@ -132,27 +132,27 @@ marginalia-node-tray --print                    # prints the menu as text and ex
 - **How it is built.** The tray and the panel are the same program. The tray starts `marginalia-node-tray --panel` as a second process when the panel is wanted and stops it when it is not, so the tray stays small. The panel polls the node every 1.5 seconds while it is open. On Windows the panel appears bottom right above the taskbar, on X11 top right, and on Wayland the compositor chooses the place because windows cannot position themselves there.
 - **Ubuntu.** The top bar shows the icon through the AppIndicator extension, which ships and is on by default. On a plain GNOME without it: `sudo apt install gnome-shell-extension-appindicator` and log in again. The icon uses the StatusNotifierItem protocol over D-Bus (the `ksni` crate) and the panel uses `egui` with OpenGL, so no GTK or other development packages are needed. The OpenGL, X11 and Wayland libraries are loaded at run time and are on any desktop.
 - Short messages (for example "Could not pause the node") use `notify-send`, so the `libnotify-bin` package must be installed (Ubuntu has it).
-- On Windows it uses the `tray-icon` crate. It builds and runs, and `windows\setup.ps1` starts it at login. The right-click menu also lets you switch the chat model between E2B and E4B, which restarts the node.
+- On Windows it uses the `tray-icon` crate. It builds and runs, and `scripts\windows\setup.ps1` starts it at login. The right-click menu also lets you switch the chat model between E2B and E4B, which restarts the node.
 - It is built on its own and is not part of the default workspace build.
 
 ## Firewall and network
 
 - **UDP 47615 inbound** must be allowed for phones to connect (QUIC runs on UDP, so a TCP rule does nothing). If you change `--port`, open that port instead.
 - **UDP 5353** (mDNS multicast) must not be blocked on the local network for discovery to work. On the node it is outbound/multicast traffic, which most firewalls permit by default.
-- **Windows** shows a firewall prompt the first time the node runs. Allow it on private networks. If you dismissed it, add an inbound rule for UDP 47615. `windows\setup.ps1` adds the rules for UDP 47615 and 5353 for you.
+- **Windows** shows a firewall prompt the first time the node runs. Allow it on private networks. If you dismissed it, add an inbound rule for UDP 47615. `scripts\windows\setup.ps1` adds the rules for UDP 47615 and 5353 for you.
 - **Linux with ufw:** `sudo ufw allow 47615/udp`. With firewalld: `sudo firewall-cmd --add-port=47615/udp --permanent && sudo firewall-cmd --reload`.
 - **Guest Wi-Fi, client isolation and some mesh systems** stop devices from seeing each other, which breaks mDNS discovery and sometimes direct connections. If the phone cannot find the node, check that both are on the same ordinary network, then add the compute node by address (`marginalia-node pair` prints it, for example `192.168.1.20:47615`). If isolation is on, the address will not work either; turn it off or put both on the same network.
 - The node does not open any port to the internet and does not need a router rule. Do not forward the port.
 
 ## Windows
 
-`windows/` has PowerShell scripts for a one command setup (`.\compute-node\windows\setup.ps1`): prerequisites check with the exact winget commands, GPU backend detection (CUDA, Vulkan or CPU), build, install to `%LOCALAPPDATA%\MarginaliaNode`, model download (`marginalia-node.exe models download`), Task Scheduler entries for the node and the tray at logon, and Windows Firewall rules. See `windows/README.md` for the quick start and a troubleshooting table, and `packaging/windows.md` for the manual steps. The scripts and the node were run on Windows 11 with an NVIDIA RTX 4060 (CUDA). `verify.ps1` passes all 19 checks there, including the self tests for search, chat and speech. Still to try by hand are the tray clicks, a reboot and a real phone on the same Wi-Fi.
+`scripts/windows/` has PowerShell scripts for a one command setup (`.\scripts\windows\setup.ps1`): prerequisites check with the exact winget commands, GPU backend detection (CUDA, Vulkan or CPU), build, install to `%LOCALAPPDATA%\MarginaliaNode`, model download (`marginalia-node.exe models download`), Task Scheduler entries for the node and the tray at logon, and Windows Firewall rules. See `scripts/windows/README.md` for the quick start and a troubleshooting table, and `packaging/windows.md` for the manual steps. The scripts and the node were run on Windows 11 with an NVIDIA RTX 4060 (CUDA). `verify.ps1` passes all 19 checks there, including the self tests for search, chat and speech. Still to try by hand are the tray clicks, a reboot and a real phone on the same Wi-Fi.
 
 Needs: Visual Studio Build Tools (C++), CMake 4.2 or newer when Visual Studio 2026 is installed, Rust 1.95 or newer, LLVM, and the CUDA toolkit for the graphics card. `setup.ps1` checks each one and upgrades CMake and Rust when they are too old. The chat model is E2B unless you switch it with `marginalia-node chat-model e4b` or from the tray menu. `setup.ps1` downloads both.
 
 ## Raspberry Pi
 
-A Pi 4 or 5 (64-bit OS) can run the node, CPU only (`compute-node/build.sh --cpu-only`, or the Dockerfile in `packaging/`). Be honest about what to expect: on a Pi, chat is slower than a recent phone's GPU, so the phone's speed comparison will normally skip the Pi for chat and keep doing it locally. Search (embeddings) is cheaper and the Pi is still useful there, especially for indexing a lot of documents while the phone is on charge. Building on the Pi itself takes a long while and needs swap or at least 4 GB of RAM; cross-building or using the Dockerfile on a faster machine is easier.
+A Pi 4 or 5 (64-bit OS) can run the node, CPU only (`scripts/node/build.sh --cpu-only`, or the Dockerfile in `packaging/`). Be honest about what to expect: on a Pi, chat is slower than a recent phone's GPU, so the phone's speed comparison will normally skip the Pi for chat and keep doing it locally. Search (embeddings) is cheaper and the Pi is still useful there, especially for indexing a lot of documents while the phone is on charge. Building on the Pi itself takes a long while and needs swap or at least 4 GB of RAM; cross-building or using the Dockerfile on a faster machine is easier.
 
 ## Protocol versioning
 
@@ -166,7 +166,7 @@ These are plans, not features:
 - Live speech (streaming transcription) on the node as one open stream. Short windows of a recording in progress are served (see above), the phone cuts them.
 - Fan-out of one write-up across several nodes.
 - Per-client priority and fairness (today the order is by job priority, not by who asked).
-- A true Windows service wrapper (for now `windows/setup.ps1` makes login tasks).
+- A true Windows service wrapper (for now `scripts/windows/setup.ps1` makes login tasks).
 - Access from outside your network (the node is for the local network only).
 
 ## Files
@@ -175,5 +175,5 @@ These are plans, not features:
 - `node/` the node program.
 - `tray/` the tray icon program (crate `marginalia-node-tray`).
 - `vendor/` a patched `llama-cpp-sys-2` that includes support for EmbeddingGemma 2.
-- `windows/` PowerShell setup, build, model download, status and uninstall scripts.
-- `packaging/` systemd unit, tray autostart entry, Linux install script, Windows notes, CPU-only Dockerfile.
+- The scripts live in the top level `scripts/` folder: `scripts/node/` for Linux and `scripts/windows/` for Windows.
+- `packaging/` systemd unit, tray autostart entry, Windows notes, CPU-only Dockerfile.

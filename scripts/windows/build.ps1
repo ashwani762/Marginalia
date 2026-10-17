@@ -1,6 +1,6 @@
 # Builds marginalia-node and marginalia-node-tray in release mode, picking the GPU backend by itself.
-#   .\compute-node\windows\build.ps1             pick CUDA, Vulkan or CPU automatically
-#   .\compute-node\windows\build.ps1 -Cpu        force the CPU only build
+#   .\scripts\windows\build.ps1             pick CUDA, Vulkan or CPU automatically
+#   .\scripts\windows\build.ps1 -Cpu        force the CPU only build
 # The results are target\release\marginalia-node.exe and target\release\marginalia-node-tray.exe
 # in the repository. The first build compiles llama.cpp and takes a long while.
 param(

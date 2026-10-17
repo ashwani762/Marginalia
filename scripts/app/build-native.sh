@@ -2,9 +2,9 @@
 # Builds the Rust core (whisper.cpp + RAG + meetings) for Android and drops the
 # shared libraries into app/src/main/jniLibs.
 #
-#   scripts/build-native.sh            all variants
-#   scripts/build-native.sh arm64      phone builds only (baseline + i8mm)
-#   scripts/build-native.sh x86_64     emulator build only
+#   scripts/app/build-native.sh            all variants
+#   scripts/app/build-native.sh arm64      phone builds only (baseline + i8mm)
+#   scripts/app/build-native.sh x86_64     emulator build only
 #
 # arm64 is built twice: a baseline for any Armv8.2 phone (dotprod) and an i8mm build
 # for Armv8.6+/Armv9 phones. The app picks one at launch from /proc/cpuinfo.
@@ -13,7 +13,7 @@
 #   ANDROID_NDK_HOME   NDK to use (default: the newest one under ~/Android/Sdk/ndk)
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")/.." && pwd)"
+root="$(cd "$(dirname "$0")/../.." && pwd)"
 core="$root/core"
 jni="$root/app/src/main/jniLibs"
 : "${ANDROID_NDK_HOME:=$(ls -d "$HOME"/Android/Sdk/ndk/* | sort -V | tail -1)}"

@@ -2,7 +2,7 @@
 # Development shortcut: copy the models to a connected device or emulator instead of
 # embedding them in the APK (build that APK with -Pmarginalia.embedModels=false).
 #
-#   scripts/push-models.sh
+#   scripts/app/push-models.sh
 #
 # Environment:
 #   MODELS   folder with the Whisper file       (default: ~/.local/share/marginalia/models)

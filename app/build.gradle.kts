@@ -76,7 +76,7 @@ dependencies {
     implementation("androidx.exifinterface:exifinterface:1.4.1")
     // Google LiteRT-LM runs Gemma and EmbeddingGemma
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
-    // Speaker separation (sherpa-onnx, Apache-2.0). Fetch the library with scripts/fetch-sherpa.sh.
+    // Speaker separation (sherpa-onnx, Apache-2.0). Fetch the library with scripts/app/fetch-sherpa.sh.
     implementation(files("libs/sherpa-onnx-1.13.8.aar"))
     // Unpacks the small speaker model archive (bzip2).
     implementation("org.apache.commons:commons-compress:1.27.1")

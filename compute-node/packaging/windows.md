@@ -1,19 +1,19 @@
 # Running the node on Windows
 
-The easy way is the setup script in `../windows/`: `.\compute-node\windows\setup.ps1` builds, installs, downloads the models, starts the node and the tray at logon, opens the firewall and runs `verify.ps1`. It skips steps that are already done. See `../windows/README.md`. It is untested on a real Windows machine so far. The manual steps below are what it automates, for when you want to do it by hand or fix something.
+The easy way is the setup script in `../windows/`: `.\scripts\windows\setup.ps1` builds, installs, downloads the models, starts the node and the tray at logon, opens the firewall and runs `verify.ps1`. It skips steps that are already done. See `../windows/README.md`. It is untested on a real Windows machine so far. The manual steps below are what it automates, for when you want to do it by hand or fix something.
 
 Day to day on Windows:
 
-- `..\windows\verify.ps1` checks everything in 20 lines and prints the command for the first failure.
-- `..\windows\dev.ps1 node` (or `tray`, or nothing for both) builds, replaces the running programs, starts them and follows `node.log`.
-- `..\windows\setup.ps1 -Quick` after a `git pull`: incremental build, copy, restart, verify.
+- `..\..\scripts\windows\verify.ps1` checks everything in 20 lines and prints the command for the first failure.
+- `..\..\scripts\windows\dev.ps1 node` (or `tray`, or nothing for both) builds, replaces the running programs, starts them and follows `node.log`.
+- `..\..\scripts\windows\setup.ps1 -Quick` after a `git pull`: incremental build, copy, restart, verify.
 - `docs/WINDOWS-PLAN.md` lists the likely Windows problems and the file to look at for each.
 
 ## Once
 
 1. Build the node and copy `marginalia-node.exe` somewhere permanent. The script uses `%LOCALAPPDATA%\MarginaliaNode\`.
 2. Get the model files (chat, search and the speech model for transcribing recordings, add `--skip-speech` to leave that one out) into `%APPDATA%\marginalia\models` with `marginalia-node.exe models download` (or choose another folder with `--dir` there and `--models` below). `marginalia-node.exe models list` shows what is present.
-3. Run `marginalia-node.exe run` once from a terminal. Windows asks about the firewall. Allow it on **private networks**. If you missed the prompt, add inbound rules in Windows Defender Firewall for UDP port 47615 (the node) and UDP 5353 (discovery), or run `..\windows\firewall.ps1 -Action Add -Exe <path>` in an administrator window.
+3. Run `marginalia-node.exe run` once from a terminal. Windows asks about the firewall. Allow it on **private networks**. If you missed the prompt, add inbound rules in Windows Defender Firewall for UDP port 47615 (the node) and UDP 5353 (discovery), or run `..\..\scripts\windows\firewall.ps1 -Action Add -Exe <path>` in an administrator window.
 4. In another terminal run `marginalia-node.exe pair` and type the code on the phone, or just tap Connect in the app under Settings, Compute nodes.
 
 ## Start at login
@@ -53,4 +53,4 @@ When you pick "Stop node" the node finishes running jobs (up to 10 seconds) and 
 - If the machine sleeps, the node is unreachable. Set **Sleep** to Never while plugged in if you want it always available.
 - Files: identity and paired phones live in `%APPDATA%\marginalia-node`, models in `%APPDATA%\marginalia\models`, the log in `%LOCALAPPDATA%\MarginaliaNode\node.log`.
 - To stop it: `marginalia-node.exe stop`, or "Stop node" in the tray, or End the task in Task Scheduler.
-- To remove everything the script made: `..\windows\uninstall.ps1` (add `-Purge` to delete models and state as well).
+- To remove everything the script made: `..\..\scripts\windows\uninstall.ps1` (add `-Purge` to delete models and state as well).

@@ -83,7 +83,7 @@ sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
 
 ## Building on Windows
 
-The quick way is `.\compute-node\windows\setup.ps1` (see `compute-node/windows/README.md`). It was run on Windows 11
+The quick way is `.\scripts\windows\setup.ps1` (see `scripts/windows/README.md`). It was run on Windows 11
 (see "Verified on Windows" below). What the scripts do:
 
 - `setup.ps1`: checks Git, Rust (MSVC), Visual Studio Build Tools (C++), CMake, LLVM (libclang, sets `LIBCLANG_PATH`) and the
@@ -110,13 +110,13 @@ models in `%APPDATA%\marginalia\models`.
 ## The Android app on Windows
 
 The scripts are bash. Use Git Bash or WSL for `scripts/*.sh`, or run the steps by hand: `cargo ndk` for the
-`core` crate (`scripts/build-native.sh` shows the flags and the two CPU variants), then `gradlew assembleRelease`.
-Models for the APK are linked by `scripts/stage-models.sh` (symlinks, so use WSL or copy the files into
+`core` crate (`scripts/app/build-native.sh` shows the flags and the two CPU variants), then `gradlew assembleRelease`.
+Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use WSL or copy the files into
 `models-stage/models`). When more than one device is attached, set `ANDROID_SERIAL`.
 
 ## Next steps (in order)
 
-1. Run `windows\setup.ps1` on Windows, run the node and the tray there and fix what breaks.
+1. Run `scripts\windows\setup.ps1` on Windows, run the node and the tray there and fix what breaks.
 2. Cluster: peers pair and gossip, entry node forwards jobs, block records spread, hot-hot and standby (`DESIGN.md`).
 3. Speech on nodes: the phone uses the `Transcribe` request to replace its live transcript after a meeting (the node side is done and checked), and sends short windows with a prompt during the meeting (the node side is done and checked, see above), then live streaming with failover.
 4. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).

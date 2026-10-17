@@ -1,8 +1,8 @@
 # Quick acceptance check of the compute node on Windows. One line per check, details only for the ones that fail.
-#   .\compute-node\windows\verify.ps1
-#   .\compute-node\windows\verify.ps1 -SkipProbe     leave out the self test (the checks that talk to the node as a phone would)
-#   .\compute-node\windows\verify.ps1 -SkipSpeech    you left out the speech model on purpose
-#   .\compute-node\windows\verify.ps1 -ModelsDir D:\models
+#   .\scripts\windows\verify.ps1
+#   .\scripts\windows\verify.ps1 -SkipProbe     leave out the self test (the checks that talk to the node as a phone would)
+#   .\scripts\windows\verify.ps1 -SkipSpeech    you left out the speech model on purpose
+#   .\scripts\windows\verify.ps1 -ModelsDir D:\models
 # Works before anything is installed too: then the first failing line says to run setup.ps1.
 # The last lines say how many checks passed and the one command to run for the first failing check.
 # The checks are numbered. docs\WINDOWS-PLAN.md lists them in the same order.

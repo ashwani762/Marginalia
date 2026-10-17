@@ -12,7 +12,7 @@ import java.io.IOException
 /**
  * The models ship inside the APK (`assets/models`). The first launch unpacks them into
  * private storage, where the engines can map them. For development they can instead be
- * pushed to the app's external files directory (see scripts/push-models.sh).
+ * pushed to the app's external files directory (see scripts/app/push-models.sh).
  */
 object ModelInstaller {
     const val LITERT_MODEL = "gemma-4-E2B-it.litertlm"

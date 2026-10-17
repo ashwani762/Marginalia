@@ -1,7 +1,7 @@
 # One command setup of the compute node on Windows. Safe to run again at any time, and fast when little changed.
 #
 #   Set-ExecutionPolicy -Scope Process Bypass
-#   .\compute-node\windows\setup.ps1
+#   .\scripts\windows\setup.ps1
 #
 # What it does: checks the tools it needs (and prints the exact winget command for each missing one),
 # builds the node and the tray icon, installs them to %LOCALAPPDATA%\MarginaliaNode, downloads the
@@ -342,7 +342,7 @@ if ((-not $Force.IsPresent) -and (Test-FirewallRules $nodeExe)) {
         if ($answer -match '^\s*n') { $go = $false }
     }
     if (-not $go) {
-        Step-Warn ('Firewall rules skipped. Phones will not find this node until they exist. Run later in an administrator window:  .\compute-node\windows\firewall.ps1 -Action Add -Exe "' + $nodeExe + '"')
+        Step-Warn ('Firewall rules skipped. Phones will not find this node until they exist. Run later in an administrator window:  .\scripts\windows\firewall.ps1 -Action Add -Exe "' + $nodeExe + '"')
         $problems++
     } else {
         if (Test-IsAdmin) {
@@ -353,7 +353,7 @@ if ((-not $Force.IsPresent) -and (Test-FirewallRules $nodeExe)) {
         if (Test-FirewallRules $nodeExe) {
             Step-Ok 'Firewall rules added for UDP 47615 and UDP 5353 on Private networks'
         } else {
-            Step-Warn ('The firewall rules were not added (permission refused?). Run in an administrator window:  .\compute-node\windows\firewall.ps1 -Action Add -Exe "' + $nodeExe + '"')
+            Step-Warn ('The firewall rules were not added (permission refused?). Run in an administrator window:  .\scripts\windows\firewall.ps1 -Action Add -Exe "' + $nodeExe + '"')
             $problems++
         }
     }
@@ -399,7 +399,7 @@ if ($NoVerify.IsPresent) {
 # ------------------------------------------------------------------------------------------------
 Write-Head 'Next steps'
 $mins = [int]((Get-Date) - $started).TotalMinutes
-if ($problems -eq 0 -and -not $verifyFailed) { Step-Ok ('Setup finished in about ' + $mins + ' minutes') } else { Step-Warn ('Setup finished with things to look at, see the lines above. Check again at any time with  .\compute-node\windows\verify.ps1') }
+if ($problems -eq 0 -and -not $verifyFailed) { Step-Ok ('Setup finished in about ' + $mins + ' minutes') } else { Step-Warn ('Setup finished with things to look at, see the lines above. Check again at any time with  .\scripts\windows\verify.ps1') }
 $addresses = @()
 if (Test-LocalPort $MN_AdminPort) {
     try { $addresses = @((& $nodeExe status | ConvertFrom-Json).addresses) } catch { }
@@ -410,9 +410,9 @@ Write-Host '              Drag it onto the taskbar to keep it visible. Left clic
 Write-Host '  Phone     : open the app, Settings, Compute nodes. It lists this machine by itself when both are'
 Write-Host '              on the same network, then tap Connect. Or run  marginalia-node.exe pair  for a code.'
 if ($addresses.Count -gt 0) { Write-Host ('  Addresses : ' + ($addresses -join '   ')) }
-Write-Host '  Check     : .\compute-node\windows\verify.ps1      (one line per check)'
-Write-Host '  After code changes : .\compute-node\windows\dev.ps1     (or  setup.ps1 -Quick  after a git pull)'
+Write-Host '  Check     : .\scripts\windows\verify.ps1      (one line per check)'
+Write-Host '  After code changes : .\scripts\windows\dev.ps1     (or  setup.ps1 -Quick  after a git pull)'
 Write-Host ('  Log       : ' + $logFile)
-Write-Host '  Remove    : .\compute-node\windows\uninstall.ps1'
+Write-Host '  Remove    : .\scripts\windows\uninstall.ps1'
 Write-Host ''
 if ($problems -gt 0 -or $verifyFailed) { exit 1 }

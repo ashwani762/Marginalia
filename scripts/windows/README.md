@@ -5,10 +5,10 @@ One command sets up the node and its tray icon: it checks the tools, builds, ins
 Working on the node code on Windows? Read `docs/WINDOWS-PLAN.md` first. The short version:
 
 ```powershell
-.\compute-node\windows\setup.ps1 -Auto     # once (add -Cpu first if the GPU build gives trouble)
-.\compute-node\windows\verify.ps1          # 20 lines, failures explain themselves, the last lines give the next command
-.\compute-node\windows\dev.ps1 node        # after a change: build, replace, restart, follow node.log (also: tray, or nothing for both)
-.\compute-node\windows\setup.ps1 -Quick    # after a git pull: incremental build, copy, restart, verify
+.\scripts\windows\setup.ps1 -Auto     # once (add -Cpu first if the GPU build gives trouble)
+.\scripts\windows\verify.ps1          # 20 lines, failures explain themselves, the last lines give the next command
+.\scripts\windows\dev.ps1 node        # after a change: build, replace, restart, follow node.log (also: tray, or nothing for both)
+.\scripts\windows\setup.ps1 -Quick    # after a git pull: incremental build, copy, restart, verify
 ```
 
 ## Quick start
@@ -18,10 +18,10 @@ Working on the node code on Windows? Read `docs/WINDOWS-PLAN.md` first. The shor
 3. `git clone --depth 1 <repository url> C:\src\foresight` (a short folder name keeps the build paths short).
 4. `cd C:\src\foresight`
 5. `Set-ExecutionPolicy -Scope Process Bypass` (only for this window, changes nothing permanent).
-6. `.\compute-node\windows\setup.ps1` (add `-Auto` to let it run the winget installs for missing tools).
+6. `.\scripts\windows\setup.ps1` (add `-Auto` to let it run the winget installs for missing tools).
 7. If it lists missing tools, install them (it prints the exact `winget install` lines), open a NEW PowerShell window and run step 6 again.
 8. Allow the one Windows permission prompt for the firewall rules.
-9. Setup ends with `verify.ps1`. Fix the first failing line with the command it prints. Run `.\compute-node\windows\verify.ps1` again any time.
+9. Setup ends with `verify.ps1`. Fix the first failing line with the command it prints. Run `.\scripts\windows\verify.ps1` again any time.
 10. Look for the tray icon by the clock (maybe behind the `^` arrow). On the phone: Settings, Compute nodes. The phone finds this machine by itself, tap Connect.
 11. `marginalia-node.exe stats` (in a new window) shows what the node has done.
 
@@ -73,7 +73,7 @@ The likely Windows build problems with the file to look at for each are in `docs
 | `path too long` or files not found deep inside `vendor` | Run `git config --global core.longpaths true` before cloning and keep the repository in a short folder such as `C:\src\foresight`. You can also turn on Windows long paths (administrator): `Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem LongPathsEnabled 1` |
 | `cargo` or `winget` is not recognised right after installing it | The window does not know the new PATH yet. Open a NEW PowerShell window. |
 | `running scripts is disabled on this system` | `Set-ExecutionPolicy -Scope Process Bypass`, then run the script again in the same window |
-| The firewall prompt did not appear or was refused | Run in an administrator window: `.\compute-node\windows\firewall.ps1 -Action Add -Exe "$env:LOCALAPPDATA\MarginaliaNode\marginalia-node.exe"`. `status.ps1` shows whether the rules exist. The rules apply to Private networks, so a network marked Public needs to be switched: Settings, Network and Internet, your network, Network profile type: Private |
+| The firewall prompt did not appear or was refused | Run in an administrator window: `.\scripts\windows\firewall.ps1 -Action Add -Exe "$env:LOCALAPPDATA\MarginaliaNode\marginalia-node.exe"`. `status.ps1` shows whether the rules exist. The rules apply to Private networks, so a network marked Public needs to be switched: Settings, Network and Internet, your network, Network profile type: Private |
 | Antivirus or SmartScreen flags or removes the exe | A new unsigned program that opens a network port can trigger this. Windows Security, Virus and threat protection, Protection history, Restore, and add an exclusion for `%LOCALAPPDATA%\MarginaliaNode`. Or build it yourself (it is the code in this repository), which is what these scripts do. Then run `setup.ps1 -SkipBuild` |
 | The phone cannot find the node on guest Wi-Fi | Guest networks usually isolate devices from each other, which blocks discovery and direct connections. Put the phone and this machine on the same ordinary network. `marginalia-node.exe status` shows the addresses, and in the app you can add the node by address. If isolation is on, the address will not work either |
 | The model download says access denied | Create a read token at https://huggingface.co/settings/tokens, accept the licence on the model page, then `$env:HF_TOKEN = "hf_..."` and run the download again. The token is only sent to Hugging Face, never printed |

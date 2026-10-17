@@ -5,14 +5,14 @@
 ```
 app/            Android app (Kotlin, Jetpack Compose)
 core/           Rust core for the phone (JNI library), whisper.cpp and RAG
-compute-node/   proto/ (wire protocol), node/ (daemon), tray/ (tray icon), packaging/, windows/, vendor/ (llama.cpp)
-scripts/        Build and device helpers for the phone app (bash)
+compute-node/   proto/ (wire protocol), node/ (daemon), tray/ (tray icon), packaging/, vendor/ (llama.cpp)
+scripts/        app/ (phone build helpers), node/ (Linux build and install), windows/ (PowerShell setup for the node)
 vendor/         ggml and whisper.cpp used by core/
 docs/           Architecture, audit notes, plans
 ```
 
 The Cargo workspace root is the repository root. `cargo build` and `cargo test` at the root cover the protocol and the node. The
-phone core is built for Android by `scripts/build-native.sh`.
+phone core is built for Android by `scripts/app/build-native.sh`.
 
 ## The phone app
 
@@ -20,16 +20,16 @@ Needs: Android SDK and NDK, Rust with the Android targets, `cargo-ndk`, a phone 
 recommended).
 
 ```bash
-scripts/fetch-sherpa.sh        # speaker separation library, fetched once
-scripts/build-native.sh arm64  # Rust core for the phone (baseline and i8mm variants)
-scripts/stage-models.sh        # link the models so Gradle can embed them (release build)
+scripts/app/fetch-sherpa.sh        # speaker separation library, fetched once
+scripts/app/build-native.sh arm64  # Rust core for the phone (baseline and i8mm variants)
+scripts/app/stage-models.sh        # link the models so Gradle can embed them (release build)
 ./gradlew assembleRelease      # about 3.2 GB with the models inside
 # development: small APK, models pushed over USB
-./gradlew assembleDebug -Pmarginalia.embedModels=false && scripts/push-models.sh
+./gradlew assembleDebug -Pmarginalia.embedModels=false && scripts/app/push-models.sh
 ```
 
 Models (never committed, see `.gitignore`): `gemma-4-E2B-it.litertlm`, `embeddinggemma-2-text-270m.litertlm` (LiteRT-LM) and
-`ggml-small-q8_0.bin` (whisper.cpp). `scripts/stage-models.sh` says where it looks for each.
+`ggml-small-q8_0.bin` (whisper.cpp). `scripts/app/stage-models.sh` says where it looks for each.
 
 Always set `ANDROID_SERIAL` before `adb` or `gradlew` when more than one device is attached.
 
@@ -39,14 +39,14 @@ Tests: `cd core && cargo test --lib`, `./gradlew :app:testDebugUnitTest`. Debug 
 ## The compute node
 
 ```bash
-compute-node/build.sh                 # CUDA build (or --cpu-only)
+scripts/node/build.sh                 # CUDA build (or --cpu-only)
 target/release/marginalia-node run
 cargo test -p marginalia-proto        # pairing, pinning, man in the middle, framing
 cargo test -p marginalia-node-tray    # tray icon logic
-compute-node/packaging/install-linux.sh   # user service and tray autostart
+scripts/node/install-linux.sh   # user service and tray autostart
 ```
 
-On Windows use `compute-node/windows/setup.ps1` (see `docs/WINDOWS-PLAN.md`). Node models are GGUF files, download them with
+On Windows use `scripts/windows/setup.ps1` (see `docs/WINDOWS-PLAN.md`). Node models are GGUF files, download them with
 `marginalia-node models download`.
 
 ## Conventions

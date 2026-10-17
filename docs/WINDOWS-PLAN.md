@@ -1,8 +1,8 @@
 # Windows plan: fix only what Windows needs
 
-You work on Windows on the compute node only (`compute-node/node`, `compute-node/tray`, `compute-node/windows`). Do not read the
+You work on Windows on the compute node only (`compute-node/node`, `compute-node/tray`, `scripts/windows`). Do not read the
 whole project. Everything in the section "Already verified" was checked on Linux and must not be re-checked or re-designed.
-Nothing in `compute-node/windows/*.ps1` and nothing Windows specific in the Rust code was ever run on Windows.
+Nothing in `scripts/windows/*.ps1` and nothing Windows specific in the Rust code was ever run on Windows.
 
 ## Start here
 
@@ -11,16 +11,16 @@ git config --global core.longpaths true
 git clone <repository url> C:\src\foresight     # a short path keeps the build paths short
 cd C:\src\foresight
 Set-ExecutionPolicy -Scope Process Bypass
-.\compute-node\windows\setup.ps1 -Auto      # tools, build, models, install, tasks, firewall, start, verify. Add -Cpu first if CUDA gives trouble
-.\compute-node\windows\verify.ps1           # 20 numbered lines, only failures explain themselves, the last lines give the command for the first failure
-.\compute-node\windows\dev.ps1 [node|tray]  # after each code change: build, replace, restart, follow node.log
+.\scripts\windows\setup.ps1 -Auto      # tools, build, models, install, tasks, firewall, start, verify. Add -Cpu first if CUDA gives trouble
+.\scripts\windows\verify.ps1           # 20 numbered lines, only failures explain themselves, the last lines give the command for the first failure
+.\scripts\windows\dev.ps1 [node|tray]  # after each code change: build, replace, restart, follow node.log
 ```
 
 The loop: run `verify.ps1`, take the FIRST failing line, find its row in the table below, fix that file, run `dev.ps1`, run `verify.ps1`
 again. Stop when it says `20 of 20 checks passed`. A build that fails stops `setup.ps1` before anything is installed. Fix it, run it again.
 It skips what is already done (it prints the skipped steps first) and `-Force` redoes everything.
 
-After a `git pull`: `.\compute-node\windows\setup.ps1 -Quick` (incremental build, copy, restart, verify).
+After a `git pull`: `.\scripts\windows\setup.ps1 -Quick` (incremental build, copy, restart, verify).
 
 Features are being added on the Linux side right now (live correction windows and more). Your only duty for those is that
 the node and the tray still build and `verify.ps1` still passes after you pull. Do not implement or review them.
@@ -37,13 +37,13 @@ the node and the tray still build and `verify.ps1` still passes after you pull. 
 | 6 | Duplicate symbol or unresolved `ggml_*` when linking whisper and llama together | same file, and the ggml include path `compute-node/vendor/llama-cpp-sys-2/llama.cpp/ggml` | One ggml only. The whisper object must not compile its own ggml. Check the CUDA and Vulkan defines match the llama build |
 | 7 | `cargo build -p marginalia-node-tray` fails | `compute-node/tray/src/windows.rs` (never compiled), `compute-node/tray/Cargo.toml` | Expect small API changes in `tray-icon` 0.26 and `winit` 0.30: the `TrayIconEvent::Click` fields, `MenuEvent::receiver`, `Icon::from_rgba`, `ApplicationHandler`, `EventLoop::run_app` |
 | 8 | Tray icon shows but behaves wrongly | `compute-node/tray/src/windows.rs`, `compute-node/tray/src/control.rs` | Left click must open the panel (`marginalia-node-tray.exe --panel`, an egui window) and right click must show the menu (`with_menu_on_left_click(false)` is already set). Spawned processes use `CREATE_NO_WINDOW` (`0x08000000`, `control.rs`), so no console flashes. The panel needs OpenGL: on a virtual machine or old drivers it may not open |
-| 9 | Node does not start at logon, or `node.log` is empty | `compute-node/windows/setup.ps1` (the `start-node.vbs` text and `Register-MnTask`) | Run `wscript //B //Nologo "%LOCALAPPDATA%\MarginaliaNode\start-node.vbs"` and read `node.log`. Quoting of the exe path and of `--models` is the usual cause. Then `Start-ScheduledTask -TaskName "Marginalia Node"`. The node must run hidden (no console window) |
+| 9 | Node does not start at logon, or `node.log` is empty | `scripts/windows/setup.ps1` (the `start-node.vbs` text and `Register-MnTask`) | Run `wscript //B //Nologo "%LOCALAPPDATA%\MarginaliaNode\start-node.vbs"` and read `node.log`. Quoting of the exe path and of `--models` is the usual cause. Then `Start-ScheduledTask -TaskName "Marginalia Node"`. The node must run hidden (no console window) |
 | 10 | Phone does not list the node, but `status` shows addresses | `compute-node/node/src/discovery.rs` (`lan_addresses` adapter filter, `advertise`) | Firewall rules for UDP 47615 and 5353 and the network profile must be Private. Check that the right adapter is announced (VPN, Hyper-V, WSL adapters are filtered by name). Windows has its own mDNS service on UDP 5353, so check the `mdns-sd` socket options. Fallback that must keep working: add the node by address in the app |
 | 11 | Probe fails on loopback although the node runs | `compute-node/proto` transport, `compute-node/node/src/server.rs` | Only if check 17 fails. QUIC over UDP on 127.0.0.1. Windows Firewall should allow loopback. Look at the `node.log` line when the knock arrives |
 | 12 | `status`, `stop`, `pause` cannot reach the node | `compute-node/node/src/admin.rs` | The admin port 47616 must listen on 127.0.0.1 only. `Test-NetConnection 127.0.0.1 -Port 47616` |
 | 13 | Models not found by the node | `compute-node/node/src/models_dl.rs` (`default_dir`), `main.rs` (`state_dir`) | Both use `dirs`: models in `%APPDATA%\marginalia\models`, state in `%APPDATA%\marginalia-node`. Check path separators if you build paths from strings. `--models "D:\x"` is passed by the launcher |
 | 14 | `path too long`, files missing in `vendor` | the clone | `git config --global core.longpaths true` BEFORE cloning, clone to `C:\src\foresight`, optionally turn on Windows long paths |
-| 15 | winget id wrong, script refuses to run, antivirus removes the exe | `compute-node/windows/*.ps1`, `compute-node/windows/README.md` | The script prints the exact install line. `Set-ExecutionPolicy -Scope Process Bypass`. Add an exclusion for `%LOCALAPPDATA%\MarginaliaNode` |
+| 15 | winget id wrong, script refuses to run, antivirus removes the exe | `scripts/windows/*.ps1`, `scripts/windows/README.md` | The script prints the exact install line. `Set-ExecutionPolicy -Scope Process Bypass`. Add an exclusion for `%LOCALAPPDATA%\MarginaliaNode` |
 
 Fix the script when the script is wrong (keep it PowerShell 5.1, ASCII only, simple). Fix the Rust when Windows needs it, and keep
 Linux behaviour (`cargo test -p marginalia-proto` and `cargo test -p marginalia-node-tray` must still pass on Linux, so use

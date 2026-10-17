@@ -1,5 +1,5 @@
 # Shows whether the node is running, the state of its tasks and its numbers.
-#   .\compute-node\windows\status.ps1
+#   .\scripts\windows\status.ps1
 . (Join-Path $PSScriptRoot 'common.ps1')
 Update-SessionPath
 

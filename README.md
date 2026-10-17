@@ -90,13 +90,13 @@ A job that fails moves to the next node and an answer cut off halfway carries on
 ### The phone app
 
 You need the Android SDK and NDK, Rust with the Android targets, `cargo-ndk` and a phone with USB debugging (Android 14 or newer,
-8 GB of memory recommended). The models are not in the repository, [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) names the three files and `scripts/stage-models.sh` says where it looks for each.
+8 GB of memory recommended). The models are not in the repository, [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) names the three files and `scripts/app/stage-models.sh` says where it looks for each.
 
 ```bash
-scripts/fetch-sherpa.sh        # speaker separation library, fetched once
-scripts/build-native.sh arm64  # Rust core for the phone
-scripts/stage-models.sh        # link the models so Gradle can embed them
-./gradlew assembleRelease      # about 3.2 GB with the models inside
+scripts/app/fetch-sherpa.sh        # speaker separation library, fetched once
+scripts/app/build-native.sh arm64  # Rust core for the phone
+scripts/app/stage-models.sh        # link the models so Gradle can embed them
+./gradlew assembleRelease          # about 3.2 GB with the models inside
 ```
 
 For daily work build a small debug APK and push the models over USB instead:
@@ -104,7 +104,7 @@ For daily work build a small debug APK and push the models over USB instead:
 ```bash
 export ANDROID_SERIAL=<your phone>   # needed when more than one device is attached
 ./gradlew assembleDebug -Pmarginalia.embedModels=false
-scripts/push-models.sh
+scripts/app/push-models.sh
 ```
 
 ### A compute node on Linux
@@ -112,9 +112,9 @@ scripts/push-models.sh
 You need Rust, CMake and a C++ toolchain. For an NVIDIA card also the CUDA toolkit.
 
 ```bash
-compute-node/build.sh                      # CUDA build, or add --cpu-only
+scripts/node/build.sh                 # CUDA build, or add --cpu-only
 target/release/marginalia-node models download
-compute-node/packaging/install-linux.sh    # user service and tray icon at login
+scripts/node/install-linux.sh         # user service and tray icon at login
 ```
 
 Then check it:
@@ -126,7 +126,7 @@ marginalia-node stats      # jobs, speed, errors (counts only, never content)
 
 ### A compute node on Windows
 
-Run `compute-node\windows\setup.ps1 -Auto` in PowerShell. It needs no bash. It installs missing tools, builds, downloads the models, installs the node and the tray icon, starts them at login and checks everything. Run `compute-node\windows\verify.ps1` any time to check again. See [docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md).
+Run `scripts\windows\setup.ps1 -Auto` in PowerShell. It needs no bash. It installs missing tools, builds, downloads the models, installs the node and the tray icon, starts them at login and checks everything. Run `scripts\windows\verify.ps1` any time to check again. See [docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md).
 
 ### Connect the phone
 
@@ -142,6 +142,7 @@ Use `marginalia-node lock` if you want to approve every new phone yourself, or `
 | Build with Vulkan (AMD, Intel) | `cargo build --release -p marginalia-node --features vulkan` |
 | Build the tray icon | `cargo build --release -p marginalia-node-tray` |
 | Show or fetch model files | `marginalia-node models list` and `marginalia-node models download` |
+| Choose the chat model (E2B is smaller and faster, E4B answers better) | `marginalia-node chat-model e4b`, then restart the node. The tray menu does the same |
 | Pause or resume new jobs | `marginalia-node pause` and `marginalia-node resume` |
 | Let a waiting phone in | `marginalia-node approve` |
 | Block or forget a phone | `marginalia-node block <id or name>` and `marginalia-node revoke <id or name>` |
@@ -161,16 +162,18 @@ compute-node/
   proto/        wire protocol, certificates, pairing, framing
   node/         the daemon
   tray/         tray icon and details panel
-  packaging/    Linux service files and install script, Docker file for a processor build
-  windows/      PowerShell setup, build, status and uninstall scripts
+  packaging/    systemd unit, tray autostart entry, Docker file for a processor build, Windows notes
   vendor/       patched llama.cpp bindings
-scripts/        build and device helpers for the app (bash)
+scripts/        every script, grouped by use
+  app/          build the phone core, fetch libraries, stage and push models (bash)
+  node/         build and install the compute node on Linux (bash)
+  windows/      setup, verify, dev, build, status and uninstall for the compute node (PowerShell)
 vendor/         ggml and whisper.cpp used by core/
-docs/           architecture, development, audit notes, plans, screenshots
+docs/           architecture, development, plans, screenshots
 ```
 
 The Cargo workspace root is the repository root, so `cargo build` and `cargo test` there cover the protocol and the node.
-The phone core is built for Android by `scripts/build-native.sh`.
+The phone core is built for Android by `scripts/app/build-native.sh`.
 
 ## Tests
 

@@ -1,9 +1,9 @@
 # The inner loop of development: build, replace the running programs, start them again, follow the node log.
 # One command per try. Needs setup.ps1 to have been run once.
-#   .\compute-node\windows\dev.ps1            build node and tray, restart both, follow node.log
-#   .\compute-node\windows\dev.ps1 node       only the node (the tray keeps running)
-#   .\compute-node\windows\dev.ps1 tray       only the tray (the node keeps running, so the models stay loaded)
-#   .\compute-node\windows\dev.ps1 node -NoLog   do not follow the log afterwards
+#   .\scripts\windows\dev.ps1            build node and tray, restart both, follow node.log
+#   .\scripts\windows\dev.ps1 node       only the node (the tray keeps running)
+#   .\scripts\windows\dev.ps1 tray       only the tray (the node keeps running, so the models stay loaded)
+#   .\scripts\windows\dev.ps1 node -NoLog   do not follow the log afterwards
 # Press Ctrl+C to stop following the log. The node and the tray keep running.
 # The backend (CUDA, Vulkan or CPU) is picked like setup.ps1 does. -Cpu, -Cuda and -Vulkan force one.
 param(
