@@ -123,6 +123,9 @@ pub extern "system" fn Java_app_marginalia_Native_init<'l>(
             core.boot_if_idle();
             return Ok(json!({"already": true}));
         }
+        if let Err(e) = crate::remote::init(Path::new(&data)) {
+            tracing::warn!("home computers are not available: {e:#}");
+        }
         let paths = Paths::new(Path::new(&data), Path::new(&models));
         let core = Core::new(paths, tz_offset)?;
         if llm_backend.starts_with("litert") {
@@ -253,6 +256,11 @@ fn call_generator(method: &str, sig: &str, args: &[JValue]) -> anyhow::Result<()
 /// priority queues.
 fn external_llm() -> LlmHandle {
     LlmHandle::external(Arc::new(|req: &GenRequest| -> anyhow::Result<GenStats> {
+        // A home computer takes the job when one is paired, on, and reachable. If it cannot start
+        // the job, the phone does it itself, as it always did.
+        if let Some(done) = crate::remote::get().and_then(|r| r.chat(req)) {
+            return done;
+        }
         let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = crossbeam_channel::unbounded::<(i32, String)>();
         REQUESTS.lock().get_or_insert_with(HashMap::new).insert(id, tx);
@@ -306,6 +314,9 @@ pub extern "system" fn Java_app_marginalia_Native_setEmbedder<'l>(env: JNIEnv<'l
 /// Embeddings computed in Kotlin by LiteRT-LM, behind [`EmbedHandle`].
 fn external_embed() -> EmbedHandle {
     EmbedHandle::external(Arc::new(|texts: Vec<String>| -> anyhow::Result<Vec<Vec<f32>>> {
+        if let Some(v) = crate::remote::get().and_then(|r| r.embed(&texts)) {
+            return Ok(v);
+        }
         let vm = VM.get().ok_or_else(|| anyhow::anyhow!("no JVM"))?;
         let emb = wait_for(&EMBEDDER, "the search model")?;
         let mut env = vm.attach_current_thread()?;

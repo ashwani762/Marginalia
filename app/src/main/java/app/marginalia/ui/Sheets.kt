@@ -127,7 +127,7 @@ fun Segmented(options: List<String>, selected: String, onSelect: (String) -> Uni
 }
 
 @Composable
-private fun SettingRow(title: String, subtitle: String? = null, trailing: @Composable () -> Unit) {
+internal fun SettingRow(title: String, subtitle: String? = null, trailing: @Composable () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title, style = type.body)
@@ -224,6 +224,8 @@ fun YouSheet(vm: AppVm, onDismiss: () -> Unit) {
                 languages.forEach { (code, name) -> Chip(name, selected = prefs.language == code) { vm.setPref("language", code) } }
             }
 
+            HomeComputersSection(vm)
+
             SectionLabel("Backup", Modifier.padding(top = 22.dp), flush = true)
             BackupRow(vm)
 
@@ -237,7 +239,7 @@ fun YouSheet(vm: AppVm, onDismiss: () -> Unit) {
                     Text("Private by design", style = type.headline)
                 }
                 Spacer(Modifier.height(6.dp))
-                Text("Transcription, notes, search and answers all run on this phone. Your audio and documents never leave it.", style = type.callout)
+                Text("Transcription, notes, search and answers run on this phone. Your audio and documents never leave it. If you trust a computer on your home network, the text for notes and answers goes to it while you are home, and it keeps none of it. Nothing goes to the internet.", style = type.callout)
                 if (info.isNotBlank()) {
                     Spacer(Modifier.height(10.dp))
                     Text(info, style = type.time)

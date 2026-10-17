@@ -1,0 +1,36 @@
+# CPU-only node for Linux x86_64 or ARM64 (for example a Raspberry Pi 64-bit OS).
+#
+# Build from the repository root:
+#   docker build -f compute-node/packaging/Dockerfile.cpu -t marginalia-node .
+# Run (host networking is needed so mDNS discovery reaches the local network):
+#   docker run -d --name marginalia-node --restart unless-stopped --network host \
+#     -v $HOME/.local/share/marginalia/models:/models:ro \
+#     -v marginalia-node-state:/state \
+#     marginalia-node
+# Then:  docker exec marginalia-node marginalia-node pair
+#
+# The node's control channel listens on 127.0.0.1 inside the container, which with --network host
+# is the host's loopback, so `docker exec ... pair` works.
+# Notes: the build compiles llama.cpp and takes a long time, especially on a Pi. The build context is
+# the repository root, so add a .dockerignore there listing target, app, models-stage and .git, or
+# Docker will upload gigabytes before it starts.
+
+FROM rust:1.85-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends cmake clang libclang-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY compute-node ./compute-node
+# The workspace lists the phone core too; the node build does not need its sources, but Cargo needs
+# the manifest to exist.
+COPY core ./core
+RUN cargo build --release -p marginalia-node
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/marginalia-node /usr/local/bin/marginalia-node
+VOLUME ["/models", "/state"]
+EXPOSE 47615/udp
+ENTRYPOINT ["marginalia-node", "--state-dir", "/state"]
+CMD ["run", "--models", "/models", "--cpu"]

@@ -13,6 +13,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -487,11 +488,16 @@ class AppVm(private val app: Application) {
 
     /** The app came to the front: make sure the models are there and pick up anything left unfinished. */
     fun onForeground() {
+        discovery.start()
+        startNodeWatch()
         viewModelScope.launch(Dispatchers.Default) {
             if (nativeReady) ensureModels()
         }
         resumeUnfinished()
     }
+
+    /** The window left the screen: stop listening for home computers. */
+    fun onBackground() { discovery.stop(); nodeWatch?.cancel(); nodeWatch = null }
 
     /** Finishes meetings whose notes were never completed (the app was ended mid-way, or a step failed). */
     fun resumeUnfinished() {
@@ -1329,6 +1335,198 @@ class AppVm(private val app: Application) {
         _prefs.update { it.copy(appearance = v) }
         setPref("appearance", v)
     }
+
+    // ------------------------------------------------------------------ home computers
+
+    private val _nodes = MutableStateFlow(HomeComputers())
+    val nodes: StateFlow<HomeComputers> = _nodes.asStateFlow()
+    private val _pairing = MutableStateFlow(false)
+    val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
+
+    /** Reports each computer that network discovery finds to the core. */
+    private val discovery = NodeDiscovery(app) { n ->
+        viewModelScope.launch(Dispatchers.Default) {
+            // A computer found while the app is still starting is reported as soon as the core is up.
+            var waited = 0
+            while (!nativeReady && waited < 120_000) { delay(250); waited += 250 }
+            if (!nativeReady) return@launch
+            runCatching {
+                backend.call("nodes.seen", JSONObject().put("name", n.name).put("id", n.id).put("port", n.port).put("addrs", JSONArray(n.addrs)))
+            }
+        }
+    }
+
+    /** Phones (by id) the person said "Not now" to or already answered. They are forgotten once the phone stops asking. */
+    private val _dismissed = MutableStateFlow<Set<String>>(emptySet())
+
+    /** The next phone waiting for the person's yes or no, from any approved computer. */
+    val approvalAsk: StateFlow<ApprovalAsk?> = combine(_nodes, _dismissed) { n, gone -> groupApprovals(n.paired, gone) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private suspend fun loadNodes() {
+        runCatching { backend.obj("nodes.list") }.onSuccess { j ->
+            val list = HomeComputers.from(j)
+            _nodes.value = list
+            val asking = askingPhones(list.paired)
+            _dismissed.update { d -> d.intersect(asking) }
+        }
+    }
+
+    private var nodeWatch: Job? = null
+
+    /** While the app is on screen and a computer is paired, look at the list now and then so a phone's request shows up wherever the person is. */
+    private fun startNodeWatch() {
+        if (nodeWatch?.isActive == true) return
+        nodeWatch = viewModelScope.launch {
+            while (!nativeReady) delay(250)
+            loadNodes()
+            while (true) {
+                delay(5000)
+                if (_nodes.value.paired.isNotEmpty()) loadNodes()
+            }
+        }
+    }
+
+    /** Keeps the list of home computers fresh. Call it from a screen that shows them, and cancel it when that screen closes. */
+    suspend fun watchNodes() {
+        while (!nativeReady) delay(250)
+        while (true) {
+            loadNodes()
+            delay(3000)
+        }
+    }
+
+    /** Pairs with a computer. [onDone] says whether it worked. */
+    fun pairNode(addr: String, id: String, code: String, onDone: (Boolean) -> Unit = {}) {
+        if (_pairing.value) return
+        _pairing.value = true
+        viewModelScope.launch {
+            val args = JSONObject().put("code", code.filter { it.isLetterOrDigit() }.uppercase()).put("phone_name", android.os.Build.MODEL)
+            if (addr.isNotBlank()) args.put("addr", addr.trim())
+            if (id.isNotBlank()) args.put("id", id)
+            var ok = false
+            try {
+                val res = backend.call("nodes.pair", args)
+                if (res is String && res.isNotBlank()) {
+                    toast("error", res)
+                } else {
+                    ok = true
+                    val name = (res as? JSONObject)?.optString("name").orEmpty()
+                    toast("success", if (name.isBlank()) "Computer added." else "$name is added.")
+                }
+            } catch (e: Exception) {
+                toast("error", e.message?.takeIf { it.isNotBlank() } ?: "That did not work. Check the code and try again.")
+            }
+            _pairing.value = false
+            loadNodes()
+            onDone(ok)
+        }
+    }
+
+    /** Asks a computer to trust this phone. The person has already said yes. [onDone] says whether it worked. */
+    fun trustNode(addr: String, id: String, onDone: (Boolean) -> Unit = {}) {
+        if (_pairing.value) return
+        _pairing.value = true
+        viewModelScope.launch {
+            val args = JSONObject().put("phone_name", android.os.Build.MODEL)
+            if (addr.isNotBlank()) args.put("addr", addr.trim())
+            if (id.isNotBlank()) args.put("id", id)
+            var ok = false
+            try {
+                val res = backend.call("nodes.trust", args)
+                if (res is String && res.isNotBlank()) {
+                    toast("error", res)
+                } else {
+                    ok = true
+                    val o = res as? JSONObject
+                    val name = o?.optString("name").orEmpty()
+                    if (o?.optString("state") == "waiting") toast("info", "Waiting for approval")
+                    else toast("success", if (name.isBlank()) "Connected" else "Connected to $name")
+                }
+            } catch (e: Exception) {
+                toast("error", e.message?.takeIf { it.isNotBlank() } ?: "That did not work. Check the address and try again.")
+            }
+            _pairing.value = false
+            loadNodes()
+            onDone(ok)
+        }
+    }
+
+    /** Answers another phone's request on every computer where it is pending. */
+    fun decideNode(ask: ApprovalAsk, allow: Boolean) {
+        _dismissed.update { it + ask.who }
+        viewModelScope.launch {
+            var failed: String? = null
+            for (c in ask.computers) {
+                try {
+                    backend.call("nodes.decide", JSONObject().put("fp", c.fp).put("who", ask.who).put("allow", allow))
+                } catch (e: Exception) {
+                    failed = failed ?: e.message ?: "Could not save that answer."
+                }
+            }
+            if (failed != null) {
+                _dismissed.update { it - ask.who }
+                toast("error", failed)
+            } else if (allow) {
+                toast("success", "${ask.phone.ifBlank { "That phone" }} can use ${ask.computers.size.let { if (it == 1) "the computer" else "$it computers" }}")
+            }
+            loadNodes()
+        }
+    }
+
+    /** Asks each computer in turn to trust this phone, then says how it went in one toast. */
+    fun trustAll(targets: List<FoundComputer>, onDone: (Boolean) -> Unit = {}) {
+        if (_pairing.value || targets.isEmpty()) return
+        _pairing.value = true
+        viewModelScope.launch {
+            var approved = 0; var waiting = 0; var firstError: String? = null
+            for (t in targets) {
+                val args = JSONObject().put("phone_name", android.os.Build.MODEL).put("id", t.id)
+                if (t.id.isBlank()) t.addrs.firstOrNull()?.let { args.put("addr", it) }
+                try {
+                    val res = backend.call("nodes.trust", args)
+                    if (res is String && res.isNotBlank()) { firstError = firstError ?: res }
+                    else if ((res as? JSONObject)?.optString("state") == "waiting") waiting++
+                    else approved++
+                } catch (e: Exception) {
+                    firstError = firstError ?: e.message?.takeIf { it.isNotBlank() } ?: "That did not work. Check the address and try again."
+                }
+            }
+            _pairing.value = false
+            loadNodes()
+            if (approved + waiting == 0) toast("error", firstError ?: "That did not work.")
+            else toast(if (waiting == 0) "success" else "info", trustSummary(approved, waiting))
+            onDone(approved + waiting > 0)
+        }
+    }
+
+    fun forgetNode(fp: String) {
+        viewModelScope.launch {
+            try {
+                backend.call("nodes.forget", JSONObject().put("fp", fp))
+                toast("info", "Computer removed.")
+            } catch (e: Exception) {
+                toast("error", e.message ?: "Could not remove that computer.")
+            }
+            loadNodes()
+        }
+    }
+
+    fun setNodesEnabled(on: Boolean) {
+        _nodes.update { it.copy(enabled = on) }
+        viewModelScope.launch {
+            try { backend.call("nodes.enable", JSONObject().put("on", on)) }
+            catch (e: Exception) { toast("error", e.message ?: "Could not change that.") }
+            loadNodes()
+        }
+    }
+
+    fun refreshNodes() {
+        viewModelScope.launch {
+            runCatching { backend.call("nodes.refresh") }
+            loadNodes()
+        }
+    }
 }
 
 private fun List<Jot>.upsertJot(j: Jot): List<Jot> =
@@ -1341,4 +1539,14 @@ fun formatClock(secs: Double): String {
     val t = secs.coerceAtLeast(0.0).toLong()
     val h = t / 3600; val m = (t / 60) % 60; val s = t % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
+}
+
+/** One sentence for the result of trusting several computers. Needs at least one that answered. */
+fun trustSummary(approved: Int, waiting: Int): String {
+    fun computers(n: Int) = if (n == 1) "1 computer" else "$n computers"
+    return when {
+        waiting == 0 -> "Connected to ${computers(approved)}"
+        approved == 0 -> if (waiting == 1) "Waiting for approval" else "Waiting for approval on $waiting computers"
+        else -> "Connected to ${computers(approved)}, $waiting ${if (waiting == 1) "is" else "are"} waiting for approval"
+    }
 }

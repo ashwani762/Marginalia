@@ -879,6 +879,46 @@ impl Core {
         self.emit(v);
     }
 
+    // ---------------------------------------------------------------- home computers
+
+    fn nodes_call(&self, method: &str, args: &Value) -> Result<Value> {
+        let r = crate::remote::get().ok_or_else(|| anyhow!("home computers are not available"))?;
+        let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        match method {
+            "nodes.list" => Ok(r.list()),
+            "nodes.seen" => {
+                let addrs: Vec<String> = args.get("addrs").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+                r.seen(&s("name"), &s("id"), args.get("port").and_then(Value::as_u64).unwrap_or(0) as u16, &addrs);
+                Ok(json!({}))
+            }
+            "nodes.pair" => {
+                let (addr, id) = (s("addr"), s("id"));
+                r.pair((!addr.is_empty()).then_some(addr.as_str()), (!id.is_empty()).then_some(id.as_str()), &s("code"), &s("phone_name"))
+            }
+            "nodes.trust" => {
+                let (addr, id) = (s("addr"), s("id"));
+                r.trust((!addr.is_empty()).then_some(addr.as_str()), (!id.is_empty()).then_some(id.as_str()), &s("phone_name"))
+            }
+            "nodes.decide" => {
+                r.decide(&s("fp"), &s("who"), args.get("allow").and_then(Value::as_bool).unwrap_or(false))?;
+                Ok(json!({}))
+            }
+            "nodes.forget" => {
+                r.forget(&s("fp"));
+                Ok(json!({}))
+            }
+            "nodes.enable" => {
+                r.set_enabled(args.get("on").and_then(Value::as_bool).unwrap_or(true));
+                Ok(json!({}))
+            }
+            "nodes.refresh" => {
+                r.refresh();
+                Ok(r.list())
+            }
+            _ => Err(anyhow!("unknown call {method}")),
+        }
+    }
+
     // ---------------------------------------------------------------- dispatch
 
     pub fn call(self: &Arc<Self>, method: &str, args: &Value) -> Result<Value> {
@@ -895,6 +935,7 @@ impl Core {
                 self.llm_on_gpu.store(args.get("gpu").and_then(Value::as_bool).unwrap_or(false), Ordering::Relaxed);
                 Ok(json!({}))
             }
+            m if m.starts_with("nodes.") => self.nodes_call(m, args),
             "db.checkpoint" => {
                 self.kb.store.checkpoint()?;
                 Ok(json!({}))
@@ -1076,6 +1117,17 @@ impl Core {
             }
             "chat.suggestions" => self.suggestions(opt_folder(args)),
             "stats.get" => self.stats(),
+            "debug.embed" => {
+                // Embeds the given texts the way a document would be, writes the vectors to a file in the
+                // app's files folder, and says which kind of path ran. Used to compare computers with the phone.
+                let texts: Vec<String> = args.get("texts").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+                let h = self.engine.embed().ok_or_else(|| anyhow!("the search model is not loaded"))?;
+                let t0 = Instant::now();
+                let v = h.embed(texts, crate::engine::embed::EmbedKind::Raw)?;
+                std::fs::write(self.paths.data_dir.join("debug_embed.json"), serde_json::to_vec(&v)?)?;
+                Ok(json!({"count": v.len(), "dim": v.first().map(|x| x.len()).unwrap_or(0), "secs": t0.elapsed().as_secs_f64()}))
+            }
+            "debug.llm_bench" => self.llm_bench(&s("system"), &s("user"), i("max_tokens") as usize),
             "debug.bench" => self.bench(&s("path")),
             "debug.whisper_bench" => {
                 // Loads another speech model next to the running one, times it on a file, and drops it.
@@ -3075,11 +3127,13 @@ impl Core {
         );
         match r {
             Ok((text, stats)) => {
-                let tps = if stats.elapsed_ms > 0 { stats.generated_tokens as f64 / (stats.elapsed_ms as f64 / 1000.0) } else { 0.0 };
+                let ms = if stats.remote_ms > 0 { stats.remote_ms as u128 } else { stats.elapsed_ms };
+                let tps = if ms > 0 { stats.generated_tokens as f64 / (ms as f64 / 1000.0) } else { 0.0 };
+                let place = match &stats.served_by { Some(n) => format!("on {n}"), None => "on device".to_string() };
                 let _ = started;
                 self.emit(json!({
                     "type": "chat", "turn": turn, "state": "done", "text": text,
-                    "stats": format!("{} tokens · {:.1} tok/s · on device", stats.generated_tokens, tps),
+                    "stats": format!("{} tokens · {:.1} tok/s · {}", stats.generated_tokens, tps, place),
                 }));
             }
             Err(e) => self.emit(json!({"type": "chat", "turn": turn, "state": "error", "error": e.to_string()})),

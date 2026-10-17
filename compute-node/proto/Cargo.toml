@@ -1,0 +1,23 @@
+[package]
+name = "marginalia-proto"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Wire protocol, identity and pairing shared by the Marginalia phone app and its home compute nodes"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+tokio = { version = "1", features = ["io-util", "sync", "time", "macros", "rt"] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+blake3 = "1"
+anyhow = "1"
+rand = "0.9"
+scrypt = { version = "0.11", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "net"] }

@@ -50,6 +50,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         AppState.foreground = false
+        vm.onBackground()
         super.onStop()
     }
 

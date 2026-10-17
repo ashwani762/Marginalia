@@ -1,0 +1,104 @@
+//! The local control channel: `marginalia-node pair`, `status` and `revoke` talk to the running
+//! daemon through a port that only this computer can reach.
+
+use crate::server::Shared;
+use anyhow::Result;
+use serde_json::{json, Value};
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    loop {
+        let (mut sock, _) = listener.accept().await?;
+        let sh = sh.clone();
+        tokio::spawn(async move {
+            let (r, mut w) = sock.split();
+            let mut line = String::new();
+            if BufReader::new(r).read_line(&mut line).await.is_err() {
+                return;
+            }
+            let req: Value = serde_json::from_str(&line).unwrap_or(json!({}));
+            let reply = match req["cmd"].as_str().unwrap_or("") {
+                "pair" => {
+                    let code = sh.open_pairing(5);
+                    let addrs: Vec<String> = crate::discovery::lan_addresses().iter().map(|a| format!("{a}:{node_port}")).collect();
+                    json!({"code": code, "minutes": 5, "name": sh.name, "addresses": addrs})
+                }
+                "status" => {
+                    let caps = sh.host.caps.lock().clone();
+                    json!({
+                        "name": sh.name, "fingerprint": sh.identity.fingerprint(), "locked": sh.locked.load(std::sync::atomic::Ordering::Relaxed),
+                        "chat": caps.chat, "embed": caps.embed, "chat_tok_s": caps.chat_tok_s, "embed_per_s": caps.embed_per_s,
+                        "blocked": sh.store.blocked_list().iter().map(|b| json!({"name": b.name, "id": &b.fp[..16], "at": b.at})).collect::<Vec<_>>(),
+                        "waiting": sh.pending_list().iter().map(|p| json!({"id": p.id, "name": p.name, "waited_s": p.waited_s})).collect::<Vec<_>>(),
+                        "clients": sh.store.list().iter().map(|c| json!({"name": c.name, "fp": &c.fp[..16], "paired_at": c.paired_at})).collect::<Vec<_>>(),
+                    })
+                }
+                "approve" | "deny" => {
+                    let allow = req["cmd"] == "approve";
+                    let pending = sh.pending_list();
+                    let who = req["who"].as_str().map(String::from).or_else(|| (pending.len() == 1).then(|| pending[0].id.clone()));
+                    match who {
+                        None if pending.is_empty() => json!({"error": "no phone is waiting"}),
+                        None => json!({"error": "more than one phone is waiting, name one", "waiting": pending.iter().map(|p| json!({"id": p.id, "name": p.name})).collect::<Vec<_>>()}),
+                        Some(w) => match sh.decide(&w, allow) {
+                            Ok(name) => json!({"done": if allow { "allowed" } else { "turned down" }, "name": name}),
+                            Err(e) => json!({"error": e}),
+                        },
+                    }
+                }
+                "block" => {
+                    let who = req["who"].as_str().unwrap_or("");
+                    if who.len() < 4 {
+                        json!({"error": "give at least 4 characters of the phone's id, or its name"})
+                    } else {
+                        let waiting: Vec<(String, String)> = sh.waiting.lock().iter().map(|(fp, w)| (fp.clone(), w.name.clone())).collect();
+                        match sh.store.block(who, &waiting) {
+                            Ok(names) => {
+                                sh.waiting.lock().retain(|fp, _| sh.store.is_blocked(fp) == false);
+                                json!({"blocked": names})
+                            }
+                            Err(e) => json!({"error": e.to_string()}),
+                        }
+                    }
+                }
+                "unblock" => json!({"unblocked": sh.store.unblock(req["who"].as_str().unwrap_or("")).unwrap_or(0)}),
+                "lock" | "unlock" => {
+                    let on = req["cmd"] == "lock";
+                    sh.locked.store(on, std::sync::atomic::Ordering::Relaxed);
+                    match sh.store.set_locked(on) {
+                        Ok(()) => json!({"locked": on}),
+                        Err(e) => json!({"error": e.to_string()}),
+                    }
+                }
+                "stats" => {
+                    let mut v = sh.metrics.snapshot();
+                    v["name"] = json!(sh.name);
+                    v
+                }
+                "revoke" => {
+                    let who = req["who"].as_str().unwrap_or("");
+                    if who.len() < 4 {
+                        json!({"error": "give at least 4 characters of the phone's id, or its name"})
+                    } else {
+                        json!({"removed": sh.store.revoke(who).unwrap_or(0)})
+                    }
+                }
+                _ => json!({"error": "unknown command"}),
+            };
+            let _ = w.write_all(format!("{reply}\n").as_bytes()).await;
+        });
+    }
+}
+
+/// The command-line side: send one command, print the answer.
+pub async fn ask(port: u16, cmd: Value) -> Result<Value> {
+    let mut sock = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .map_err(|_| anyhow::anyhow!("the node is not running (nothing is listening on 127.0.0.1:{port}). Start it with `marginalia-node run`."))?;
+    sock.write_all(format!("{cmd}\n").as_bytes()).await?;
+    let mut line = String::new();
+    BufReader::new(sock).read_line(&mut line).await?;
+    Ok(serde_json::from_str(&line)?)
+}

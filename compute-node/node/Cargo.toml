@@ -1,0 +1,36 @@
+[package]
+name = "marginalia-node"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A stateless compute node: serves the phone app's AI work from a computer on the home network"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "marginalia-node"
+path = "src/main.rs"
+
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+
+[dependencies]
+marginalia-proto = { path = "../proto" }
+llama-cpp-2 = { version = "=0.1.159", default-features = false, features = ["common", "openmp", "mtmd"] }
+llama-cpp-sys-2 = { version = "=0.1.159", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "signal", "fs"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+mdns-sd = "0.13"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "7"
+hostname = "0.4"
+if-addrs = "0.13"

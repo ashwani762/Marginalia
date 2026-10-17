@@ -45,6 +45,7 @@ class Backend(private val io: CoroutineDispatcher = Dispatchers.Default) {
         "engine.state", "engine.gpu", "db.checkpoint", "meeting.audio_add", "settings.get", "settings.set", "meeting.list", "meeting.get", "meeting.live", "meeting.rename",
         "meeting.delete", "meeting.set_folder", "meeting.live_folder", "meeting.jot_delete", "meeting.photo_delete",
         "kb.docs", "kb.doc", "folders.list", "folders.create", "folders.rename", "folders.delete",
+        "nodes.list", "nodes.seen", "nodes.pair", "nodes.trust", "nodes.decide", "nodes.forget", "nodes.enable", "nodes.refresh",
     )
 
     suspend fun call(method: String, args: JSONObject = JSONObject()): Any? {

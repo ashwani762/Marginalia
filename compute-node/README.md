@@ -1,0 +1,114 @@
+# Marginalia compute node
+
+A small program you run on a computer at home. It does the heavy AI work for the Marginalia phone app (writing up notes, answering questions, turning text into search vectors) so the phone does not have to. Phones you have paired with it send a job over the local network, the node runs it and sends the answer back.
+
+It is optional. The phone app works without it. If a node is reachable, the phone can use it for the jobs it is faster at.
+
+## What it keeps, and what it does not
+
+The node is stateless with respect to your work. It keeps exactly two things on disk:
+
+- its own identity (a self-signed certificate and key, made on first run), and
+- the list of paired phones (a fingerprint and a name for each).
+
+Nothing about a job is stored: not the text sent in, not the answer, not the search vectors, not a log of what was asked. A request and its answer exist in memory while the job runs and are gone when the connection stream ends. The node does not phone home, has no account, and talks to nothing outside your network. Its normal log lines say things like "paired with X" and "ready", not what anyone asked.
+
+One caveat to be straight about: the process necessarily sees the text while it is working on it, so anyone who can run code as the same user on that computer could in principle read its memory while a job runs.
+
+## How it works
+
+- **Transport.** QUIC over UDP (the `quinn` library), TLS 1.3, ALPN `marginalia/1`. One connection per phone, one stream per request.
+- **Identity.** Every device, node and phone, makes itself a self-signed certificate once. There are no certificate authorities and no names to check. Each side knows the other by the fingerprint (BLAKE3 hash) of its certificate.
+- **Mutual pinning.** After pairing, the phone only talks to a node whose fingerprint it saved, and the node only does work for phones whose fingerprint it saved. A phone that is not on the list gets as far as asking to pair and nothing else.
+- **Discovery.** The node announces itself with mDNS as `_marginalia._udp` so phones on the same network find it without typing an address. The announcement carries the protocol version, the first 16 characters of the node fingerprint and the node name. Nothing in it grants access.
+- **Connecting (the normal way).** The phone finds the node by itself. In the app, Settings, Home computers, it lists the computers it found and asks "Trust this computer?". When the person taps Trust, the phone saves the node's fingerprint and the node lets the phone in, with no code and nothing to do at the computer. If several computers are found the phone asks once for all of them. The node keeps nothing about jobs, so a phone that gets in can only borrow the computer's speed, and the question that matters, whether to send your text to this computer, is answered on the phone.
+- **Locking.** `marginalia-node lock` (or `run --lock`) makes new phones wait instead. A waiting phone is allowed by a phone that is already trusted (the app shows "Let X use this computer?") or with `marginalia-node approve`. `unlock` goes back to the default.
+- **Pairing with a code (strict).** Run `marginalia-node pair`. It prints a one-time code such as `K7QM-4TDX`, valid for 5 minutes and for five wrong guesses. On the phone you type the code under "Pair with a code instead". The phone connects without trusting anything yet and sends a proof that it knows the code. The proof is a keyed hash of the code (stretched with scrypt), the secret of that exact TLS session and both certificate fingerprints. The code itself is never sent. The node checks the proof and replies with its own proof. Only when the phone has checked the node's proof does it save the node's fingerprint. Because the proof is tied to the TLS session, a device sitting in the middle and relaying messages cannot make pairing succeed: its two sessions have different secrets. This is covered by the tests in `proto/tests/handshake.rs`. Use this route if you do not want to trust whatever answers on the network the first time.
+- **Jobs.** Chat (streamed tokens), embeddings (search vectors) and a status request. Jobs have a priority: interactive (someone is waiting), background (notes, write-ups) and bulk (indexing). The node serves them in that order and tells the phone how many jobs are ahead of it.
+
+## Requirements
+
+- A computer on the same network as the phones. Linux x86_64 and ARM64 are the tested targets. Windows is expected to work, macOS is untested.
+- Rust 1.85 or newer, CMake and a C++ compiler (the llama.cpp engine is built from source).
+- For the GPU build: an NVIDIA card and the CUDA toolkit. Without them use the CPU-only build.
+- The two model files (see below). Enough disk and memory for both models (a few GB; check the file sizes).
+
+## Build
+
+```sh
+compute-node/build.sh              # CUDA build; CUDAARCHS defaults to 89 (RTX 40 series)
+CUDAARCHS=86 compute-node/build.sh # another card, e.g. RTX 30 series
+compute-node/build.sh --cpu-only   # no CUDA; also what a Raspberry Pi needs
+```
+
+The binary ends up at `target/release/marginalia-node` in the repository root. The first build takes a long time because it compiles llama.cpp. Build only the node with `cargo build --release -p marginalia-node`; do not build the whole workspace, the phone core in `core/` is built separately for Android.
+
+## Models
+
+Put these two files in the models folder:
+
+| File | Used for |
+| --- | --- |
+| `gemma-4-E2B-it-Q4_0.gguf` | chat (write-ups, answers) |
+| `embeddinggemma-2-Q8_0.gguf` | search (embeddings) |
+
+The default folder is `~/.local/share/marginalia/models/` on Linux (`%APPDATA%\marginalia\models` on Windows). Use another folder with `--models DIR`, or point at single files with `--chat-model FILE` and `--embed-model FILE`. If only one of the two files is present the node serves only that job type and says so in its status. If neither is found it refuses to start.
+
+At start the node runs a short measurement and reports tokens per second for chat and passages per second for search. Phones use those numbers to decide whether this node is worth using for a given job.
+
+## Commands
+
+```sh
+marginalia-node run [--port 47615] [--name NAME] [--models DIR] [--cpu]
+marginalia-node pair
+marginalia-node status
+marginalia-node revoke <id or name>
+marginalia-node probe <addr:port> [--code CODE]
+```
+
+- `run` starts the node in the foreground and stops on Ctrl-C. `--cpu` keeps the models off the graphics card at run time (the build still has to match). `--name` is what phones show; it defaults to the computer's name.
+- `pair` asks the running node for a one-time code and prints it with the addresses the node can be reached at. On the phone: Settings, Home computers, Add a computer.
+- `status` prints what the running node serves, its measured speed and the paired phones with their ids.
+- `stats` prints how much work the node has done: jobs, failures, tokens and passages, speed, per phone totals and the size and duration of recent jobs. Numbers only, never any content. The counters live in memory and restart from zero with the node.
+- `approve` / `deny` answer a phone that is waiting (when locked). `lock` / `unlock` switch between the two modes.
+- `revoke` forgets a phone. Use the id from `status` or the phone's name. That phone is a stranger again and has to pair anew.
+- `probe` behaves like a phone: connects to an address, optionally pairs with `--code`, and tries each job type. It is for checking that a node works, for example from another computer.
+
+`pair`, `status` and `revoke` talk to the running node through a control channel on `127.0.0.1:47616` (change with `--admin-port`). It only listens on this computer, so these commands must be run on the same machine as `run`.
+
+State (identity and paired list) lives in `~/.config/marginalia-node` on Linux. Change with `--state-dir`. Delete that folder to make the node a new device that no phone knows.
+
+## Firewall and network
+
+- **UDP 47615 inbound** must be allowed for phones to connect (QUIC runs on UDP, so a TCP rule does nothing). If you change `--port`, open that port instead.
+- **UDP 5353** (mDNS multicast) must not be blocked on the local network for discovery to work. On the node it is outbound/multicast traffic, which most firewalls permit by default.
+- **Windows** shows a firewall prompt the first time the node runs. Allow it on private networks. If you dismissed it, add an inbound rule for UDP 47615.
+- **Linux with ufw:** `sudo ufw allow 47615/udp`. With firewalld: `sudo firewall-cmd --add-port=47615/udp --permanent && sudo firewall-cmd --reload`.
+- **Guest Wi-Fi, client isolation and some mesh systems** stop devices from seeing each other, which breaks mDNS discovery and sometimes direct connections. If the phone cannot find the node, check that both are on the same ordinary network, then add the computer by address (`marginalia-node pair` prints it, for example `192.168.1.20:47615`). If isolation is on, the address will not work either; turn it off or put both on the same network.
+- The node does not open any port to the internet and does not need a router rule. Do not forward the port.
+
+## Raspberry Pi
+
+A Pi 4 or 5 (64-bit OS) can run the node, CPU only (`compute-node/build.sh --cpu-only`, or the Dockerfile in `packaging/`). Be honest about what to expect: on a Pi, chat is slower than a recent phone's GPU, so the phone's speed comparison will normally skip the Pi for chat and keep doing it locally. Search (embeddings) is cheaper and the Pi is still useful there, especially for indexing a lot of documents while the phone is on charge. Building on the Pi itself takes a long while and needs swap or at least 4 GB of RAM; cross-building or using the Dockerfile on a faster machine is easier.
+
+## Protocol versioning
+
+`PROTO_VERSION` (currently 1) and the ALPN string `marginalia/1` identify the wire format. The version is part of the TLS handshake through ALPN, so a phone and a node that disagree refuse each other cleanly instead of misreading messages. The version also appears in status and in the mDNS announcement. Changes that old peers can read keep the number; changes they cannot read bump it, and the phone and node need to be updated together. There is no negotiation of older versions yet.
+
+## Not built yet
+
+These are plans, not features:
+
+- Nodes that find, join and share work with each other (hot-hot, primary and standby, load balancing). The plan is in `DESIGN.md`.
+- Live speech (streaming transcription) on the node.
+- Fan-out of one write-up across several nodes.
+- Per-client priority and fairness (today the order is by job priority, not by who asked).
+- A Windows service wrapper (for now see `packaging/windows.md` for a login task).
+- Away-from-home access (the node is for the local network only).
+
+## Files
+
+- `proto/` shared wire protocol, identity and pairing (crate `marginalia-proto`), with tests in `proto/tests/`.
+- `node/` the node program.
+- `vendor/` a patched `llama-cpp-sys-2` that includes support for EmbeddingGemma 2.
+- `packaging/` systemd unit, Linux install script, Windows notes, CPU-only Dockerfile.

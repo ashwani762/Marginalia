@@ -12,6 +12,9 @@ name = "marginalia_core"
 crate-type = ["cdylib"]
 
 [dependencies]
+marginalia-proto = { path = "../compute-node/proto" }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
 jni = "0.21"
 symphonia = { version = "0.6", features = ["mp3", "aac", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -42,10 +45,3 @@ android_log-sys = "0.3"
 cc = { version = "1", features = ["parallel"] }
 cmake = "0.1"
 bindgen = "0.72"
-
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 8
-strip = "symbols"
-panic = "unwind"

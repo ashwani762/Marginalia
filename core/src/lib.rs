@@ -10,6 +10,7 @@ pub mod engine;
 pub mod rag;
 
 pub mod audio;
+pub mod remote;
 pub mod session;
 pub mod text;
 pub mod jni_bridge;

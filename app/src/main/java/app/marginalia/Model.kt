@@ -222,3 +222,84 @@ data class LiveState(
     /** What the background workers are doing right now, in plain words. */
     val activity: List<String> = emptyList(),
 )
+
+/** A computer on the home network that has been paired with this phone. */
+data class HomeComputer(
+    val fp: String,
+    val name: String,
+    val online: Boolean,
+    val rttMs: Int,
+    val chat: String?,
+    val embed: String?,
+    val chatTokPerSec: Double,
+    val embedPerSec: Double,
+    val busy: Int,
+    val problem: String,
+    /** "approved" (in use), "waiting" (the computer has not allowed this phone yet) or "refused". */
+    val state: String = "approved",
+    /** Other phones asking to use this computer. Only filled when this phone is approved there. */
+    val pending: List<PendingPhone> = emptyList(),
+) {
+    val approved: Boolean get() = state != "waiting" && state != "refused"
+
+    companion object {
+        fun from(o: JSONObject) = HomeComputer(
+            fp = o.optString("fp"),
+            name = o.optString("name"),
+            online = o.optBoolean("online", false),
+            rttMs = o.optInt("rtt_ms", 0),
+            chat = if (o.isNull("chat")) null else o.optString("chat").ifBlank { null },
+            embed = if (o.isNull("embed")) null else o.optString("embed").ifBlank { null },
+            chatTokPerSec = o.optDouble("chat_tok_s", 0.0).let { if (it.isNaN()) 0.0 else it },
+            embedPerSec = o.optDouble("embed_per_s", 0.0).let { if (it.isNaN()) 0.0 else it },
+            busy = o.optInt("busy", 0),
+            problem = o.optString("problem"),
+            state = o.optString("state").lowercase().ifBlank { "approved" },
+            pending = o.optJSONArray("pending")?.objects().orEmpty().map(PendingPhone::from),
+        )
+    }
+}
+
+/** Another phone that is asking to use a home computer. */
+data class PendingPhone(val id: String, val name: String, val waitedS: Int) {
+    companion object {
+        fun from(o: JSONObject) = PendingPhone(o.optString("id"), o.optString("name"), o.optInt("waited_s", 0))
+    }
+}
+
+/** A computer the network search has seen that is not paired yet. */
+data class FoundComputer(val id: String, val name: String, val addrs: List<String>) {
+    companion object {
+        fun from(o: JSONObject) = FoundComputer(o.optString("id"), o.optString("name"), o.strings("addrs"))
+    }
+}
+
+data class HomeComputers(
+    val enabled: Boolean = false,
+    val paired: List<HomeComputer> = emptyList(),
+    val found: List<FoundComputer> = emptyList(),
+) {
+    companion object {
+        fun from(o: JSONObject) = HomeComputers(
+            enabled = o.optBoolean("enabled", false),
+            paired = o.optJSONArray("paired")?.objects().orEmpty().map(HomeComputer::from),
+            found = o.optJSONArray("found")?.objects().orEmpty().map(FoundComputer::from),
+        )
+    }
+}
+
+/** One phone asking to use one or more computers. The person answers once for all of them. */
+data class ApprovalAsk(val who: String, val phone: String, val computers: List<AskedComputer>)
+
+data class AskedComputer(val fp: String, val name: String)
+
+/** Groups the pending phones of every approved computer by phone id and returns the first phone not in [dismissed] (a set of phone ids). */
+fun groupApprovals(paired: List<HomeComputer>, dismissed: Set<String>): ApprovalAsk? {
+    val byPhone = LinkedHashMap<String, MutableList<Pair<HomeComputer, PendingPhone>>>()
+    paired.filter { it.approved }.forEach { c -> c.pending.forEach { ph -> byPhone.getOrPut(ph.id) { mutableListOf() }.add(c to ph) } }
+    val (id, rows) = byPhone.entries.firstOrNull { it.key !in dismissed } ?: return null
+    return ApprovalAsk(id, rows.map { it.second.name }.firstOrNull { it.isNotBlank() }.orEmpty(), rows.map { AskedComputer(it.first.fp, it.first.name) })
+}
+
+/** The ids of all phones that are asking for something right now. */
+fun askingPhones(paired: List<HomeComputer>): Set<String> = paired.flatMap { c -> c.pending.map { it.id } }.toSet()

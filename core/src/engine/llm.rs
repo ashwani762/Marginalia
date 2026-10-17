@@ -76,6 +76,10 @@ pub struct GenStats {
     pub generated_tokens: usize,
     pub elapsed_ms: u128,
     pub preempted: bool,
+    /// Name of the home computer that generated this, when one did.
+    pub served_by: Option<String>,
+    /// Generation time as the home computer measured it, in milliseconds (0 when not known).
+    pub remote_ms: u64,
 }
 
 pub struct GenRequest {

@@ -25,6 +25,21 @@ trimmed to the snippet decodes 2 to 3 seconds of speech in about 0.7 seconds on 
 larger and give nothing back in speed. If a streaming LiteRT speech model appears, it plugs in behind the
 same `WhisperHandle`.
 
+## Home computers (optional)
+
+`compute-node/` is a small daemon you can run on a computer at home (Linux now, Windows and Raspberry Pi planned).
+The phone finds it on the Wi-Fi by itself, asks you once "Trust this computer?", and then sends it the AI work it
+is slow at: notes and answers (about 90 tokens a second on an RTX 4060 against about 15 on the phone) and search
+vectors (hundreds a second against one). If no computer is around, or one stops answering, the phone does the work
+itself, so nothing depends on it. Nodes keep nothing about a job and show only counts and timings. See
+`compute-node/README.md` for how it works and `compute-node/DESIGN.md` for the plan (nodes that find and share
+work with each other).
+
+```bash
+compute-node/build.sh          # CUDA build, or --cpu-only
+target/release/marginalia-node run
+```
+
 ## Build
 
 ```bash

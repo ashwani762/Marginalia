@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+# The phone core is built by scripts/build-native.sh (cargo-ndk), the node with a plain `cargo build -p marginalia-node`.
+members = ["compute-node/proto", "compute-node/node", "core"]
+default-members = ["compute-node/proto", "compute-node/node"]
+
+[patch.crates-io]
+# The published llama-cpp-sys-2 bundles a llama.cpp that predates the `gemma-embedding2`
+# architecture (EmbeddingGemma 2). The node uses the same crate with a fresh llama.cpp checkout.
+llama-cpp-sys-2 = { path = "compute-node/vendor/llama-cpp-sys-2" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 8
+strip = "symbols"
+panic = "unwind"
+
+# The pairing code is stretched with scrypt, which is unusably slow unoptimised.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3

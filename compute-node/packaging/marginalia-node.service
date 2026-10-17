@@ -1,0 +1,16 @@
+# systemd USER unit. Installed to ~/.config/systemd/user/ by install-linux.sh.
+# Start it:   systemctl --user enable --now marginalia-node
+# Logs:       journalctl --user -u marginalia-node -f
+[Unit]
+Description=Marginalia compute node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/marginalia-node run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

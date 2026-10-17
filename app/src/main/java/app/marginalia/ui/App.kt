@@ -302,6 +302,7 @@ private fun Shell(vm: AppVm) {
     }
 
     if (showYou) YouSheet(vm, onDismiss = { showYou = false })
+    ApprovalPrompt(vm)
     citeSheet?.let { SourceSheet(it, onDismiss = { citeSheet = null }) }
 }
 

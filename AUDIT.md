@@ -96,9 +96,21 @@ Bugs this found, all fixed:
 - Document viewer with the original PDF or picture.
 - Notes use the names given to speakers.
 
+## Home computers
+
+- Phone to node over the real Wi-Fi: pairing, status (7 to 14 ms round trip), search and chat jobs, discovery with
+  Android NSD (found by itself in about a second), trust, lock and approve, block.
+- Same prompt: 0.86 s on the node (88 tokens a second) against 5.2 s on the phone (15 tokens a second). Three search
+  passages: 0.06 s against 0.68 s.
+- The node's search vectors and the phone's own agree with a cosine of 0.98 to 0.99 for the same text (different
+  quantisation), so documents embedded in either place still search together.
+- The phone could not reach the PC once because its network neighbour entry had failed until the PC sent it a packet.
+  The phone retries every 20 seconds and does the work itself in the meantime.
+- A block follows the phone's certificate, so a phone that clears the app's data gets a new identity. Lock the node to stop that.
+
 ## Tests
 
-- Rust: 15 unit tests run on the host (`cd core && cargo test --lib`).
+- Rust: 15 unit tests run on the host (`cd core && cargo test --lib`), 22 protocol tests (`cargo test -p marginalia-proto`).
 - Kotlin: JSON model parsing (`./gradlew :app:testDebugUnitTest`).
 - Everything else was tried by hand on the phone and the emulator.
 
