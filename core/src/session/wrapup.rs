@@ -83,6 +83,8 @@ impl Core {
             std::thread::sleep(Duration::from_millis(250));
         }
         std::thread::sleep(Duration::from_millis(1500));
+        // A window a compute node is still listening to gets a few seconds more, so its fixes are in the transcript.
+        self.finish_correction();
 
         let Some(l) = self.live.lock().take() else {
             self.flushing.store(false, Ordering::Relaxed);
@@ -640,7 +642,7 @@ impl Core {
         }
         let language = language_for_node(self.kb.store.meeting_language(mid), &self.settings().language);
         let cancel = AtomicBool::new(false);
-        let job = crate::remote::TranscribeJob { total_ms: plan.total_ms(), language, cancel: &cancel };
+        let job = crate::remote::TranscribeJob { total_ms: plan.total_ms(), language, cancel: &cancel, priority: marginalia_proto::Priority::Background, prompt: None };
         let started = Instant::now();
         let outcome = remote.transcribe(
             &job,

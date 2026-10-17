@@ -29,11 +29,47 @@ data class Source(
     }
 }
 
-data class Line(val i: Int, val t0: Double, val t1: Double, val text: String, val speaker: Int? = null) {
+/**
+ * A line of the transcript. [i] is its position and changes when lines before it are replaced, so lists on screen are
+ * keyed by [id], which stays with the line (a line that is corrected in place keeps it).
+ */
+data class Line(val i: Int, val t0: Double, val t1: Double, val text: String, val speaker: Int? = null, val id: Long = i.toLong()) {
     companion object {
-        fun from(o: JSONObject) = Line(o.optInt("i"), o.optDouble("t0"), o.optDouble("t1"), o.optString("text"), if (o.isNull("speaker")) null else o.optInt("speaker"))
+        fun from(o: JSONObject): Line {
+            val i = o.optInt("i")
+            return Line(i, o.optDouble("t0"), o.optDouble("t1"), o.optString("text"), if (o.isNull("speaker")) null else o.optInt("speaker"), o.optLong("id", i.toLong()))
+        }
         fun list(a: JSONArray?): List<Line> = if (a == null) emptyList() else List(a.length()) { from(a.getJSONObject(it)) }
     }
+}
+
+/** A line that arrived (or grew) is put where the line with its id is, else at the end. Positions are renumbered. */
+fun List<Line>.upsertLine(line: Line): List<Line> {
+    val at = indexOfFirst { it.id == line.id }
+    val out = toMutableList()
+    if (at >= 0) out[at] = line else out.add(line)
+    return out.renumbered()
+}
+
+/** [removed] lines from [from] are taken out and [new] ones put in their place (the live transcript was corrected). */
+fun List<Line>.replacingLines(from: Int, removed: Int, new: List<Line>): List<Line> {
+    val a = from.coerceIn(0, size)
+    val b = (a + removed.coerceAtLeast(0)).coerceAtMost(size)
+    val out = ArrayList<Line>(size - (b - a) + new.size)
+    out.addAll(subList(0, a))
+    out.addAll(new)
+    out.addAll(subList(b, size))
+    // A new line must never share an id with one that stays, or two rows would get the same key.
+    val seen = HashSet<Long>()
+    return out.filter { seen.add(it.id) }.renumbered()
+}
+
+private fun List<Line>.renumbered(): List<Line> = mapIndexed { n, l -> if (l.i == n) l else l.copy(i = n) }
+
+/** "Corrected by Desk" for the live screen, with the node's name kept to the house style. */
+fun correctionLabel(node: String?): String? {
+    val name = node?.replace("—", ", ")?.replace(";", ".")?.trim().orEmpty()
+    return if (node == null) null else if (name.isEmpty()) "Corrected by a compute node" else "Corrected by $name"
 }
 
 enum class CardState { Retrieving, Answering, Done, NoMatch;
@@ -186,6 +222,10 @@ data class Prefs(
     val appearance: String = "System",
     /** After a meeting, a compute node listens to the recording again with a larger model. */
     val improveTranscript: Boolean = true,
+    /** While recording, a compute node listens again in short windows and fixes the captions. */
+    val liveCorrection: Boolean = false,
+    /** Seconds of talk per correction window: 20, 30, 45 or 60. */
+    val liveCorrectionWindowS: Int = DEFAULT_CORRECTION_WINDOW_S,
 ) {
     companion object {
         fun from(o: JSONObject) = Prefs(
@@ -195,9 +235,14 @@ data class Prefs(
             userName = o.optString("user_name", "You"),
             appearance = o.optString("appearance", "System"),
             improveTranscript = o.optBoolean("improve_transcript", true),
+            liveCorrection = o.optBoolean("live_correction", false),
+            liveCorrectionWindowS = o.optInt("live_correction_window_s", DEFAULT_CORRECTION_WINDOW_S).let { if (it in CORRECTION_WINDOWS_S) it else DEFAULT_CORRECTION_WINDOW_S },
         )
     }
 }
+
+const val DEFAULT_CORRECTION_WINDOW_S = 30
+val CORRECTION_WINDOWS_S = listOf(20, 30, 45, 60)
 
 /** Where the engine is, from first launch to ready. */
 sealed interface Boot {
@@ -226,6 +271,8 @@ data class LiveState(
     val jots: List<Jot> = emptyList(),
     /** What the background workers are doing right now, in plain words. */
     val activity: List<String> = emptyList(),
+    /** The compute node that is fixing the captions while recording, else null. */
+    val correctedBy: String? = null,
 )
 
 /** A compute node on the home network that has been paired with this phone. */
@@ -246,6 +293,8 @@ data class HomeComputer(
     val pending: List<PendingPhone> = emptyList(),
     /** Name of the speech model when this compute node can listen to a recording again, else null. */
     val transcribe: String? = null,
+    /** The longest correction window, in seconds, that this compute node takes as a quick job. 0 when it does not say. */
+    val windowMaxS: Int = 0,
 ) {
     val approved: Boolean get() = state != "waiting" && state != "refused"
 
@@ -264,6 +313,7 @@ data class HomeComputer(
             state = o.optString("state").lowercase().ifBlank { "approved" },
             pending = o.optJSONArray("pending")?.objects().orEmpty().map(PendingPhone::from),
             transcribe = if (o.isNull("transcribe")) null else o.optString("transcribe").ifBlank { null },
+            windowMaxS = o.optInt("window_max_s", 0),
         )
     }
 }
@@ -277,6 +327,18 @@ fun transcribeNode(n: HomeComputers): HomeComputer? =
 
 /** Whether the Review screen offers "Improve transcript": a kept recording, a compute node that can listen, and nothing else being written for the meeting. */
 fun canImproveTranscript(n: HomeComputers, hasAudio: Boolean, busy: Boolean): Boolean = hasAudio && !busy && transcribeNode(n) != null
+
+/** Whether "Correct the transcript while recording" can be used: a compute node with the speech model is online. */
+fun canCorrectLive(n: HomeComputers): Boolean = transcribeNode(n) != null
+
+/**
+ * A short note under the window choice when the compute node takes only shorter windows than the person chose
+ * (a window is the chosen talk plus 5 seconds that the phone repeats). Null when the choice fits or nothing is known.
+ */
+fun windowLimitNote(chosenS: Int, nodeMaxS: Int): String? {
+    if (nodeMaxS <= 0 || chosenS + 5 <= nodeMaxS) return null
+    return "This compute node handles windows up to $nodeMaxS s, so they are cut shorter."
+}
 
 /** Another phone that is asking to use a home compute node. */
 data class PendingPhone(val id: String, val name: String, val waitedS: Int) {

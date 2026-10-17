@@ -14,6 +14,7 @@ struct PerClient {
     chat_jobs: u64,
     embed_jobs: u64,
     speech_jobs: u64,
+    window_jobs: u64,
     last_seen: u64,
 }
 
@@ -41,6 +42,11 @@ pub struct Metrics {
     pub speech_errors: AtomicU64,
     pub speech_audio_ms: AtomicU64,
     pub speech_busy_ms: AtomicU64,
+    /// Short windows of live audio, counted apart from whole recordings.
+    pub window_jobs: AtomicU64,
+    pub window_errors: AtomicU64,
+    pub window_audio_ms: AtomicU64,
+    pub window_busy_ms: AtomicU64,
     pub pairings: AtomicU64,
     pub rejected: AtomicU64,
     clients: Mutex<HashMap<String, PerClient>>,
@@ -52,6 +58,7 @@ enum Kind {
     Chat,
     Search,
     Speech,
+    Window,
 }
 
 fn now() -> u64 {
@@ -75,6 +82,10 @@ impl Metrics {
             speech_errors: 0.into(),
             speech_audio_ms: 0.into(),
             speech_busy_ms: 0.into(),
+            window_jobs: 0.into(),
+            window_errors: 0.into(),
+            window_audio_ms: 0.into(),
+            window_busy_ms: 0.into(),
             pairings: 0.into(),
             rejected: 0.into(),
             clients: Mutex::new(HashMap::new()),
@@ -95,6 +106,7 @@ impl Metrics {
             Kind::Chat => c.chat_jobs += 1,
             Kind::Search => c.embed_jobs += 1,
             Kind::Speech => c.speech_jobs += 1,
+            Kind::Window => c.window_jobs += 1,
         }
     }
 
@@ -146,6 +158,35 @@ impl Metrics {
         self.remember("speech", ok, ms, audio_ms / 1000);
     }
 
+    pub fn speech_finished(&self, window: bool, fp: &str, name: &str, audio_ms: u64, ms: u64) {
+        if window {
+            self.window_done(fp, name, audio_ms, ms, true)
+        } else {
+            self.speech_done(fp, name, audio_ms, ms, true)
+        }
+    }
+
+    pub fn speech_failed(&self, window: bool, fp: &str, name: &str, audio_ms: u64) {
+        if window {
+            self.window_done(fp, name, audio_ms, 0, false)
+        } else {
+            self.speech_done(fp, name, audio_ms, 0, false)
+        }
+    }
+
+    /// A short window of live audio ended. Counted apart from whole recordings so it does not bend their speed figures.
+    pub fn window_done(&self, fp: &str, name: &str, audio_ms: u64, ms: u64, ok: bool) {
+        if ok {
+            self.window_jobs.fetch_add(1, Relaxed);
+            self.window_audio_ms.fetch_add(audio_ms, Relaxed);
+            self.window_busy_ms.fetch_add(ms, Relaxed);
+        } else {
+            self.window_errors.fetch_add(1, Relaxed);
+        }
+        self.touch(fp, name, Kind::Window);
+        self.remember("window", ok, ms, audio_ms / 1000);
+    }
+
     pub fn snapshot(&self) -> Value {
         let (chat_ms, chat_tokens) = (self.chat_busy_ms.load(Relaxed), self.chat_tokens.load(Relaxed));
         let (emb_ms, emb_texts) = (self.embed_busy_ms.load(Relaxed), self.embed_texts.load(Relaxed));
@@ -166,10 +207,14 @@ impl Metrics {
                 "jobs": self.speech_jobs.load(Relaxed), "errors": self.speech_errors.load(Relaxed),
                 "audio_s": sp_audio / 1000, "times_real_time": if sp_ms == 0 { 0.0 } else { sp_audio as f64 / sp_ms as f64 }, "busy_s": sp_ms / 1000,
             },
+            "window": {
+                "jobs": self.window_jobs.load(Relaxed), "errors": self.window_errors.load(Relaxed),
+                "audio_s": self.window_audio_ms.load(Relaxed) / 1000, "busy_s": self.window_busy_ms.load(Relaxed) / 1000,
+            },
             "pairings": self.pairings.load(Relaxed),
             "refused": self.rejected.load(Relaxed),
             "phones": self.clients.lock().iter().map(|(fp, c)| json!({
-                "name": c.name, "id": &fp[..16], "chat_jobs": c.chat_jobs, "search_jobs": c.embed_jobs, "speech_jobs": c.speech_jobs, "last_seen": c.last_seen,
+                "name": c.name, "id": &fp[..16], "chat_jobs": c.chat_jobs, "search_jobs": c.embed_jobs, "speech_jobs": c.speech_jobs, "window_jobs": c.window_jobs, "last_seen": c.last_seen,
             })).collect::<Vec<_>>(),
             "recent": self.recent.lock().iter().rev().map(|r| json!({"at": r.at, "kind": r.kind, "ok": r.ok, "ms": r.ms, "size": r.size})).collect::<Vec<_>>(),
         })
@@ -188,14 +233,17 @@ pub fn ago(secs: u64) -> String {
 pub fn report(v: &Value) -> String {
     let n = |x: &Value| x.as_u64().unwrap_or(0);
     let f = |x: &Value| x.as_f64().unwrap_or(0.0);
-    let (c, s, sp) = (&v["chat"], &v["search"], &v["speech"]);
+    let (c, s, sp, w) = (&v["chat"], &v["search"], &v["speech"], &v["window"]);
+    // "1 job", "2 jobs": every count says its noun in the right number.
+    let pl = |count: u64, one: &str, many: &str| format!("{count} {}", if count == 1 { one } else { many });
     let mut out = format!(
-        "{} up for {}\n\nChat    {} jobs, {} failed, {} tokens written, {:.0} tokens a second while working\nSearch  {} jobs, {} failed, {} passages, {:.0} passages a second while working\nSpeech  {} jobs, {} failed, {} s of audio, {:.1} s of audio per second of work\nPaired {} times, {} unknown phones turned away\n",
+        "{} up for {}\n\nChat    {}, {} failed, {} written, {:.0} tokens a second while working\nSearch  {}, {} failed, {}, {:.0} passages a second while working\nSpeech  {}, {} failed, {} s of audio, {:.1} s of audio per second of work\nWindows {}, {} failed, {} s of audio\nPaired {}, {} turned away\n",
         v["name"].as_str().unwrap_or("node"), ago(n(&v["uptime_s"])),
-        n(&c["jobs"]), n(&c["errors"]), n(&c["generated_tokens"]), f(&c["tokens_per_s"]),
-        n(&s["jobs"]), n(&s["errors"]), n(&s["passages"]), f(&s["passages_per_s"]),
-        n(&sp["jobs"]), n(&sp["errors"]), n(&sp["audio_s"]), f(&sp["times_real_time"]),
-        n(&v["pairings"]), n(&v["refused"]),
+        pl(n(&c["jobs"]), "job", "jobs"), n(&c["errors"]), pl(n(&c["generated_tokens"]), "token", "tokens"), f(&c["tokens_per_s"]),
+        pl(n(&s["jobs"]), "job", "jobs"), n(&s["errors"]), pl(n(&s["passages"]), "passage", "passages"), f(&s["passages_per_s"]),
+        pl(n(&sp["jobs"]), "job", "jobs"), n(&sp["errors"]), n(&sp["audio_s"]), f(&sp["times_real_time"]),
+        pl(n(&w["jobs"]), "job", "jobs"), n(&w["errors"]), n(&w["audio_s"]),
+        pl(n(&v["pairings"]), "time", "times"), pl(n(&v["refused"]), "unknown phone", "unknown phones"),
     );
     let state = match (v["paused"].as_bool().unwrap_or(false), v["locked"].as_bool().unwrap_or(false)) {
         (true, true) => "Paused. New phones must be allowed first.",
@@ -206,11 +254,17 @@ pub fn report(v: &Value) -> String {
     out.push_str(&format!("{state}\n"));
     out.push_str("\nPhones\n");
     for p in v["phones"].as_array().into_iter().flatten() {
-        out.push_str(&format!("  {} ({}): {} chat, {} search, {} speech\n", p["name"].as_str().unwrap_or(""), p["id"].as_str().unwrap_or(""), n(&p["chat_jobs"]), n(&p["search_jobs"]), n(&p["speech_jobs"])));
+        out.push_str(&format!("  {} ({}): {} chat, {} search, {} speech, {}\n", p["name"].as_str().unwrap_or(""), p["id"].as_str().unwrap_or(""), n(&p["chat_jobs"]), n(&p["search_jobs"]), n(&p["speech_jobs"]), pl(n(&p["window_jobs"]), "window", "windows")));
     }
     out.push_str("\nLatest jobs (newest first, sizes only)\n");
     for r in v["recent"].as_array().into_iter().flatten().take(10) {
-        out.push_str(&format!("  {} {} {} ms, {}{}\n", r["kind"].as_str().unwrap_or(""), if r["ok"].as_bool().unwrap_or(false) { "ok    " } else { "failed" }, n(&r["ms"]), n(&r["size"]), match r["kind"].as_str() { Some("chat") => " tokens", Some("speech") => " s of audio", _ => " passages" }));
+        let size = n(&r["size"]);
+        let what = match r["kind"].as_str() {
+            Some("chat") => pl(size, "token", "tokens"),
+            Some("speech") | Some("window") => format!("{size} s of audio"),
+            _ => pl(size, "passage", "passages"),
+        };
+        out.push_str(&format!("  {} {} {} ms, {}\n", r["kind"].as_str().unwrap_or(""), if r["ok"].as_bool().unwrap_or(false) { "ok    " } else { "failed" }, n(&r["ms"]), what));
     }
     out
 }

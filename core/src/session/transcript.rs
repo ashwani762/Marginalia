@@ -51,8 +51,15 @@ pub(super) fn without_block(text: &str, block: &str) -> String {
     text.replace(block.trim(), "").trim().to_string()
 }
 
+static NEXT_LINE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh number for a line. Ids only go up, so one is never used twice in a run of the app.
+pub(super) fn next_line_id() -> u64 {
+    NEXT_LINE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 pub(super) fn line_json(i: usize, l: &Line) -> Value {
-    json!({ "i": i, "t0": l.t0, "t1": l.t1, "text": l.text, "speaker": l.speaker })
+    json!({ "i": i, "id": l.id, "t0": l.t0, "t1": l.t1, "text": l.text, "speaker": l.speaker })
 }
 
 /// "Priya: " (or "Speaker 2: ") in front of a line in a prompt, when speakers have been told apart.
@@ -132,7 +139,7 @@ pub(super) fn push_merged_as(lines: &mut Vec<Line>, t0: f64, t1: f64, text: &str
             return lines.len() - 1;
         }
     }
-    lines.push(Line { t0, t1, text: text.trim().to_string(), speaker, who: who.to_string() });
+    lines.push(Line { id: next_line_id(), t0, t1, text: text.trim().to_string(), speaker, who: who.to_string() });
     lines.len() - 1
 }
 

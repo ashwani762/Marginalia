@@ -113,7 +113,7 @@ fun Onboarding(onDone: () -> Unit) {
                             Spacer(Modifier.height(10.dp))
                             Text("You can change either one later in the phone's settings.", style = type.body.copy(color = p.textDim), textAlign = TextAlign.Center)
                             Spacer(Modifier.height(24.dp))
-                            Permission(Icons.Rounded.Mic, "Microphone", "To hear the meeting. It never goes anywhere else.", mic) { askMic.launch(Manifest.permission.RECORD_AUDIO) }
+                            Permission(Icons.Rounded.Mic, "Microphone", "To hear the meeting. The recording stays on your own devices.", mic) { askMic.launch(Manifest.permission.RECORD_AUDIO) }
                             if (Build.VERSION.SDK_INT >= 33) {
                                 Spacer(Modifier.height(12.dp))
                                 Permission(Icons.Rounded.Notifications, "Notifications", "To tell you when the notes are ready, even if the app is closed.", notes) { askNotes.launch(Manifest.permission.POST_NOTIFICATIONS) }

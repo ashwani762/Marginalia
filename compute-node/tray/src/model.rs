@@ -207,9 +207,9 @@ pub fn speech_speed_text(x: f64) -> String {
     if x < 1.0 {
         return "slower than the recording".into();
     }
-    // "1 hour of audio in 1 min" says more than "60x real time".
+    // "1 h in 1 min" (an hour of audio takes a minute) says more than "60x real time" and fits the panel row.
     let secs = 3600.0 / x;
-    if secs < 60.0 { format!("1 hour of audio in {secs:.0} s") } else { format!("1 hour of audio in {:.0} min", secs / 60.0) }
+    if secs < 60.0 { format!("1 h in {secs:.0} s") } else { format!("1 h in {:.0} min", secs / 60.0) }
 }
 
 #[cfg(test)]
@@ -220,8 +220,8 @@ mod speech_text_tests {
     fn speech_speed_is_said_in_plain_terms() {
         assert_eq!(speech_speed_text(0.0), "not measured");
         assert_eq!(speech_speed_text(0.5), "slower than the recording");
-        assert_eq!(speech_speed_text(60.0), "1 hour of audio in 1 min");
-        assert_eq!(speech_speed_text(120.0), "1 hour of audio in 30 s");
+        assert_eq!(speech_speed_text(60.0), "1 h in 1 min");
+        assert_eq!(speech_speed_text(120.0), "1 h in 30 s");
     }
 }
 

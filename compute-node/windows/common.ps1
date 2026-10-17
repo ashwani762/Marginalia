@@ -13,6 +13,19 @@ $MN_FwMdns    = 'Marginalia Node (mDNS UDP 5353)'
 $MN_RepoRoot  = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $MN_DefaultModelsDir = Join-Path $env:APPDATA 'marginalia\models'
 $MN_StateDir  = Join-Path $env:APPDATA 'marginalia-node'
+$MN_BuiltNode = Join-Path $MN_RepoRoot 'target\release\marginalia-node.exe'
+$MN_BuiltTray = Join-Path $MN_RepoRoot 'target\release\marginalia-node-tray.exe'
+$MN_BuildStamp = Join-Path $MN_RepoRoot 'target\release\mn-backend.txt'
+$MN_InstNode  = Join-Path $MN_InstallDir 'marginalia-node.exe'
+$MN_InstTray  = Join-Path $MN_InstallDir 'marginalia-node-tray.exe'
+$MN_Launcher  = Join-Path $MN_InstallDir 'start-node.vbs'
+$MN_LogFile   = Join-Path $MN_InstallDir 'node.log'
+# The model files the node serves and their exact sizes (same as compute-node/node/src/models_dl.rs).
+$MN_Models = @(
+    @{ Role = 'chat';   File = 'gemma-4-E2B-it-Q4_0.gguf';   Size = 2841481184 },
+    @{ Role = 'search'; File = 'embeddinggemma-2-Q8_0.gguf'; Size = 309855456 },
+    @{ Role = 'speech'; File = 'ggml-large-v3-turbo-q5_0.bin'; Size = 574041195 }
+)
 
 # ---- Output: one line per step ------------------------------------------------------------------
 function Write-Tag([string]$tag, [string]$text, [string]$color) {
@@ -250,65 +263,241 @@ function Get-TaskState([string]$name) {
     return [string]$t.State
 }
 
-# Asks a running node (installed copy) to stop, then makes sure its processes are gone.
-function Stop-MnProcesses {
-    Stop-ScheduledTask -TaskName $MN_NodeTask -ErrorAction SilentlyContinue
-    Stop-ScheduledTask -TaskName $MN_TrayTask -ErrorAction SilentlyContinue
-    $exe = Join-Path $MN_InstallDir 'marginalia-node.exe'
-    if ((Test-Path $exe) -and (Test-LocalPort $MN_AdminPort)) {
-        try { & $exe stop 2>$null | Out-Null } catch { }
-        for ($i = 0; $i -lt 30; $i++) {
-            if (-not (Test-LocalPort $MN_AdminPort 200)) { break }
-            Start-Sleep -Milliseconds 500
+# Starts a program, waits for it, and returns what it printed. Used where a hung program must not hang the script.
+# Returns an object with ExitCode, Out, Err (strings) and TimedOut.
+function Invoke-MnCapture([string]$exe, [string[]]$arguments, [int]$timeoutSec = 30) {
+    $so = [IO.Path]::GetTempFileName()
+    $se = [IO.Path]::GetTempFileName()
+    $parts = @()
+    foreach ($a in $arguments) {
+        if ($a -match '[\s"]') { $parts += ('"' + ($a -replace '"', '\"') + '"') } else { $parts += $a }
+    }
+    $r = New-Object PSObject -Property @{ ExitCode = -1; Out = ''; Err = ''; TimedOut = $false }
+    try {
+        $p = Start-Process -FilePath $exe -ArgumentList ($parts -join ' ') -NoNewWindow -PassThru -RedirectStandardOutput $so -RedirectStandardError $se -ErrorAction Stop
+        $null = $p.Handle
+        if (-not $p.WaitForExit($timeoutSec * 1000)) {
+            $r.TimedOut = $true
+            try { $p.Kill() } catch { }
+            Start-Sleep -Milliseconds 300
+        } else {
+            $p.WaitForExit()
+            $r.ExitCode = $p.ExitCode
+        }
+        $o = Get-Content -Path $so -Raw -ErrorAction SilentlyContinue
+        $e = Get-Content -Path $se -Raw -ErrorAction SilentlyContinue
+        if ($o) { $r.Out = [string]$o }
+        if ($e) { $r.Err = [string]$e }
+    } catch {
+        $r.Err = $_.Exception.Message
+    } finally {
+        Remove-Item -Path $so, $se -Force -ErrorAction SilentlyContinue
+    }
+    return $r
+}
+
+# The JSON of  marginalia-node.exe status,  or $null when the node does not answer.
+function Get-MnStatus([string]$exe) {
+    if (-not $exe -or -not (Test-Path $exe)) { return $null }
+    $r = Invoke-MnCapture $exe @('status') 15
+    if ($r.TimedOut -or $r.ExitCode -ne 0) { return $null }
+    try { return ($r.Out | ConvertFrom-Json) } catch { return $null }
+}
+
+# ---- Is the work already done? (setup.ps1 and verify.ps1 use these to skip and to explain) -------------
+# The newest write time of the code that goes into the node and the tray.
+function Get-NewestSourceTime {
+    $newest = [DateTime]::MinValue
+    foreach ($d in @('compute-node\node\src', 'compute-node\tray\src', 'compute-node\proto\src')) {
+        $p = Join-Path $MN_RepoRoot $d
+        if (-not (Test-Path $p)) { continue }
+        foreach ($f in (Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue)) {
+            if ($f.LastWriteTime -gt $newest) { $newest = $f.LastWriteTime }
         }
     }
-    foreach ($n in @('marginalia-node-tray', 'marginalia-node')) {
+    foreach ($rel in @('Cargo.toml', 'Cargo.lock', 'compute-node\node\Cargo.toml', 'compute-node\node\build.rs', 'compute-node\tray\Cargo.toml', 'compute-node\proto\Cargo.toml', 'compute-node\vendor\llama-cpp-sys-2\build.rs', 'compute-node\vendor\llama-cpp-sys-2\Cargo.toml')) {
+        $p = Join-Path $MN_RepoRoot $rel
+        if (Test-Path $p) {
+            $t = (Get-Item $p).LastWriteTime
+            if ($t -gt $newest) { $newest = $t }
+        }
+    }
+    return $newest
+}
+
+# What backend a build would use, as text (for example "cuda|89" or "cpu|"). Used to notice a changed backend.
+function Get-BackendStamp([bool]$cpu, [bool]$vulkan, [bool]$cuda) {
+    try { $g = Resolve-Gpu $cpu $vulkan $cuda } catch { return $null }
+    $f = $g.Feature
+    if (-not $f) { $f = 'cpu' }
+    return ($f + '|' + $g.Archs)
+}
+
+# $true when both built programs exist, are newer than all the sources, and were built with the same backend.
+function Test-BuildCurrent([bool]$cpu, [bool]$vulkan, [bool]$cuda) {
+    if (-not (Test-Path $MN_BuiltNode) -or -not (Test-Path $MN_BuiltTray)) { return $false }
+    $built = (Get-Item $MN_BuiltNode).LastWriteTime
+    $t2 = (Get-Item $MN_BuiltTray).LastWriteTime
+    if ($t2 -lt $built) { $built = $t2 }
+    if ((Get-NewestSourceTime) -gt $built) { return $false }
+    if (-not (Test-Path $MN_BuildStamp)) { return $false }
+    $want = Get-BackendStamp $cpu $vulkan $cuda
+    if (-not $want) { return $false }
+    $have = ((Get-Content -Path $MN_BuildStamp -Raw -ErrorAction SilentlyContinue) + '').Trim()
+    return ($have -eq $want)
+}
+
+# $true when the installed program is the same file as the built one (same size, not older).
+function Test-InstalledCurrent([string]$built, [string]$installed) {
+    if (-not (Test-Path $built) -or -not (Test-Path $installed)) { return $false }
+    $b = Get-Item $built
+    $i = Get-Item $installed
+    if ($b.Length -ne $i.Length) { return $false }
+    return ($i.LastWriteTimeUtc -ge $b.LastWriteTimeUtc.AddSeconds(-2))
+}
+
+# The file names of required model files that are missing or have the wrong size in $dir.
+function Get-MissingModels([string]$dir, [bool]$skipSpeech) {
+    $miss = @()
+    foreach ($m in $MN_Models) {
+        if ($skipSpeech -and $m.Role -eq 'speech') { continue }
+        $f = Join-Path $dir $m.File
+        if (-not (Test-Path $f) -or (Get-Item $f).Length -ne $m.Size) { $miss += $m.File }
+    }
+    return $miss
+}
+
+function Test-TaskRegistered([string]$name, [string]$exe, [string]$argPart) {
+    $t = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+    if (-not $t) { return $false }
+    $a = @($t.Actions)[0]
+    if (-not $a -or $a.Execute -ne $exe) { return $false }
+    if ($argPart -and -not ([string]$a.Arguments).Contains($argPart)) { return $false }
+    return $true
+}
+
+# ---- Stop, copy, start ---------------------------------------------------------------------------
+# Asks a running node (installed copy) to stop, then makes sure its processes are gone.
+# $which is both, node or tray.
+function Stop-MnProcesses([string]$which = 'both') {
+    $doNode = ($which -ne 'tray')
+    $doTray = ($which -ne 'node')
+    if ($doNode) { Stop-ScheduledTask -TaskName $MN_NodeTask -ErrorAction SilentlyContinue }
+    if ($doTray) { Stop-ScheduledTask -TaskName $MN_TrayTask -ErrorAction SilentlyContinue }
+    if ($doNode) {
+        $exe = Join-Path $MN_InstallDir 'marginalia-node.exe'
+        if ((Test-Path $exe) -and (Test-LocalPort $MN_AdminPort)) {
+            try { & $exe stop 2>$null | Out-Null } catch { }
+            for ($i = 0; $i -lt 30; $i++) {
+                if (-not (Test-LocalPort $MN_AdminPort 200)) { break }
+                Start-Sleep -Milliseconds 500
+            }
+        }
+    }
+    $names = @()
+    if ($doTray) { $names += 'marginalia-node-tray' }
+    if ($doNode) { $names += 'marginalia-node' }
+    foreach ($n in $names) {
         Get-Process -Name $n -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($MN_InstallDir, [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Milliseconds 500
 }
 
-# ---- Build ---------------------------------------------------------------------------------------
-function Invoke-MnBuild {
-    param([bool]$cpu, [bool]$vulkan, [bool]$cuda)
+# Stops what is running, then copies the built programs into the install folder. $which is both, node or tray.
+function Install-MnPrograms([string]$which = 'both') {
     try {
-        $gpu = Resolve-Gpu $cpu $vulkan $cuda
+        Stop-MnProcesses $which
+        New-Item -ItemType Directory -Force -Path $MN_InstallDir | Out-Null
+        if ($which -ne 'tray') { Copy-Item -Force $MN_BuiltNode $MN_InstNode -ErrorAction Stop }
+        if ($which -ne 'node') { Copy-Item -Force $MN_BuiltTray $MN_InstTray -ErrorAction Stop }
+        return $true
     } catch {
-        Step-Fail $_.Exception.Message
+        Step-Fail ('Could not copy the programs: ' + $_.Exception.Message + '  Close any window running marginalia-node and try again.')
         return $false
     }
-    Step-Ok ('Backend: ' + $gpu.Reason)
-    if (-not (Test-Libclang)) {
-        Step-Fail 'libclang.dll was not found (bindgen needs it). Install LLVM with: winget install --id LLVM.LLVM -e   then run this again.'
-        return $false
+}
+
+# Starts the node and/or the tray the same way logon does (the scheduled task, or the launcher when there is no task).
+function Start-MnProcesses([string]$which = 'both') {
+    if ($which -ne 'tray' -and -not (Test-LocalPort $MN_AdminPort)) {
+        if (Get-ScheduledTask -TaskName $MN_NodeTask -ErrorAction SilentlyContinue) {
+            Start-ScheduledTask -TaskName $MN_NodeTask -ErrorAction SilentlyContinue
+        } elseif (Test-Path $MN_Launcher) {
+            Start-Process -FilePath 'wscript.exe' -ArgumentList ('//B //Nologo "' + $MN_Launcher + '"') | Out-Null
+        }
     }
+    if ($which -ne 'node' -and -not (Get-Process -Name 'marginalia-node-tray' -ErrorAction SilentlyContinue)) {
+        if (Get-ScheduledTask -TaskName $MN_TrayTask -ErrorAction SilentlyContinue) {
+            Start-ScheduledTask -TaskName $MN_TrayTask -ErrorAction SilentlyContinue
+        } elseif (Test-Path $MN_InstTray) {
+            Start-Process -FilePath $MN_InstTray -WorkingDirectory $MN_InstallDir | Out-Null
+        }
+    }
+}
+
+# Waits until the node answers on its local control port. Returns $true when it does.
+function Wait-MnNode([int]$seconds = 120) {
+    for ($i = 0; $i -lt $seconds; $i++) {
+        if (Test-LocalPort $MN_AdminPort 300) { return $true }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+# ---- Build ---------------------------------------------------------------------------------------
+# $which is both, node or tray.
+function Invoke-MnBuild {
+    param([bool]$cpu, [bool]$vulkan, [bool]$cuda, [string]$which = 'both')
+    $buildNode = ($which -ne 'tray')
+    $buildTray = ($which -ne 'node')
     if (-not (Find-Command 'cargo.exe')) {
         Step-Fail 'cargo was not found. Install Rust with: winget install --id Rustlang.Rustup -e   then open a new PowerShell window.'
         return $false
     }
-    $env:CMAKE_BUILD_PARALLEL_LEVEL = [string][Environment]::ProcessorCount
-    if ($gpu.Feature -eq 'cuda' -and $gpu.Archs) {
-        $env:CUDAARCHS = $gpu.Archs
-        Step-Info ('CUDAARCHS is ' + ($gpu.Archs -replace ';', ' and '))
+    $gpu = $null
+    if ($buildNode) {
+        try {
+            $gpu = Resolve-Gpu $cpu $vulkan $cuda
+        } catch {
+            Step-Fail $_.Exception.Message
+            return $false
+        }
+        Step-Ok ('Backend: ' + $gpu.Reason)
+        if (-not (Test-Libclang)) {
+            Step-Fail 'libclang.dll was not found (bindgen needs it). Install LLVM with: winget install --id LLVM.LLVM -e   then run this again.'
+            return $false
+        }
+        $env:CMAKE_BUILD_PARALLEL_LEVEL = [string][Environment]::ProcessorCount
+        if ($gpu.Feature -eq 'cuda' -and $gpu.Archs) {
+            $env:CUDAARCHS = $gpu.Archs
+            Step-Info ('CUDAARCHS is ' + ($gpu.Archs -replace ';', ' and '))
+        }
     }
     Push-Location $MN_RepoRoot
     try {
-        $nodeArgs = @('build', '--release', '-p', 'marginalia-node')
-        if ($gpu.Feature) { $nodeArgs += @('--features', $gpu.Feature) }
-        Step-Info ('cargo ' + ($nodeArgs -join ' ') + '   (the first time this takes a while)')
-        & cargo @nodeArgs | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            Step-Fail 'Building marginalia-node failed. See the table in compute-node\windows\README.md for common causes. Fix it and run this again, finished parts are kept.'
-            return $false
+        if ($buildNode) {
+            $nodeArgs = @('build', '--release', '-p', 'marginalia-node')
+            if ($gpu.Feature) { $nodeArgs += @('--features', $gpu.Feature) }
+            Step-Info ('cargo ' + ($nodeArgs -join ' ') + '   (the first time this takes a while)')
+            & cargo @nodeArgs | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                Step-Fail 'Building marginalia-node failed. docs\WINDOWS-PLAN.md lists the likely causes with the file to look at. Fix it and run this again, finished parts are kept.'
+                return $false
+            }
+            Step-Ok 'Built marginalia-node.exe'
+            $f = $gpu.Feature
+            if (-not $f) { $f = 'cpu' }
+            try { Set-Content -Path $MN_BuildStamp -Value ($f + '|' + $gpu.Archs) -Encoding ASCII } catch { }
         }
-        Step-Ok 'Built marginalia-node.exe'
-        Step-Info 'cargo build --release -p marginalia-node-tray'
-        & cargo build --release -p marginalia-node-tray | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            Step-Fail 'Building marginalia-node-tray failed. See compute-node\windows\README.md.'
-            return $false
+        if ($buildTray) {
+            Step-Info 'cargo build --release -p marginalia-node-tray'
+            & cargo build --release -p marginalia-node-tray | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                Step-Fail 'Building marginalia-node-tray failed. docs\WINDOWS-PLAN.md lists the likely causes (compute-node\tray\src\windows.rs was never compiled before).'
+                return $false
+            }
+            Step-Ok 'Built marginalia-node-tray.exe'
         }
-        Step-Ok 'Built marginalia-node-tray.exe'
     } finally {
         Pop-Location
     }

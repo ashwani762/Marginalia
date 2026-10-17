@@ -7,6 +7,7 @@
 //!
 //! - `live`: the meeting being recorded now (start, resume, audio and transcript intake, the timer loop).
 //! - `assist`: question cards and typed questions during a meeting.
+//! - `correct`: a compute node listens again in short windows while recording and fixes the live captions.
 //! - `jots`: short typed notes and how they are reworded.
 //! - `photos`: photos taken in a meeting and their descriptions.
 //! - `wrapup`: the write-up after a meeting stops, recovery of unfinished meetings, reading and deleting.
@@ -38,6 +39,7 @@ use std::time::{Duration, Instant};
 
 mod assist;
 mod chat;
+mod correct;
 mod debug;
 mod improve;
 mod jots;
@@ -48,6 +50,7 @@ mod transcript;
 mod wrapup;
 
 use chat::*;
+use correct::{plan_for, plan_window, prompt_tail, Correction, CorrectionJob, Window, PROMPT_CHARS};
 use improve::*;
 use jots::*;
 use photos::*;
@@ -77,6 +80,9 @@ const SECTION_TRIGGER_TOKENS: usize = 9000;
 
 #[derive(Clone)]
 struct Line {
+    /// Never changes while the line is on screen and is never used twice, so the screen can tell lines apart
+    /// when others are inserted or swapped before them (unlike the position, which shifts).
+    id: u64,
     t0: f64,
     t1: f64,
     text: String,
@@ -180,6 +186,8 @@ struct Live {
     queued_photos: Vec<(i64, String)>,
     /// The language already noted for this meeting (see `Store::set_meeting_language`).
     language: Option<String>,
+    /// Live correction by a compute node: the recent audio, how far the text has been corrected, and the window in flight.
+    corr: Correction,
 }
 
 #[derive(Clone)]
@@ -233,6 +241,8 @@ pub struct Core {
     /// Meetings being written up right now, so a rescan never starts the same one twice.
     finishing_ids: Mutex<std::collections::HashSet<i64>>,
     rescanning: Mutex<()>,
+    /// Held while a change to the live lines is made and announced, so the screen hears about changes in the order they happened.
+    line_gate: Mutex<()>,
     /// Photos still being described, per meeting (a finishing meeting waits for its own).
     describing_by: Mutex<HashMap<i64, usize>>,
     /// Gemma runs on the GPU, so reading a photo during a recording does not slow the transcript.
@@ -348,6 +358,7 @@ impl Core {
             finishing_jobs: AtomicUsize::new(0),
             finishing_ids: Mutex::new(Default::default()),
             rescanning: Mutex::new(()),
+            line_gate: Mutex::new(()),
             describing_by: Mutex::new(HashMap::new()),
             llm_on_gpu: AtomicBool::new(false),
             engine_state: Mutex::new(json!({"type": "engine", "state": "loading", "label": "Starting"})),
@@ -841,6 +852,14 @@ impl Core {
         if let Some(v) = args.get("improve_transcript").and_then(Value::as_bool) {
             s.improve_transcript = v;
         }
+        if let Some(v) = args.get("live_correction").and_then(Value::as_bool) {
+            s.live_correction = v;
+        }
+        if let Some(v) = args.get("live_correction_window_s").and_then(Value::as_u64) {
+            if correct::WINDOW_CHOICES.contains(&(v as u32)) {
+                s.live_correction_window_s = v as u32;
+            }
+        }
         if let Some(v) = args.get("chunk_tokens").and_then(Value::as_u64) {
             s.chunk_tokens = v as usize;
             self.kb.set_chunk_tokens(s.chunk_tokens);
@@ -951,7 +970,7 @@ mod tests {
     use crate::rag::store::Store;
 
     fn line(t0: f64, t1: f64, text: &str) -> Line {
-        Line { t0, t1, text: text.into(), speaker: None, who: String::new() }
+        Line { id: next_line_id(), t0, t1, text: text.into(), speaker: None, who: String::new() }
     }
 
     fn temp_store(name: &str) -> (Store, std::path::PathBuf) {

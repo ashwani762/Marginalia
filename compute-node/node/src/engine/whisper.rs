@@ -17,6 +17,17 @@ pub struct WhisperConfig {
     pub threads: i32,
 }
 
+/// What to transcribe with one call, besides the audio.
+#[derive(Default, Clone, Copy)]
+pub struct Job<'a> {
+    /// ISO code, or None to detect it.
+    pub language: Option<&'a str>,
+    /// What was said just before this audio. Only used to steer spelling and names, never returned.
+    pub prompt: Option<&'a str>,
+    /// A short audio window for live correction: decoded for speed, with its own settings.
+    pub window: bool,
+}
+
 /// One finished stretch of speech. Times are in milliseconds from the start of the audio.
 #[derive(Clone, Debug)]
 pub struct Segment {
@@ -58,11 +69,46 @@ unsafe extern "C" fn quiet_log(level: ws::ggml_log_level, text: *const c_char, _
     if msg.is_empty() {
         return;
     }
+    // Debug and info lines are dropped on purpose: whisper.cpp prints the decoder's prompt tokens at debug
+    // level, and a prompt is somebody's words.
     match level {
         ws::GGML_LOG_LEVEL_ERROR => tracing::warn!(target: "whisper", "{msg}"),
         ws::GGML_LOG_LEVEL_WARN => tracing::debug!(target: "whisper", "{msg}"),
-        _ => tracing::trace!(target: "whisper", "{msg}"),
+        _ => {}
     }
+}
+
+/// Windows of live audio are decoded greedily unless measured otherwise (see `compute-node/STATUS.md`).
+const WINDOW_BEAM: i32 = 1;
+/// The most prompt tokens given to the decoder. Whisper itself would take at most 223.
+const PROMPT_TOKENS: usize = 200;
+/// The most prompt characters looked at.
+const PROMPT_CHARS: usize = 800;
+
+fn env_beam(name: &str) -> Option<i32> {
+    std::env::var(name).ok().and_then(|v| v.parse::<i32>().ok())
+}
+
+/// Shapes a prompt for whisper: the last `PROMPT_CHARS` characters starting at a whole word, with a space
+/// in front as OpenAI's tool does. None when it is empty.
+pub fn prompt_text(prompt: &str) -> Option<String> {
+    let t = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.is_empty() {
+        return None;
+    }
+    let count = t.chars().count();
+    let t = if count > PROMPT_CHARS {
+        let cut: String = t.chars().skip(count - PROMPT_CHARS).collect();
+        let at_word_start = t.chars().nth(count - PROMPT_CHARS - 1) == Some(' ');
+        // The first word may be cut in half: drop it, unless it is all there is.
+        match cut.split_once(' ') {
+            Some((_, rest)) if !at_word_start && !rest.is_empty() => rest.to_string(),
+            _ => cut,
+        }
+    } else {
+        t
+    };
+    Some(format!(" {t}"))
 }
 
 /// The windows are 30 seconds long, 16 kHz.
@@ -89,6 +135,39 @@ impl Whisper {
         self.use_gpu
     }
 
+    /// Beam size for a whole recording. A beam of 5 costs about 10% of the speed on the graphics card.
+    /// On a processor it costs more, so it decodes greedily there. MARGINALIA_SPEECH_BEAM overrides it, for measuring.
+    fn batch_beam(&self) -> i32 {
+        env_beam("MARGINALIA_SPEECH_BEAM").unwrap_or(if self.use_gpu { 5 } else { 1 })
+    }
+
+    /// Beam size for a short window, where the wait for the answer matters more than the last bit of accuracy.
+    /// MARGINALIA_SPEECH_WINDOW_BEAM overrides it, for measuring.
+    fn window_beam(&self) -> i32 {
+        env_beam("MARGINALIA_SPEECH_WINDOW_BEAM").unwrap_or(WINDOW_BEAM)
+    }
+
+    /// The tokens of the last part of a prompt: at most about 800 characters and 200 tokens, cut at a word.
+    /// Empty when there is nothing to steer with.
+    fn prompt_tokens(&self, prompt: &str) -> Vec<ws::whisper_token> {
+        let Some(text) = prompt_text(prompt) else { return Vec::new() };
+        let Ok(c) = CString::new(text) else { return Vec::new() };
+        let mut tokens: Vec<ws::whisper_token> = vec![0; 1024];
+        let mut n = unsafe { ws::whisper_tokenize(self.ctx, c.as_ptr(), tokens.as_mut_ptr(), tokens.len() as i32) };
+        if n < 0 {
+            tokens = vec![0; (-n) as usize];
+            n = unsafe { ws::whisper_tokenize(self.ctx, c.as_ptr(), tokens.as_mut_ptr(), tokens.len() as i32) };
+        }
+        if n <= 0 {
+            return Vec::new();
+        }
+        tokens.truncate(n as usize);
+        if tokens.len() > PROMPT_TOKENS {
+            tokens.drain(..tokens.len() - PROMPT_TOKENS);
+        }
+        tokens
+    }
+
     /// Transcribes a whole recording (16 kHz mono samples between -1 and 1). `language` None detects it.
     ///
     /// `on_segment` is called for each segment as soon as whisper has finished it, `on_progress` with the
@@ -96,12 +175,18 @@ impl Whisper {
     pub fn transcribe(
         &self,
         pcm: &[f32],
-        language: Option<&str>,
+        job: Job<'_>,
         cancel: &AtomicBool,
         on_segment: &mut dyn FnMut(Segment),
         on_progress: &mut dyn FnMut(i32),
     ) -> Result<Outcome> {
         // Whisper wants at least a second of audio.
+        let real_ms = pcm.len() as u64 / 16;
+        // A window with nothing but a quiet room in it has no words: say so without waking the model.
+        if job.window && is_quiet(pcm) {
+            let language = job.language.map(str::trim).filter(|l| !l.is_empty() && *l != "auto").unwrap_or("en").to_ascii_lowercase();
+            return Ok(Outcome { language, segments: 0 });
+        }
         let padded;
         let pcm = if pcm.len() < 17_600 {
             let mut v = pcm.to_vec();
@@ -118,7 +203,7 @@ impl Whisper {
             }
             let _free = StateGuard(state);
 
-            let wanted = language.map(str::trim).filter(|l| !l.is_empty() && *l != "auto").map(str::to_ascii_lowercase);
+            let wanted = job.language.map(str::trim).filter(|l| !l.is_empty() && *l != "auto").map(str::to_ascii_lowercase);
             let lang = if !self.multilingual {
                 "en".to_string()
             } else if let Some(l) = wanted.filter(|l| CString::new(l.as_str()).map(|c| ws::whisper_lang_id(c.as_ptr()) >= 0).unwrap_or(false)) {
@@ -128,7 +213,7 @@ impl Whisper {
             };
             let lang_c = CString::new(lang.clone())?;
 
-            let mut hooks = Hooks { state, on_segment, on_progress, cancel, last: None, last_t1_ms: 0, repeats: 0, count: 0 };
+            let mut hooks = Hooks { prompt_words: job.prompt.and_then(words_of), audio: pcm, audio_ms: real_ms, ctx: self.ctx, state, on_segment, on_progress, cancel, last: None, last_t1_ms: 0, repeats: 0, count: 0 };
             let mut p = ws::whisper_full_default_params(ws::WHISPER_SAMPLING_GREEDY);
             p.n_threads = self.threads.max(1);
             p.translate = false;
@@ -149,14 +234,24 @@ impl Whisper {
             p.temperature_inc = 0.2;
             p.language = lang_c.as_ptr();
             p.detect_language = false;
-            // A beam of 5 costs about 10% of the speed on the graphics card. On a processor it costs more, so it decodes greedily there.
-            // MARGINALIA_SPEECH_BEAM overrides it, for measuring.
-            let beam = std::env::var("MARGINALIA_SPEECH_BEAM").ok().and_then(|v| v.parse::<i32>().ok()).unwrap_or(if self.use_gpu { 5 } else { 1 });
+            let beam = if job.window { self.window_beam() } else { self.batch_beam() };
             if beam > 1 {
                 p.strategy = ws::WHISPER_SAMPLING_BEAM_SEARCH;
                 p.beam_search.beam_size = beam.min(8);
             } else {
                 p.greedy.best_of = 1;
+            }
+            if job.window {
+                // A short window is the tail of a longer talk: no spoken-language guessing from a few
+                // seconds that may start in the middle of a word, and no restart at a hotter temperature
+                // that could take several times longer than the answer is worth.
+                p.temperature_inc = 0.0;
+            }
+            // The prompt text is turned into tokens here and the buffer lives until the call returns.
+            let prompt_tokens = job.prompt.map(|t| self.prompt_tokens(t)).unwrap_or_default();
+            if !prompt_tokens.is_empty() {
+                p.prompt_tokens = prompt_tokens.as_ptr();
+                p.prompt_n_tokens = prompt_tokens.len() as i32;
             }
             let hooks_ptr = &mut hooks as *mut Hooks as *mut c_void;
             p.new_segment_callback = Some(new_segment_cb);
@@ -249,6 +344,12 @@ pub fn give_back_memory() {
 }
 
 struct Hooks<'a> {
+    /// The prompt as lower case words, to spot the model reading it back. Never logged.
+    prompt_words: Option<String>,
+    /// The audio that is being transcribed, to check that a segment has sound under it.
+    audio: &'a [f32],
+    audio_ms: u64,
+    ctx: *mut ws::whisper_context,
     state: *mut ws::whisper_state,
     on_segment: &'a mut dyn FnMut(Segment),
     on_progress: &'a mut dyn FnMut(i32),
@@ -270,12 +371,34 @@ unsafe extern "C" fn new_segment_cb(_ctx: *mut ws::whisper_context, state: *mut 
         }
         let raw = CStr::from_ptr(t).to_string_lossy().to_string();
         let no_speech = ws::whisper_full_get_segment_no_speech_prob_from_state(state, i);
-        let Some(text) = clean(&raw, no_speech) else {
-            tracing::debug!(target: "whisper", "dropped a segment ({} characters, no speech probability {:.2})", raw.len(), no_speech);
-            continue;
-        };
+        let n_tok = ws::whisper_full_n_tokens_from_state(state, i);
+        let (mut sum, mut cnt) = (0f32, 0u32);
+        for k in 0..n_tok {
+            let td = ws::whisper_full_get_token_data_from_state(state, i, k);
+            if td.id < ws::whisper_token_eot(h.ctx) {
+                sum += td.p;
+                cnt += 1;
+            }
+        }
+        let mean_p = if cnt == 0 { 1.0 } else { sum / cnt as f32 };
         let t0 = ws::whisper_full_get_segment_t0_from_state(state, i).max(0) as u64 * 10;
         let t1 = ws::whisper_full_get_segment_t1_from_state(state, i).max(0) as u64 * 10;
+        // Times are inside the audio that was sent (whisper rounds up to its 30 second windows).
+        let t0 = t0.min(h.audio_ms);
+        let t1 = t1.min(h.audio_ms);
+        let from = (t0 as usize * 16).min(h.audio.len());
+        let to = (t1 as usize * 16).min(h.audio.len());
+        // Numbers only in the log, never the text.
+        let kept = if is_quiet(&h.audio[from..to.max(from)]) {
+            None
+        } else {
+            clean(&raw, no_speech).filter(|t| !is_noise_guess(t, mean_p) && !echoes_prompt(t, h.prompt_words.as_deref(), mean_p))
+        };
+        let Some(text) = kept else {
+            tracing::debug!(target: "whisper", "dropped a segment ({} characters, no speech probability {:.2}, mean token p {:.2})", raw.len(), no_speech, mean_p);
+            continue;
+        };
+        tracing::debug!(target: "whisper", "segment kept: {} characters, mean token p {:.2}", text.len(), mean_p);
         // The same line again and again with no gap is the model stuck, not a person talking.
         if h.last.as_deref() == Some(text.as_str()) && t0 < h.last_t1_ms + 1500 {
             h.repeats += 1;
@@ -302,6 +425,39 @@ unsafe extern "C" fn progress_cb(_ctx: *mut ws::whisper_context, _state: *mut ws
 unsafe extern "C" fn abort_cb(user: *mut c_void) -> bool {
     let h = &*(user as *const Hooks);
     h.cancel.load(Ordering::Relaxed)
+}
+
+/// Frames of 50 ms are compared against this loudness (root mean square, full scale is 1.0).
+/// About minus 50 dB: a quiet room, not a quiet voice.
+const QUIET_RMS: f32 = 0.003;
+
+/// True when no stretch of the audio is louder than a quiet room. Whisper makes up "Thank you." over such stretches.
+/// Speech has loud 50 ms frames even when it is soft, so the 95th percentile of the frames decides.
+pub fn is_quiet(audio: &[f32]) -> bool {
+    if audio.is_empty() {
+        return true;
+    }
+    let mut rms: Vec<f32> = audio.chunks(800).map(|c| (c.iter().map(|x| x * x).sum::<f32>() / c.len() as f32).sqrt()).collect();
+    rms.sort_by(|a, b| a.total_cmp(b));
+    rms[(rms.len() * 95 / 100).min(rms.len() - 1)] < QUIET_RMS
+}
+
+/// A short scrap of text the model was unsure of word by word: what it makes up out of noise ("So,").
+fn is_noise_guess(text: &str, mean_token_p: f32) -> bool {
+    text.split_whitespace().count() <= 3 && mean_token_p < 0.5
+}
+
+/// The text as lower case words with single spaces and no punctuation, with a space at both ends. None when empty.
+fn words_of(text: &str) -> Option<String> {
+    let w: Vec<String> = text.split_whitespace().map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase()).filter(|w| !w.is_empty()).collect();
+    (!w.is_empty()).then(|| format!(" {} ", w.join(" ")))
+}
+
+/// Over noise the model tends to read the end of its prompt back ("Thank you."). A short scrap that is
+/// found in the prompt and was not said with full confidence is taken for that. Long text is never dropped here.
+fn echoes_prompt(text: &str, prompt_words: Option<&str>, mean_token_p: f32) -> bool {
+    let (Some(prompt), Some(seg)) = (prompt_words, words_of(text)) else { return false };
+    seg.split_whitespace().count() <= 4 && mean_token_p < 0.95 && prompt.contains(&seg)
 }
 
 /// Removes sound tags, and drops text that is whisper making things up over silence or noise.
@@ -353,7 +509,63 @@ pub fn clean(text: &str, no_speech_prob: f32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::clean;
+    use super::{clean, echoes_prompt, is_noise_guess, is_quiet, prompt_text, words_of};
+
+    #[test]
+    fn prompt_echo() {
+        let p = words_of("We met Kennedy. Thank you all for joining today.");
+        assert!(echoes_prompt("Thank you.", p.as_deref(), 0.8));
+        assert!(!echoes_prompt("Thank you.", p.as_deref(), 0.99));
+        assert!(!echoes_prompt("Thank you.", None, 0.8));
+        assert!(!echoes_prompt("Hello there.", p.as_deref(), 0.5));
+        // A word that is only part of a longer word is not a match.
+        assert!(!echoes_prompt("join", p.as_deref(), 0.5));
+        assert!(!echoes_prompt("We met Kennedy and thank you all for joining today.", p.as_deref(), 0.5));
+    }
+
+    #[test]
+    fn quiet_audio() {
+        assert!(is_quiet(&[]));
+        assert!(is_quiet(&vec![0.0; 16_000]));
+        assert!(is_quiet(&vec![0.001; 16_000]));
+        // A soft voice: bursts at 0.02 inside a quiet room.
+        let mut v = vec![0.001f32; 32_000];
+        for x in v[8_000..16_000].iter_mut() {
+            *x = 0.02;
+        }
+        assert!(!is_quiet(&v));
+        // One click in two seconds is not speech.
+        let mut v = vec![0.0f32; 32_000];
+        v[100] = 0.9;
+        assert!(is_quiet(&v));
+    }
+
+    #[test]
+    fn noise_guesses() {
+        assert!(is_noise_guess("So,", 0.2));
+        assert!(!is_noise_guess("So,", 0.9));
+        assert!(!is_noise_guess("We should ship the new build on Friday", 0.2));
+    }
+
+    #[test]
+    fn prompt_shaping() {
+        assert_eq!(prompt_text(""), None);
+        assert_eq!(prompt_text("  \n "), None);
+        assert_eq!(prompt_text("Hello   there\nfriend").as_deref(), Some(" Hello there friend"));
+        let long = "word ".repeat(400);
+        let t = prompt_text(&long).unwrap();
+        assert!(t.chars().count() <= 801 + 1);
+        assert!(t.starts_with(" word"));
+        // The last words are the ones kept.
+        let numbered: String = (0..500).map(|i| format!("w{i} ")).collect();
+        let t = prompt_text(&numbered).unwrap();
+        assert!(t.trim_end().ends_with("w499"));
+        assert!(t.chars().count() <= 801);
+        assert!(t.trim_start().starts_with('w'));
+        // Multi-byte text is cut on characters, not bytes.
+        let hindi = "नमस्ते दुनिया ".repeat(100);
+        assert!(prompt_text(&hindi).unwrap().chars().count() <= 801);
+    }
 
     #[test]
     fn cleaning() {

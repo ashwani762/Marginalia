@@ -108,6 +108,21 @@ Bugs this found, all fixed:
   The phone retries every 20 seconds and does the work itself in the meantime.
 - A block follows the phone's certificate, so a phone that clears the app's data gets a new identity. Lock the node to stop that.
 
+### Transcripts and failures (compute nodes, second round)
+
+- After a meeting a node re-transcribed the kept audio with large-v3-turbo: 292 s of audio in 4.9 s (60 times real time), 393 s in 5.5 s (71 times).
+  At start the node measures itself on a bundled sample (83 times). The live text of a 4 minute talk had "K寺" at the start, loops of "really, really,
+  really" and "Ascension Director" for a name. The node's text read "Mike Acton, who is Engine Director at Insomniac Games".
+- Live correction with a real talk playing from Chrome into the phone's microphone: 5 minutes, 14 windows, 620 s of audio sent, no failures,
+  corrections appeared a few seconds behind. A 40 s window takes 0.35 to 0.55 s on the node, also while a long job runs.
+- A speech recognition mistake ("gamers" heard as another word) became a live question card about people in the room. Audience polls and questions about
+  personal characteristics no longer make cards, a card that cannot be answered from the talk or the library is removed, and every card has a remove button.
+- A node killed with SIGKILL halfway through an answer: another node, or the phone, carried on from the words already shown. With every node down the phone wrote up a
+  1 minute 41 second meeting by itself in about 13 s. Wi-Fi off and on during a recording lost nothing. A node that came back mid write-up took the next call, and a running phone
+  call is handed over to it.
+- Found and fixed: the phone could not reach the PC once until the PC sent it a packet (network neighbour entry failed), a stray foreign script character and word loops in live text,
+  the "Everything" scope pill squeezed to "Ever...", description text touching the switches in Settings, and "1 phones" style wording in the node and tray text.
+
 ## Tests
 
 - Rust: 15 unit tests run on the host (`cd core && cargo test --lib`), 22 protocol tests (`cargo test -p marginalia-proto`).

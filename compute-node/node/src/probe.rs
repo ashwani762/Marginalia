@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 #[allow(clippy::too_many_arguments)]
-pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>, knock: bool, decide: Option<String>, deny: bool, transcribe: Option<PathBuf>, language: Option<String>, hang_up_after: Option<f32>) -> Result<()> {
+pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>, knock: bool, decide: Option<String>, deny: bool, transcribe: Option<PathBuf>, language: Option<String>, window: bool, prompt: Option<String>, hang_up_after: Option<f32>) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let id_path = dir.join("probe-identity.json");
     let id: Identity = match std::fs::read(&id_path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
@@ -60,7 +60,7 @@ pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>,
     let st = client::status(&conn).await?;
     println!("status: {st:#?}");
     if let Some(file) = transcribe {
-        return transcribe_file(&conn, &file, language, hang_up_after).await;
+        return transcribe_file(&conn, &file, language, window, prompt, hang_up_after).await;
     }
 
     let t = Instant::now();
@@ -141,12 +141,15 @@ pub fn read_pcm(path: &std::path::Path) -> Result<Vec<u8>> {
     anyhow::bail!("the wav file has no data chunk")
 }
 
-async fn transcribe_file(conn: &quinn::Connection, file: &std::path::Path, language: Option<String>, hang_up_after: Option<f32>) -> Result<()> {
+async fn transcribe_file(conn: &quinn::Connection, file: &std::path::Path, language: Option<String>, window: bool, prompt: Option<String>, hang_up_after: Option<f32>) -> Result<()> {
     let pcm = read_pcm(file)?;
     let total_ms = pcm.len() as u64 / 32;
     println!("sending {:.1} s of audio from {}", total_ms as f64 / 1000.0, file.display());
     let t = Instant::now();
-    let (mut send, mut recv) = client::open(conn, &Request::Transcribe(TranscribeRequest { language, total_ms, priority: Priority::Background })).await?;
+    let (mut send, mut recv) = client::open(conn, &Request::Transcribe(TranscribeRequest { language, total_ms, priority: if window { Priority::Interactive } else { Priority::Background }, prompt })).await?;
+    // When the last audio frame left, in milliseconds after the start, for the wait after it.
+    let sent_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let sent_ms2 = sent_ms.clone();
     // The audio goes in 1 MB frames while the answers are read, like the phone does.
     tokio::spawn(async move {
         for chunk in pcm.chunks(1_000_000) {
@@ -155,6 +158,7 @@ async fn transcribe_file(conn: &quinn::Connection, file: &std::path::Path, langu
             }
         }
         if wire::write_frame(&mut send, &AudioFrame::End).await.is_ok() {
+            sent_ms2.store(t.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
             println!("[{:6.1}s] audio sent", t.elapsed().as_secs_f32());
         }
         let _ = send.finish();
@@ -183,13 +187,13 @@ async fn transcribe_file(conn: &quinn::Connection, file: &std::path::Path, langu
             TranscribeEvent::Working => beats += 1,
             TranscribeEvent::Progress { done_ms, total_ms } => println!("[{:6.1}s] progress {:.0}%", t.elapsed().as_secs_f32(), done_ms as f64 * 100.0 / total_ms.max(1) as f64),
             TranscribeEvent::Segment { t0_ms, t1_ms, text } => println!("[{:6.1}s] {} -> {}  {text}", t.elapsed().as_secs_f32(), stamp(t0_ms), stamp(t1_ms)),
-            TranscribeEvent::Done { language, segments, elapsed_ms } => return done(t, total_ms, &language, segments, elapsed_ms, beats),
+            TranscribeEvent::Done { language, segments, elapsed_ms } => return done(t, total_ms, &language, segments, elapsed_ms, beats, sent_ms.load(std::sync::atomic::Ordering::Relaxed)),
             TranscribeEvent::Error(e) => anyhow::bail!(e),
         }
     }
 }
 
-fn done(t: Instant, total_ms: u64, language: &str, segments: u32, elapsed_ms: u32, beats: u32) -> Result<()> {
+fn done(t: Instant, total_ms: u64, language: &str, segments: u32, elapsed_ms: u32, beats: u32, sent_ms: u64) -> Result<()> {
     let wall = t.elapsed().as_secs_f64();
     println!(
         "\ndone: language {language}, {segments} segments, node worked {:.2} s, {:.2} s from start to end, {beats} heartbeats\naudio {:.1} s: {:.1} times faster than real time on the node, {:.1} times counting the sending",
@@ -199,6 +203,7 @@ fn done(t: Instant, total_ms: u64, language: &str, segments: u32, elapsed_ms: u3
         total_ms as f64 / elapsed_ms.max(1) as f64,
         total_ms as f64 / 1000.0 / wall.max(0.001),
     );
+    println!("last audio frame sent to Done: {:.3} s", (t.elapsed().as_millis() as u64).saturating_sub(sent_ms) as f64 / 1000.0);
     Ok(())
 }
 

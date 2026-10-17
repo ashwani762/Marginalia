@@ -20,6 +20,8 @@ pub struct Options {
     pub speech_model: Option<PathBuf>,
     /// Do not load the speech model even if it is there.
     pub no_speech: bool,
+    /// The most seconds of audio a short live window may hold (see `--window-max-seconds`).
+    pub window_max_s: u32,
 }
 
 pub struct Host {
@@ -32,9 +34,18 @@ pub struct Host {
     /// Jobs that have been accepted and not yet finished.
     pub chat_jobs: Arc<AtomicU32>,
     pub embed_jobs: Arc<AtomicU32>,
+    /// Whole recordings: accepted and not finished.
     pub speech_jobs: Arc<AtomicU32>,
-    /// One transcription runs at a time, the others wait here.
+    /// Short audio windows (live correction): accepted and not finished.
+    pub window_jobs: Arc<AtomicU32>,
+    /// One whole recording is transcribed at a time, the others wait here.
     pub speech_gate: Arc<tokio::sync::Semaphore>,
+    /// One short window is transcribed at a time, on its own lane so it does not wait behind a long recording.
+    /// It is the same gate as `speech_gate` when the speech model runs on the processor, where two decodes at
+    /// once would only slow each other down.
+    pub window_gate: Arc<tokio::sync::Semaphore>,
+    /// Windows in flight per phone (certificate fingerprint), so one phone cannot fill the lane.
+    pub window_by_phone: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
 }
 
 pub const SPEECH_FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
@@ -130,6 +141,7 @@ impl Host {
             }
             if found.is_some() {
                 caps.transcribe = Some(speech_name(&speech_path));
+                caps.window_max_s = opts.window_max_s;
             }
             found
         } else {
@@ -139,6 +151,8 @@ impl Host {
         if llm.is_none() && embed.is_none() && whisper.is_none() {
             return Err(anyhow!("no models found in {}", opts.models_dir.display()));
         }
+        let speech_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let window_gate = if whisper.as_ref().map(|w| w.on_gpu()).unwrap_or(false) { Arc::new(tokio::sync::Semaphore::new(1)) } else { speech_gate.clone() };
         let host = Host {
             _backend: backend,
             llm,
@@ -148,7 +162,10 @@ impl Host {
             chat_jobs: Arc::new(AtomicU32::new(0)),
             embed_jobs: Arc::new(AtomicU32::new(0)),
             speech_jobs: Arc::new(AtomicU32::new(0)),
-            speech_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            window_jobs: Arc::new(AtomicU32::new(0)),
+            speech_gate,
+            window_gate,
+            window_by_phone: parking_lot::Mutex::new(Default::default()),
         };
         host.benchmark();
         Ok(host)
@@ -178,7 +195,15 @@ impl Host {
                 caps.chat_tok_s = n as f32 / t.elapsed().as_secs_f32().max(1e-3);
             }
         }
-        tracing::info!("measured: chat {:.0} tokens a second, search {:.0} passages a second", caps.chat_tok_s, caps.embed_per_s);
+        if let Some(w) = &self.whisper {
+            if let Some(x) = bench_speech(w) {
+                caps.transcribe_x = x;
+            }
+        }
+        tracing::info!(
+            "measured: chat {:.0} tokens a second, search {:.0} passages a second, speech {:.0} times faster than real time",
+            caps.chat_tok_s, caps.embed_per_s, caps.transcribe_x
+        );
     }
 
     /// Folds the speed of a real job into the figure phones see, so a node that slows down says so.
@@ -199,7 +224,7 @@ impl Host {
     }
 
     pub fn idle(&self) -> bool {
-        self.chat_jobs.load(std::sync::atomic::Ordering::Relaxed) + self.embed_jobs.load(std::sync::atomic::Ordering::Relaxed) + self.speech_jobs.load(std::sync::atomic::Ordering::Relaxed) == 0
+        self.chat_jobs.load(std::sync::atomic::Ordering::Relaxed) + self.embed_jobs.load(std::sync::atomic::Ordering::Relaxed) + self.speech_jobs.load(std::sync::atomic::Ordering::Relaxed) + self.window_jobs.load(std::sync::atomic::Ordering::Relaxed) == 0
     }
 
     pub fn shutdown(&self) {
@@ -209,5 +234,47 @@ impl Host {
         if let Some(e) = &self.embed {
             e.shutdown();
         }
+    }
+}
+
+/// A short public domain recording (President Kennedy, 11 s, 16 kHz mono) that ships inside the node. It is
+/// repeated into about a minute of speech and transcribed once, so the speed phones are told exists from the
+/// first minute instead of after the first real job.
+const SPEECH_SAMPLE: &[u8] = include_bytes!("../assets/jfk.wav");
+
+fn sample_pcm() -> Option<Vec<f32>> {
+    let at = SPEECH_SAMPLE.windows(4).position(|w| w == b"data")?;
+    let len = u32::from_le_bytes(SPEECH_SAMPLE.get(at + 4..at + 8)?.try_into().ok()?) as usize;
+    let body = SPEECH_SAMPLE.get(at + 8..(at + 8 + len).min(SPEECH_SAMPLE.len()))?;
+    Some(body.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect())
+}
+
+/// Times faster than real time on the sample, or None if it could not run.
+fn bench_speech(w: &crate::engine::whisper::Whisper) -> Option<f32> {
+    let one = sample_pcm()?;
+    let gap = vec![0.0f32; 16_000];
+    let mut pcm = Vec::with_capacity((one.len() + gap.len()) * 6);
+    for _ in 0..6 {
+        pcm.extend_from_slice(&one);
+        pcm.extend_from_slice(&gap);
+    }
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let t = Instant::now();
+    let r = w.transcribe(&pcm, crate::engine::whisper::Job { language: Some("en"), prompt: None, window: false }, &cancel, &mut |_| {}, &mut |_| {});
+    let secs = t.elapsed().as_secs_f32();
+    if r.is_err() || secs <= 0.0 {
+        return None;
+    }
+    Some(pcm.len() as f32 / 16_000.0 / secs)
+}
+
+#[cfg(test)]
+mod speech_sample_tests {
+    #[test]
+    fn the_bundled_sample_is_eleven_seconds_of_audio() {
+        let pcm = super::sample_pcm().expect("sample");
+        let secs = pcm.len() as f32 / 16_000.0;
+        assert!((10.0..12.5).contains(&secs), "{secs}");
+        assert!(pcm.iter().any(|x| x.abs() > 0.1));
     }
 }

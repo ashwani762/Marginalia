@@ -74,6 +74,8 @@ pub struct TranscribeRequest {
     /// Length of the audio that will follow, in milliseconds (for progress).
     pub total_ms: u64,
     pub priority: Priority,
+    /// What was said just before this audio, so a short window starts with the right names and spelling. None for a whole recording.
+    pub prompt: Option<String>,
 }
 
 /// Audio sent by the phone after a [`TranscribeRequest`]: raw PCM, 16 bit little endian, mono, 16 kHz.
@@ -154,6 +156,9 @@ pub struct Capabilities {
     pub transcribe: Option<String>,
     /// How many times faster than real time it transcribes (0 means not measured).
     pub transcribe_x: f32,
+    /// The longest audio window, in seconds, this node treats as a quick job for live correction (0 means not stated,
+    /// the phone then assumes 120). The phone keeps its window length at or under this.
+    pub window_max_s: u32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -1,6 +1,13 @@
 # Running the node on Windows
 
-The easy way is the setup script in `../windows/`: `.\compute-node\windows\setup.ps1` builds, installs, downloads the models, starts the node and the tray at logon and opens the firewall. See `../windows/README.md`. It is untested on a real Windows machine so far. The manual steps below are what it automates, for when you want to do it by hand or fix something.
+The easy way is the setup script in `../windows/`: `.\compute-node\windows\setup.ps1` builds, installs, downloads the models, starts the node and the tray at logon, opens the firewall and runs `verify.ps1`. It skips steps that are already done. See `../windows/README.md`. It is untested on a real Windows machine so far. The manual steps below are what it automates, for when you want to do it by hand or fix something.
+
+Day to day on Windows:
+
+- `..\windows\verify.ps1` checks everything in 20 lines and prints the command for the first failure.
+- `..\windows\dev.ps1 node` (or `tray`, or nothing for both) builds, replaces the running programs, starts them and follows `node.log`.
+- `..\windows\setup.ps1 -Quick` after a `git pull`: incremental build, copy, restart, verify.
+- `docs/WINDOWS-PLAN.md` lists the likely Windows problems and the file to look at for each.
 
 ## Once
 

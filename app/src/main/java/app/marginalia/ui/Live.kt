@@ -114,6 +114,7 @@ import app.marginalia.Line
 import app.marginalia.LiveState
 import app.marginalia.Photo
 import app.marginalia.RecorderBus
+import app.marginalia.correctionLabel
 import app.marginalia.Source
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -123,7 +124,7 @@ private sealed interface Moment {
     val key: String
     val at: Double
 
-    data class Said(val line: Line) : Moment { override val key = "l${line.i}"; override val at = line.t0 }
+    data class Said(val line: Line) : Moment { override val key = "l${line.id}"; override val at = line.t0 }
     data class Noted(val jot: Jot) : Moment { override val key = "j${jot.id}"; override val at = jot.t ?: Double.MAX_VALUE }
     data class Shot(val photo: Photo) : Moment { override val key = "p${photo.id}"; override val at = photo.t ?: Double.MAX_VALUE }
     data class Asked(val card: Card) : Moment { override val key = "c${card.id}"; override val at = card.t }
@@ -331,6 +332,7 @@ fun LiveScreen(vm: AppVm, onMinimize: () -> Unit, onCite: (Source) -> Unit) {
                             Box(Modifier.weight(1f)) { ActivityStrip(s.activity, s.recording) }
                             folderPill(Modifier.padding(end = 16.dp))
                         }
+                        CorrectionNote(if (showTranscript) s.correctedBy else null)
                         timeline(Modifier.weight(1f))
                     }
                 } else {
@@ -361,6 +363,19 @@ fun LiveScreen(vm: AppVm, onMinimize: () -> Unit, onCite: (Source) -> Unit) {
 
 // ------------------------------------------------------------------------------------------------
 
+/** A calm line under the header while a compute node is fixing the captions. It is not there when none is. */
+@Composable
+private fun CorrectionNote(node: String?) {
+    val label = correctionLabel(node)
+    AnimatedVisibility(visible = label != null, enter = fadeIn(tween(250)) + expandVertically(), exit = fadeOut(tween(200)) + shrinkVertically()) {
+        Text(
+            label.orEmpty(), style = type.caption.copy(color = pal.textFaint), maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, bottom = 2.dp),
+        )
+    }
+}
+
 @Composable
 private fun Timeline(
     s: LiveState,
@@ -382,7 +397,7 @@ private fun Timeline(
     val extra = if (!notesOnly && (s.partial.isNotBlank() || s.lines.isEmpty())) 1 else 0
     val total = items.size + extra
     val atEnd by remember { derivedStateOf { val last = list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0; last >= list.layoutInfo.totalItemsCount - 2 } }
-    val newestLine = s.lines.lastOrNull()?.i
+    val newestLine = s.lines.lastOrNull()?.id
 
     LaunchedEffect(items.size, s.partial.length / 10, notesOnly) {
         if (atEnd && total > 0) list.animateScrollToItem((total - 1).coerceAtLeast(0))
@@ -403,7 +418,7 @@ private fun Timeline(
             items(items, key = { it.key }) { m ->
                 when (m) {
                     is Moment.Said -> SwipeToKeep(onKeep = { onKeep(m.line) }, modifier = Modifier.animateItem()) {
-                        TranscriptRow(m.line, animateIn = true, dim = if (m.line.i == newestLine) 1f else 0.7f)
+                        TranscriptRow(m.line, animateIn = true, dim = if (m.line.id == newestLine) 1f else 0.7f)
                     }
                     is Moment.Noted -> SwipeToDelete(
                         onDelete = { onDeleteJot(m.jot) },

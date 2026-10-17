@@ -167,6 +167,10 @@ pub struct TranscribeJob<'a> {
     /// ISO code if known, else the node decides.
     pub language: Option<String>,
     pub cancel: &'a std::sync::atomic::AtomicBool,
+    /// `Background` for a whole recording, `Interactive` for a short window that a person is waiting on.
+    pub priority: Priority,
+    /// What was said just before this audio (a short window only), so the node starts with the right names.
+    pub prompt: Option<String>,
 }
 
 /// What came back from the compute nodes. Times are milliseconds from the start of the audio.
@@ -212,6 +216,11 @@ pub fn shift_segment(start_ms: u64, t0_ms: u64, t1_ms: u64) -> (u64, u64) {
 /// going up to it either, means the link is gone.
 pub fn link_is_lost(since_event: Duration, since_upload: Duration) -> bool {
     since_event > STALL && since_upload > STALL
+}
+
+/// The longest window, in seconds, a node treats as a quick job. A node that does not say (0) gets 120.
+pub fn node_window_s(stated: u32) -> u32 {
+    if stated == 0 { 120 } else { stated }
 }
 
 /// Whether a node's last status says it can take recorded audio.
@@ -525,7 +534,7 @@ impl Remote {
                 json!({
                     "state": state, "pending": pending,
                     "fp": n.saved.fp, "name": n.saved.name, "online": online, "rtt_ms": n.live.rtt_ms,
-                    "chat": caps.chat, "embed": caps.embed, "transcribe": caps.transcribe, "transcribe_x": caps.transcribe_x, "chat_tok_s": caps.chat_tok_s, "embed_per_s": caps.embed_per_s,
+                    "chat": caps.chat, "embed": caps.embed, "transcribe": caps.transcribe, "transcribe_x": caps.transcribe_x, "window_max_s": node_window_s(caps.window_max_s), "chat_tok_s": caps.chat_tok_s, "embed_per_s": caps.embed_per_s,
                     "busy": n.live.status.as_ref().map(|s| s.running + s.waiting).unwrap_or(0),
                     "problem": if online || state == "waiting" { String::new() } else { n.live.last_error.clone() },
                 })
@@ -793,6 +802,16 @@ impl Remote {
     /// The name of a compute node that could transcribe recorded audio right now, from what was last seen
     /// (the fastest one when several can).
     pub fn transcribe_node_available(&self) -> Option<String> {
+        self.best_transcribe().map(|(name, _)| name)
+    }
+
+    /// Like [`Remote::transcribe_node_available`], with the longest window (seconds) that node treats as a quick job.
+    /// A node that does not say gets 120.
+    pub fn transcribe_node_window(&self) -> Option<(String, u32)> {
+        self.best_transcribe()
+    }
+
+    fn best_transcribe(&self) -> Option<(String, u32)> {
         let g = self.inner.lock();
         if !g.enabled {
             return None;
@@ -801,9 +820,9 @@ impl Remote {
             .iter()
             .filter(|n| n.saved.approved)
             .filter(|n| n.live.conn.as_ref().map(|c| c.close_reason().is_none()).unwrap_or(false))
-            .filter_map(|n| n.live.status.as_ref().filter(|s| can_transcribe(s)).map(|s| (s.caps.transcribe_x, n.saved.name.clone())))
+            .filter_map(|n| n.live.status.as_ref().filter(|s| can_transcribe(s)).map(|s| (s.caps.transcribe_x, n.saved.name.clone(), node_window_s(s.caps.window_max_s))))
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(_, name)| name)
+            .map(|(_, name, w)| (name, w))
     }
 
     /// Speech to text on recorded audio, on a compute node with a large speech model.
@@ -886,7 +905,7 @@ impl Remote {
         on_progress: &impl Fn(u64, u64, &str),
         on_segment: &mut impl FnMut(u64, u64, &str),
     ) -> Result<Attempt> {
-        let req = TranscribeRequest { language: job.language.clone(), total_ms: job.total_ms.saturating_sub(start_ms), priority: Priority::Background };
+        let req = TranscribeRequest { language: job.language.clone(), total_ms: job.total_ms.saturating_sub(start_ms), priority: job.priority, prompt: job.prompt.clone() };
         let (mut send, recv) = client::open(&node.conn, &Request::Transcribe(req)).await?;
         // Decoding is slow work: it runs on its own thread and hands over a few pieces ahead of the upload.
         let (ftx, mut frx) = tokio::sync::mpsc::channel::<Vec<u8>>(3);
@@ -1303,7 +1322,7 @@ async fn monitor(r: Arc<Remote>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use marginalia_proto::AudioFrame;
 
@@ -1374,7 +1393,7 @@ mod tests {
         assert_eq!(transcribe_wait(0.0, 0), transcribe_wait(UNMEASURED_TRANSCRIBE_X, 0));
     }
 
-    fn status(transcribe: Option<&str>, x: f32, paused: bool) -> StatusReply {
+    pub(crate) fn status(transcribe: Option<&str>, x: f32, paused: bool) -> StatusReply {
         let mut st = StatusReply { proto: marginalia_proto::PROTO_VERSION, paused, ..Default::default() };
         st.caps.transcribe = transcribe.map(String::from);
         st.caps.transcribe_x = x;
@@ -1393,7 +1412,7 @@ mod tests {
     // A small node that speaks the protocol, to try the phone side against.
 
     #[derive(Clone, Copy)]
-    enum Mode {
+    pub(crate) enum Mode {
         /// Listens to everything and answers.
         Good,
         /// Answers this many segments, then the connection dies.
@@ -1402,14 +1421,16 @@ mod tests {
         Broken,
     }
 
-    struct Fake {
-        fp: String,
-        addr: SocketAddr,
+    pub(crate) struct Fake {
+        pub(crate) fp: String,
+        pub(crate) addr: SocketAddr,
         /// For every listening job: (total_ms announced, bytes of audio received).
-        jobs: Arc<std::sync::Mutex<Vec<(u64, usize)>>>,
+        pub(crate) jobs: Arc<std::sync::Mutex<Vec<(u64, usize)>>>,
+        /// For every listening job: its priority and the prompt it came with.
+        pub(crate) metas: Arc<std::sync::Mutex<Vec<(Priority, Option<String>)>>>,
     }
 
-    fn start_fake(rt: &tokio::runtime::Runtime, x: f32, mode: Mode) -> Fake {
+    pub(crate) fn start_fake(rt: &tokio::runtime::Runtime, x: f32, mode: Mode) -> Fake {
         use marginalia_proto::tls;
         let id = tls::Identity::generate().unwrap();
         let _g = rt.enter();
@@ -1417,18 +1438,22 @@ mod tests {
         let addr = ep.local_addr().unwrap();
         let jobs = Arc::new(std::sync::Mutex::new(Vec::new()));
         let jobs2 = jobs.clone();
+        let metas = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let metas2 = metas.clone();
         rt.spawn(async move {
             while let Some(incoming) = ep.accept().await {
                 let jobs = jobs2.clone();
+                let metas = metas2.clone();
                 tokio::spawn(async move {
                     let Ok(conn) = incoming.await else { return };
                     while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                        let (jobs, conn) = (jobs.clone(), conn.clone());
+                        let (jobs, conn, metas) = (jobs.clone(), conn.clone(), metas.clone());
                         tokio::spawn(async move {
                             let Ok(Some(req)) = wire::read_frame::<Request>(&mut recv).await else { return };
                             match req {
                                 Request::Status => {
                                     let mut st = status(Some("large-test"), x, false);
+                                    st.caps.window_max_s = 90;
                                     st.node_name = "fake".into();
                                     let _ = wire::write_frame(&mut send, &st).await;
                                     let _ = send.finish();
@@ -1443,6 +1468,7 @@ mod tests {
                                         }
                                     }
                                     jobs.lock().unwrap().push((t.total_ms, bytes));
+                                    metas.lock().unwrap().push((t.priority, t.prompt.clone()));
                                     if matches!(mode, Mode::Broken) {
                                         let _ = wire::write_frame(&mut send, &TranscribeEvent::Error("no model".into())).await;
                                         let _ = send.finish();
@@ -1474,10 +1500,10 @@ mod tests {
                 });
             }
         });
-        Fake { fp: id.fingerprint(), addr, jobs }
+        Fake { fp: id.fingerprint(), addr, jobs, metas }
     }
 
-    fn remote_with(fakes: &[(&str, &Fake)], tag: &str) -> Arc<Remote> {
+    pub(crate) fn remote_with(fakes: &[(&str, &Fake)], tag: &str) -> Arc<Remote> {
         let dir = std::env::temp_dir().join(format!("marginalia-remote-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1495,7 +1521,7 @@ mod tests {
     }
 
     /// `total_secs` seconds of silence, one second per piece, starting at `start_ms`.
-    fn silence(total_secs: u64) -> impl Fn(u64) -> Result<PcmFrames> {
+    pub(crate) fn silence(total_secs: u64) -> impl Fn(u64) -> Result<PcmFrames> {
         move |start_ms| {
             let left = total_secs.saturating_sub(start_ms / 1000);
             Ok(Box::new((0..left).map(|_| vec![0u8; 32_000])) as PcmFrames)
@@ -1504,7 +1530,7 @@ mod tests {
 
     fn run_job(r: &Arc<Remote>, secs: u64) -> (Option<Result<TranscribeOutcome>>, Vec<(u64, u64)>) {
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        let job = TranscribeJob { total_ms: secs * 1000, language: Some("en".into()), cancel: &cancel };
+        let job = TranscribeJob { total_ms: secs * 1000, language: Some("en".into()), cancel: &cancel, priority: Priority::Background, prompt: None };
         let progress = std::sync::Mutex::new(Vec::new());
         let out = r.transcribe(&job, silence(secs), |d, t, _| progress.lock().unwrap().push((d, t)), |_, _, _| {});
         (out, progress.into_inner().unwrap())
@@ -1588,7 +1614,7 @@ mod tests {
         let a = start_fake(&rt, 9.0, Mode::Good);
         let r = remote_with(&[("a", &a)], "cancel");
         let cancel = std::sync::atomic::AtomicBool::new(true);
-        let job = TranscribeJob { total_ms: 5000, language: None, cancel: &cancel };
+        let job = TranscribeJob { total_ms: 5000, language: None, cancel: &cancel, priority: Priority::Background, prompt: None };
         let out = r.transcribe(&job, silence(5), |_, _, _| {}, |_, _, _| {}).unwrap().unwrap();
         assert!(!out.complete && out.segments.is_empty());
     }

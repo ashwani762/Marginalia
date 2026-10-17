@@ -334,7 +334,7 @@ fn says_unanswered(answer: &str) -> bool {
     let a = answer.trim().to_lowercase();
     a.is_empty()
         || a.starts_with("not answered")
-        || ["does not contain", "do not contain", "doesn't contain", "not mentioned", "no information", "not covered", "does not say", "cannot be answered", "not discussed", "not stated", "does not mention", "not addressed"]
+        || ["does not contain", "do not contain", "doesn't contain", "not mentioned", "no information", "not covered", "does not say", "cannot be answered", "not discussed", "not stated", "does not mention", "not addressed", "does not provide", "do not provide", "doesn't provide", "does not specify", "not specified", "no specific", "no mention", "isn't mentioned", "not clear from", "unable to find", "cannot determine"]
             .iter()
             .any(|p| a.contains(p))
 }
@@ -357,6 +357,7 @@ mod tests {
         assert!(says_unanswered("Not answered yet."));
         assert!(says_unanswered("The meeting transcript does not contain information about this."));
         assert!(says_unanswered(""));
+        assert!(says_unanswered("The transcript mentions the address of the first character [03:25], but does not provide a specific address."));
         assert!(!says_unanswered("A mutex stops two threads changing the variable at once [12:03]."));
     }
 }

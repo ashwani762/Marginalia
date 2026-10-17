@@ -63,6 +63,10 @@ pub struct Settings {
     pub appearance: String,
     /// After a meeting, let a compute node listen to the kept recording again with a larger speech model.
     pub improve_transcript: bool,
+    /// While recording, a compute node listens again in short windows and fixes the live captions a few seconds later.
+    pub live_correction: bool,
+    /// How much talk one correction window covers, in seconds (20, 30, 45 or 60).
+    pub live_correction_window_s: u32,
 }
 
 impl Default for Settings {
@@ -79,6 +83,8 @@ impl Default for Settings {
             vision: true,
             appearance: "System".into(),
             improve_transcript: true,
+            live_correction: false,
+            live_correction_window_s: 30,
         }
     }
 }

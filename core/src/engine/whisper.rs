@@ -416,7 +416,74 @@ pub fn clean_transcript(text: &str) -> String {
             _ => {}
         }
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+    let text = strip_stray_script(&out.split_whitespace().collect::<Vec<_>>().join(" "));
+    collapse_repeats(&text)
+}
+
+/// A mostly Latin sentence with a few characters from another script in it (language detection on the first
+/// snippet of a recording can put one at the start) is cleaned of them. A line that really is in another
+/// language has far more of those letters and is left alone.
+fn strip_stray_script(text: &str) -> String {
+    let latin = |c: char| c.is_ascii_alphabetic() || ('\u{C0}'..='\u{24F}').contains(&c);
+    let (mut l, mut other) = (0usize, 0usize);
+    for c in text.chars() {
+        if latin(c) {
+            l += 1;
+        } else if c.is_alphabetic() {
+            other += 1;
+        }
+    }
+    if other == 0 || l < 8 || other > 3 || other * 5 > l {
+        return text.to_string();
+    }
+    let kept: String = text.chars().filter(|c| latin(*c) || !c.is_alphabetic()).collect();
+    kept.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A word or short phrase repeated four or more times in a row is a decoding loop: one copy is kept.
+fn collapse_repeats(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let norm: Vec<String> = words.iter().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()).collect();
+    let mut out: Vec<&str> = Vec::with_capacity(words.len());
+    let mut i = 0;
+    'outer: while i < words.len() {
+        for n in 1..=4usize {
+            if i + n * 4 > words.len() || norm[i..i + n].iter().all(|w| w.is_empty()) {
+                continue;
+            }
+            let mut reps = 1;
+            while i + n * (reps + 1) <= words.len() && norm[i + n * reps..i + n * (reps + 1)] == norm[i..i + n] {
+                reps += 1;
+            }
+            if reps >= 4 {
+                out.extend(&words[i..i + n]);
+                i += n * reps;
+                continue 'outer;
+            }
+        }
+        out.push(words[i]);
+        i += 1;
+    }
+    out.join(" ")
+}
+
+#[cfg(test)]
+mod clean_tests {
+    use super::*;
+
+    #[test]
+    fn a_stray_character_from_another_script_is_removed_from_an_english_line() {
+        assert_eq!(clean_transcript("K\u{5BFA} So, uh... I got asked."), "K So, uh... I got asked.");
+        assert_eq!(clean_transcript("\u{4F60}\u{597D}\u{4E16}\u{754C}"), "\u{4F60}\u{597D}\u{4E16}\u{754C}");
+        assert_eq!(clean_transcript("\u{928}\u{92E}\u{938}\u{94D}\u{924}\u{947} hello"), "\u{928}\u{92E}\u{938}\u{94D}\u{924}\u{947} hello");
+    }
+
+    #[test]
+    fn loops_of_a_repeated_word_or_phrase_are_collapsed() {
+        assert_eq!(clean_transcript("So, really, really, really, really, really, really, and that is who."), "So, really, and that is who.");
+        assert_eq!(clean_transcript("go on go on go on go on go on now"), "go on now");
+        assert_eq!(clean_transcript("no no no it is fine"), "no no no it is fine");
+    }
 }
 
 #[cfg(test)]

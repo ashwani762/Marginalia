@@ -6,6 +6,7 @@ package app.marginalia.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -67,7 +68,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.marginalia.AppVm
 import app.marginalia.FoundComputer
+import app.marginalia.CORRECTION_WINDOWS_S
 import app.marginalia.HomeComputer
+import app.marginalia.HomeComputers
+import app.marginalia.Prefs
+import app.marginalia.canCorrectLive
+import app.marginalia.transcribeNode
+import app.marginalia.windowLimitNote
 import app.marginalia.offerTitle
 import app.marginalia.onlineChipText
 import app.marginalia.unpairedFound
@@ -95,6 +102,35 @@ internal fun statusOf(c: HomeComputer): Pair<String, String?> {
 
 internal const val IMPROVE_HELP = "After a meeting, a compute node re-transcribes the recording with a larger model. Nothing is kept there."
 
+internal const val CORRECT_TITLE = "Correct the transcript while recording"
+internal const val CORRECT_HELP = "While recording, a compute node listens again in short windows and fixes the captions a few seconds later."
+internal const val CORRECT_NEEDS_NODE = "Needs a compute node with the speech model"
+internal const val CORRECT_WINDOW_HELP = "Longer windows are more accurate and show up later."
+
+/** The switch for live correction and, under it, the length of a correction window. Both are off and grey without a compute node that can listen. */
+@Composable
+private fun LiveCorrectionRows(prefs: Prefs, nodes: HomeComputers, vm: AppVm) {
+    val usable = canCorrectLive(nodes)
+    val on = prefs.liveCorrection && usable
+    Column(Modifier.alpha(if (usable) 1f else 0.5f)) {
+        SettingRow(CORRECT_TITLE, if (usable) CORRECT_HELP else CORRECT_NEEDS_NODE) {
+            NodeSwitch(on, enabled = usable) { vm.setPref("live_correction", it) }
+        }
+    }
+    Column(Modifier.alpha(if (on) 1f else 0.5f).padding(bottom = 6.dp)) {
+        Text("Correction window", style = type.body)
+        Spacer(Modifier.height(6.dp))
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CORRECTION_WINDOWS_S.forEach { s ->
+                Chip("$s s", selected = prefs.liveCorrectionWindowS == s) { if (on) vm.setPref("live_correction_window_s", s) }
+            }
+        }
+        Text(CORRECT_WINDOW_HELP, style = type.caption, modifier = Modifier.padding(top = 4.dp))
+        val limit = transcribeNode(nodes)?.let { windowLimitNote(prefs.liveCorrectionWindowS, it.windowMaxS) }
+        if (on && limit != null) Text(limit, style = type.caption)
+    }
+}
+
 internal const val WAITING_HELP = "Waiting for approval. Open the app on a phone that already uses these compute nodes, or run marginalia-node approve on the compute node."
 
 /** "falcon", "falcon and hawk", "a, b and c". */
@@ -114,11 +150,12 @@ internal fun cleanCode(raw: String): String = raw.filter { it.isLetterOrDigit() 
 private fun plain(s: String): String = s.replace("—", ", ").replace(";", ".").trim()
 
 @Composable
-private fun NodeSwitch(checked: Boolean, onChange: (Boolean) -> Unit) {
+private fun NodeSwitch(checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
     val p = pal
     val haptic = LocalHapticFeedback.current
     Switch(
         checked = checked,
+        enabled = enabled,
         onCheckedChange = { haptic.performHapticFeedback(if (it) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff); onChange(it) },
         colors = SwitchDefaults.colors(checkedTrackColor = p.accent, checkedThumbColor = Color.White, uncheckedTrackColor = p.surface4, uncheckedThumbColor = p.textDim, uncheckedBorderColor = p.lineStrong),
     )
@@ -140,6 +177,7 @@ fun HomeComputersSection(vm: AppVm, modifier: Modifier = Modifier) {
         SettingRow("Use compute nodes when available") { NodeSwitch(nodes.enabled) { vm.setNodesEnabled(it) } }
         val prefs by vm.prefs.collectAsState()
         SettingRow("Improve transcripts on a compute node", IMPROVE_HELP) { NodeSwitch(prefs.improveTranscript) { vm.setPref("improve_transcript", it) } }
+        LiveCorrectionRows(prefs, nodes, vm)
 
         nodes.paired.forEach { c ->
             Spacer(Modifier.height(8.dp))

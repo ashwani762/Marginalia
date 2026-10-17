@@ -18,6 +18,9 @@ Optional *compute nodes* on your network make the AI faster while you are near t
 - **Ask** your meetings and documents. Answers carry their sources. Add PDFs, pictures, web pages, text.
 - **Photos** of a whiteboard are read and added to the meeting.
 - **Speaker separation** after the meeting, with rename and merge. Tap a transcript line to hear it.
+- **Better transcripts**: the small model on the phone gives instant captions. After the meeting, a compute node listens to the kept recording again with a large Whisper model
+  (about 60 to 100 times faster than real time on a GPU) and the corrected transcript replaces the live one before the notes are written. It is also a button on the Review screen. An optional
+  switch corrects the captions while recording, a few seconds behind.
 - **Compute nodes** (optional): a small daemon on a PC does the heavy AI work for the phone, found automatically on the Wi-Fi, connected with one tap.
   Notes, answers and search run about six times faster. If a node is lost mid-answer, another node or the phone finishes it.
 - **Private by design**: no accounts, no cloud, no analytics. Nodes keep nothing and show only counts.
@@ -25,8 +28,11 @@ Optional *compute nodes* on your network make the AI faster while you are near t
 <p align="center">
   <img src="docs/images/nodes.png" width="24%" alt="Compute nodes in Settings">
   <img src="docs/images/knowledge.png" width="24%" alt="Knowledge">
-  <img src="docs/images/tray.png" width="24%" alt="Tray icon details panel on the compute node">
-  <img src="docs/images/topbar.png" width="24%" alt="Tray icon in the Ubuntu top bar">
+  <img src="docs/images/tray.png" width="24%" alt="Details panel of the compute node tray icon">
+</p>
+
+<p align="center">
+  <img src="docs/images/topbar.png" width="45%" alt="The compute node tray icon in the Ubuntu top bar">
 </p>
 
 ## How it is built

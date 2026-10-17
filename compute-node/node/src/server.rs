@@ -111,12 +111,12 @@ impl Shared {
 
     /// Jobs accepted and not finished yet (the one being worked on plus those waiting).
     pub fn in_flight(&self) -> u32 {
-        self.host.chat_jobs.load(Ordering::Relaxed) + self.host.embed_jobs.load(Ordering::Relaxed) + self.host.speech_jobs.load(Ordering::Relaxed)
+        self.host.chat_jobs.load(Ordering::Relaxed) + self.host.embed_jobs.load(Ordering::Relaxed) + self.host.speech_jobs.load(Ordering::Relaxed) + self.host.window_jobs.load(Ordering::Relaxed)
     }
 
     /// Chat, search and transcription jobs finished since the node started.
     pub fn served(&self) -> u64 {
-        self.metrics.chat_jobs.load(Ordering::Relaxed) + self.metrics.embed_jobs.load(Ordering::Relaxed) + self.metrics.speech_jobs.load(Ordering::Relaxed)
+        self.metrics.chat_jobs.load(Ordering::Relaxed) + self.metrics.embed_jobs.load(Ordering::Relaxed) + self.metrics.speech_jobs.load(Ordering::Relaxed) + self.metrics.window_jobs.load(Ordering::Relaxed)
     }
 
     fn status(&self) -> StatusReply {
@@ -393,20 +393,41 @@ async fn embed(sh: &Arc<Shared>, r: marginalia_proto::EmbedRequest, send: &mut q
 const MAX_AUDIO_MS: u64 = 3 * 60 * 60 * 1000;
 /// Recordings waiting behind the one being transcribed. More than this are turned away.
 const MAX_WAITING: u32 = 3;
+/// A little more audio than announced is let through on the window lane (a frame boundary, rounding), not hours.
+const WINDOW_SLACK_MS: u64 = 5_000;
+/// Windows waiting behind the one being transcribed. More than this are turned away.
+const MAX_WINDOWS_WAITING: u32 = 4;
+/// Windows one phone may have in flight. It should only ever send one at a time.
+const MAX_WINDOWS_PER_PHONE: u32 = 2;
+/// A window that has waited this long for its turn is turned away: the words it was for have gone stale.
+const WINDOW_MAX_WAIT: Duration = Duration::from_secs(20);
 
 /// Counts a transcription job while it exists, so `status` and a clean stop see it until the work has really ended.
-struct SpeechJob(Arc<std::sync::atomic::AtomicU32>);
+struct SpeechJob {
+    jobs: Arc<std::sync::atomic::AtomicU32>,
+    /// For a window: the host and the phone it is counted against.
+    window_of: Option<(Arc<Shared>, String)>,
+}
 
 impl Drop for SpeechJob {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        self.jobs.fetch_sub(1, Ordering::Relaxed);
+        if let Some((sh, fp)) = self.window_of.take() {
+            let mut m = sh.host.window_by_phone.lock();
+            if let Some(n) = m.get_mut(&fp) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    m.remove(&fp);
+                }
+            }
+        }
     }
 }
 
 /// Reads the audio frames of a transcription request: raw 16 bit mono PCM until `AudioFrame::End`.
-async fn read_audio(mut recv: quinn::RecvStream, expected_ms: u64) -> Result<Vec<i16>> {
-    let max_samples = (MAX_AUDIO_MS * 16) as usize;
-    let mut out: Vec<i16> = Vec::with_capacity((expected_ms * 16).min(MAX_AUDIO_MS * 16) as usize);
+async fn read_audio(mut recv: quinn::RecvStream, expected_ms: u64, max_ms: u64) -> Result<Vec<i16>> {
+    let max_samples = (max_ms * 16) as usize;
+    let mut out: Vec<i16> = Vec::with_capacity((expected_ms * 16).min(max_ms * 16) as usize);
     let mut carry: Option<u8> = None;
     loop {
         match wire::read_frame_max::<AudioFrame>(&mut recv, 8 * 1024 * 1024).await? {
@@ -419,13 +440,19 @@ async fn read_audio(mut recv: quinn::RecvStream, expected_ms: u64) -> Result<Vec
                     }
                 }
                 if out.len() > max_samples {
-                    anyhow::bail!("The recording is longer than 3 hours, which is the most a compute node takes.");
+                    anyhow::bail!(if max_ms == MAX_AUDIO_MS { "The recording is longer than 3 hours, which is the most a compute node takes." } else { "More audio came than was announced." });
                 }
             }
             Some(AudioFrame::End) => return Ok(out),
             None => anyhow::bail!("The audio stopped before the end marker."),
         }
     }
+}
+
+/// A quick job for the short lane: someone is waiting on it and the audio is no longer than the node's window length.
+/// Anything longer goes the long way, even when it is interactive. Shorter windows are fine.
+fn is_window(priority: Priority, total_ms: u64, window_max_s: u32) -> bool {
+    priority == Priority::Interactive && window_max_s > 0 && total_ms <= window_max_s as u64 * 1000
 }
 
 async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_proto::TranscribeRequest, send: &mut quinn::SendStream, recv: quinn::RecvStream, client: crate::state::Client) -> Result<()> {
@@ -441,10 +468,34 @@ async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_pr
         wire::write_frame(send, &TranscribeEvent::Error("The recording is longer than 3 hours, which is the most a compute node takes.".into())).await?;
         return Ok(());
     }
-    let jobs = sh.host.speech_jobs.clone();
+    let window = is_window(r.priority, r.total_ms, sh.host.caps.lock().window_max_s);
+    // A window has its own count, gate and limits, so it never waits behind a long recording.
+    let (jobs, gate, max_waiting) = if window {
+        (sh.host.window_jobs.clone(), sh.host.window_gate.clone(), MAX_WINDOWS_WAITING)
+    } else {
+        (sh.host.speech_jobs.clone(), sh.host.speech_gate.clone(), MAX_WAITING)
+    };
     let ahead = jobs.fetch_add(1, Ordering::Relaxed);
-    let job = SpeechJob(jobs.clone());
-    if ahead > MAX_WAITING {
+    let mut job = SpeechJob { jobs: jobs.clone(), window_of: None };
+    if window {
+        // One phone should send one window at a time. A second one in flight is allowed, a third is not.
+        let allowed = {
+            let mut by_phone = sh.host.window_by_phone.lock();
+            let mine = by_phone.entry(client.fp.clone()).or_insert(0);
+            if *mine >= MAX_WINDOWS_PER_PHONE {
+                false
+            } else {
+                *mine += 1;
+                true
+            }
+        };
+        if !allowed {
+            wire::write_frame(send, &TranscribeEvent::Error("busy".into())).await?;
+            return Ok(());
+        }
+        job.window_of = Some((sh.clone(), client.fp.clone()));
+    }
+    if ahead > max_waiting {
         wire::write_frame(send, &TranscribeEvent::Error("busy".into())).await?;
         return Ok(());
     }
@@ -454,7 +505,8 @@ async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_pr
     let mut beat = tokio::time::interval(Duration::from_secs(2));
 
     // The audio arrives first, while the heartbeat tells the phone this node is alive.
-    let mut reader = tokio::spawn(read_audio(recv, r.total_ms));
+    let max_audio_ms = if window { r.total_ms + WINDOW_SLACK_MS } else { MAX_AUDIO_MS };
+    let mut reader = tokio::spawn(read_audio(recv, r.total_ms, max_audio_ms));
     let pcm = loop {
         tokio::select! {
             res = &mut reader => break res,
@@ -473,7 +525,7 @@ async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_pr
     let pcm = match pcm {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            sh.metrics.speech_done(&client.fp, &client.name, 0, 0, false);
+            sh.metrics.speech_failed(window, &client.fp, &client.name, 0);
             wire::write_frame(send, &TranscribeEvent::Error(format!("{e:#}"))).await?;
             return Ok(());
         }
@@ -481,8 +533,10 @@ async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_pr
     };
     let audio_ms = pcm.len() as u64 / 16;
 
-    // One recording at a time, in the order they came.
-    let mut wait = Box::pin(sh.host.speech_gate.clone().acquire_owned());
+    // One at a time per lane, in the order they came (the semaphore is first come, first served, so a
+    // window is never passed by a later one).
+    let queued_at = Instant::now();
+    let mut wait = Box::pin(gate.acquire_owned());
     let permit = loop {
         tokio::select! {
             p = &mut wait => match p {
@@ -490,6 +544,10 @@ async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_pr
                 Err(_) => return Ok(()),
             },
             _ = beat.tick() => {
+                if window && queued_at.elapsed() > WINDOW_MAX_WAIT {
+                    wire::write_frame(send, &TranscribeEvent::Error("busy".into())).await?;
+                    return Ok(());
+                }
                 let ahead = jobs.load(Ordering::Relaxed).saturating_sub(1);
                 if wire::write_frame(send, &TranscribeEvent::Queued { ahead }).await.is_err() {
                     return Ok(());
@@ -501,7 +559,7 @@ async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_pr
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TranscribeEvent>();
     let cancel = Arc::new(AtomicBool::new(false));
-    let (cancel2, language) = (cancel.clone(), r.language.clone());
+    let (cancel2, language, prompt) = (cancel.clone(), r.language.clone(), r.prompt.clone());
     let work = tokio::task::spawn_blocking(move || {
         // The permit and the job count are held until whisper has really stopped.
         let (_permit, _job) = (permit, job);
@@ -512,7 +570,7 @@ async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_pr
         let mut last_pct = -1;
         let res = whisper.transcribe(
             &audio,
-            language.as_deref(),
+            engine::whisper::Job { language: language.as_deref(), prompt: prompt.as_deref(), window },
             &cancel2,
             &mut |seg| {
                 let _ = tx_seg.send(TranscribeEvent::Segment { t0_ms: seg.t0_ms, t1_ms: seg.t1_ms, text: seg.text });
@@ -526,7 +584,10 @@ async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_pr
         );
         drop(audio);
         let took = started.elapsed();
-        engine::whisper::give_back_memory();
+        // Handing memory back takes a moment, so only a long job does it.
+        if !window {
+            engine::whisper::give_back_memory();
+        }
         (res, took)
     });
 
@@ -548,31 +609,50 @@ async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_pr
         let sh = sh.clone();
         tokio::spawn(async move {
             let _ = work.await;
-            sh.metrics.speech_done(&client.fp, &client.name, audio_ms, 0, false);
+            sh.metrics.speech_failed(window, &client.fp, &client.name, audio_ms);
         });
         return Ok(());
     }
     let (res, took) = match work.await {
         Ok(x) => x,
         Err(e) => {
-            sh.metrics.speech_done(&client.fp, &client.name, audio_ms, 0, false);
+            sh.metrics.speech_failed(window, &client.fp, &client.name, audio_ms);
             wire::write_frame(send, &TranscribeEvent::Error(format!("{e}"))).await?;
             return Ok(());
         }
     };
     let ev = match res {
         Ok(out) => {
-            sh.metrics.speech_done(&client.fp, &client.name, audio_ms, took.as_millis() as u64, true);
-            if audio_ms >= 20_000 && !took.is_zero() {
+            sh.metrics.speech_finished(window, &client.fp, &client.name, audio_ms, took.as_millis() as u64);
+            // Windows are not folded into the speed phones see: it is the speed on whole recordings.
+            if !window && audio_ms >= 20_000 && !took.is_zero() {
                 sh.host.note_speech_speed(audio_ms as f32 / took.as_millis().max(1) as f32);
             }
             TranscribeEvent::Done { language: out.language, segments: out.segments, elapsed_ms: took.as_millis().min(u32::MAX as u128) as u32 }
         }
         Err(e) => {
-            sh.metrics.speech_done(&client.fp, &client.name, audio_ms, 0, false);
+            sh.metrics.speech_failed(window, &client.fp, &client.name, audio_ms);
             TranscribeEvent::Error(format!("{e:#}"))
         }
     };
     wire::write_frame(send, &ev).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_interactive_audio_is_a_window() {
+        assert!(is_window(Priority::Interactive, 40_000, 120));
+        assert!(is_window(Priority::Interactive, 3_000, 60));
+        assert!(is_window(Priority::Interactive, 60_000, 60));
+        assert!(!is_window(Priority::Interactive, 60_001, 60));
+        assert!(!is_window(Priority::Interactive, 600_000, 120));
+        assert!(!is_window(Priority::Background, 40_000, 120));
+        assert!(!is_window(Priority::Bulk, 10_000, 120));
+        // No short lane when the node has no speech model to announce a length for.
+        assert!(!is_window(Priority::Interactive, 10_000, 0));
+    }
 }

@@ -11,6 +11,9 @@ pub(super) struct Work {
     enhance: bool,
     scan: bool,
     question: Option<String>,
+    correct: Option<CorrectionJob>,
+    /// The compute node doing live correction changed (None: no node does it now).
+    correction_shown: Option<Option<String>>,
 }
 
 impl Core {
@@ -92,6 +95,7 @@ impl Core {
             folder,
             queued_photos: Vec::new(),
             language: None,
+            corr: Correction::new(0.0),
         }
     }
 
@@ -125,6 +129,7 @@ impl Core {
         let folder = self.kb.store.meeting_folder(id);
         let mut live = Self::blank_live(id, folder);
         live.language = remembered;
+        live.corr = Correction::new(offset);
         live.started = Instant::now() - Duration::from_secs_f64(offset);
         live.time_offset = offset;
         live.last_final = offset - 1.0;
@@ -174,6 +179,7 @@ impl Core {
                 "secs": l.started.elapsed().as_secs(),
                 "lines": l.lines.iter().enumerate().map(|(i, x)| line_json(i, x)).collect::<Vec<_>>(),
                 "partial": l.partial,
+                "correcting": l.corr.shown,
                 "notes": l.notes,
                 "enhanced": l.enhanced_text,
                 "cards": l.cards.iter().rev().map(Card::json).collect::<Vec<_>>(),
@@ -191,6 +197,8 @@ impl Core {
                 return 0.0;
             };
             let off = l.time_offset;
+            let keep = l.corr.collecting;
+            l.corr.ring.push(pcm, keep);
             let mut segs = l.segmenter.push(pcm);
             if off > 0.0 {
                 for s in segs.iter_mut() {
@@ -232,6 +240,8 @@ impl Core {
     }
 
     pub fn on_transcript(&self, t: Transcript) {
+        // A correction swaps lines in the same way, and the screen has to hear about both in the order they happened.
+        let _gate = self.line_gate.lock();
         let mut g = self.live.lock();
         let Some(l) = g.as_mut() else { return };
         if t.partial {
@@ -310,6 +320,12 @@ impl Core {
         loop {
             std::thread::sleep(TICK);
             let mut work = Work::default();
+            // Live correction: is a compute node able to listen again right now, and for how long a window?
+            let (correct_on, window_s) = {
+                let s = self.settings.read();
+                (s.live_correction, s.live_correction_window_s)
+            };
+            let node = if correct_on { crate::remote::get().and_then(|r| r.transcribe_node_window()) } else { None };
             {
                 let mut g = self.live.lock();
                 let Some(l) = g.as_mut().filter(|l| l.meeting_id == meeting_id) else { return };
@@ -377,6 +393,27 @@ impl Core {
                         }
                     }
                 }
+                if l.corr.set_node(node.as_ref().map(|n| n.0.clone())) {
+                    work.correction_shown = Some(l.corr.shown.clone());
+                }
+                if let Some((_, node_max)) = node.as_ref() {
+                    let ready = l.corr.retry_at.map(|t| Instant::now() >= t).unwrap_or(true);
+                    let plan = plan_for(window_s, *node_max);
+                    let win = if ready { plan_window(l.corr.ring.end_secs(), l.corr.upto, l.corr.ring.start_secs(), l.time_offset, l.corr.in_flight, &plan) } else { None };
+                    if let Some((win, pcm)) = win.and_then(|w| l.corr.ring.slice_bytes(w.start, w.end).map(|(start, pcm)| (Window { start, ..w }, pcm))) {
+                        l.corr.in_flight = true;
+                        l.corr.cancel = Arc::new(AtomicBool::new(false));
+                        let lock = self.engine.whisper().and_then(|w| w.language_lock()).or_else(|| l.language.clone());
+                        work.correct = Some(CorrectionJob {
+                            meeting_id,
+                            win,
+                            pcm,
+                            language: language_for_node(lock, &self.settings.read().language),
+                            prompt: prompt_tail(&l.lines, win.start, PROMPT_CHARS),
+                            cancel: l.corr.cancel.clone(),
+                        });
+                    }
+                }
                 if self.settings.read().live_assistance && !busy {
                     let unscanned = l.lines.len().saturating_sub(l.scanned_upto);
                     if !l.scan_in_flight && unscanned > 0 && (unscanned >= SCAN_MIN_LINES || l.last_scan.elapsed() >= SCAN_INTERVAL) {
@@ -386,6 +423,12 @@ impl Core {
                         work.question = Some(l.pending_questions.remove(0));
                     }
                 }
+            }
+            if let Some(shown) = work.correction_shown.take() {
+                self.emit(json!({"type": "correction", "node": shown}));
+            }
+            if let Some(job) = work.correct.take() {
+                self.spawn_correction(job);
             }
             if let Some(s) = work.tick {
                 self.emit(json!({"type": "tick", "secs": s}));

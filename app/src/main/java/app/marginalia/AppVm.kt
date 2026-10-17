@@ -570,17 +570,15 @@ class AppVm(private val app: Application) {
             "partial" -> _live.update { it?.copy(partial = e.optString("text")) }
             "line" -> {
                 val line = Line.from(e.getJSONObject("line"))
-                _live.update { s ->
-                    s?.let {
-                        // A line is found by its number, never by its position in the list, so a line that grows
-                        // (words merged into it) is replaced and a missing earlier line cannot make a duplicate.
-                        val lines = it.lines.toMutableList()
-                        val at = lines.indexOfFirst { l -> l.i == line.i }
-                        if (at >= 0) lines[at] = line else lines.add(line)
-                        it.copy(lines = lines)
-                    }
-                }
+                // A line is found by its id, never by its position: positions shift when the transcript is corrected,
+                // and a line that grows (words merged into it) is replaced, so a missing earlier line cannot make a duplicate.
+                _live.update { s -> s?.copy(lines = s.lines.upsertLine(line)) }
             }
+            "lines_replace" -> {
+                val new = Line.list(e.optJSONArray("lines"))
+                _live.update { s -> s?.copy(lines = s.lines.replacingLines(e.optInt("from"), e.optInt("removed"), new)) }
+            }
+            "correction" -> _live.update { it?.copy(correctedBy = if (e.isNull("node")) null else e.optString("node")) }
             "enhance" -> _live.update { it?.copy(enhanced = e.optString("text"), enhanceStreaming = e.optBoolean("streaming"), enhanceBusy = e.optBoolean("streaming")) }
             "enhance_state" -> _live.update { it?.copy(enhanceBusy = e.optBoolean("busy")) }
             "card" -> {
@@ -840,6 +838,7 @@ class AppVm(private val app: Application) {
                     meetingId = id, recording = true, secs = snap.optLong("secs"),
                     lines = Line.list(snap.optJSONArray("lines")), notes = snap.optString("notes"), enhanced = snap.optString("enhanced"),
                     photos = Photo.list(snap.optJSONArray("photos")), jots = Jot.list(snap.optJSONArray("jots")),
+                    correctedBy = if (snap.isNull("correcting")) null else snap.optString("correcting"),
                 )
                 liveExpanded.value = true
                 _review.value = null

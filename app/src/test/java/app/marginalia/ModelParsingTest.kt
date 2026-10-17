@@ -192,4 +192,68 @@ class ModelParsingTest {
         assertTrue(Prefs.from(JSONObject("""{}""")).improveTranscript)
         assertFalse(Prefs.from(JSONObject("""{"improve_transcript":false}""")).improveTranscript)
     }
+
+    private fun line(i: Int, id: Long, text: String = "t$id") = Line(i, i * 10.0, i * 10.0 + 8, text, null, id)
+
+    @Test fun lineEventsFindTheLineById() {
+        val parsed = Line.from(JSONObject("""{"i":4,"id":91,"t0":1.5,"t1":3.0,"text":"hi","speaker":null}"""))
+        assertEquals(91L, parsed.id)
+        // An older core without ids falls back to the position.
+        assertEquals(4L, Line.from(JSONObject("""{"i":4,"t0":1.5,"t1":3.0,"text":"hi"}""")).id)
+        val lines = listOf(line(0, 10), line(1, 11))
+        val grown = lines.upsertLine(line(1, 11, "grown"))
+        assertEquals(listOf("t10", "grown"), grown.map { it.text })
+        val added = grown.upsertLine(line(9, 12))
+        assertEquals(listOf(10L, 11L, 12L), added.map { it.id })
+        assertEquals(listOf(0, 1, 2), added.map { it.i })
+    }
+
+    @Test fun aCorrectionSplicesTheLinesAndKeepsIdsUnique() {
+        val lines = listOf(line(0, 10), line(1, 11), line(2, 12), line(3, 13))
+        // Lines 1 and 2 become three lines. The first keeps an old id, the others are new.
+        val out = lines.replacingLines(1, 2, listOf(line(1, 11, "fixed a"), line(2, 20, "fixed b"), line(3, 21, "fixed c")))
+        assertEquals(listOf(10L, 11L, 20L, 21L, 13L), out.map { it.id })
+        assertEquals(listOf("t10", "fixed a", "fixed b", "fixed c", "t13"), out.map { it.text })
+        assertEquals((0..4).toList(), out.map { it.i })
+        assertEquals(out.size, out.map { it.id }.toSet().size)
+        // Fewer lines than before, none at all, and lines added in a gap.
+        assertEquals(listOf(10L, 13L), lines.replacingLines(1, 2, emptyList()).map { it.id })
+        assertEquals(listOf(10L, 11L, 30L, 12L, 13L), lines.replacingLines(2, 0, listOf(line(2, 30))).map { it.id })
+        // At the end, and a range that reaches past the end is cut to it.
+        assertEquals(listOf(10L, 11L, 12L, 13L, 31L), lines.replacingLines(4, 0, listOf(line(4, 31))).map { it.id })
+        assertEquals(listOf(10L, 40L), lines.replacingLines(1, 99, listOf(line(1, 40))).map { it.id })
+        // A repeated id is dropped rather than shown twice (a stale event must never crash the list).
+        assertEquals(listOf(10L, 11L, 12L, 13L), lines.replacingLines(1, 1, listOf(line(1, 11), line(2, 12))).map { it.id })
+    }
+
+    @Test fun liveCorrectionSettingsAndTheNodeWindow() {
+        val d = Prefs.from(JSONObject("""{}"""))
+        assertFalse(d.liveCorrection)
+        assertEquals(30, d.liveCorrectionWindowS)
+        val p = Prefs.from(JSONObject("""{"live_correction":true,"live_correction_window_s":45}"""))
+        assertTrue(p.liveCorrection)
+        assertEquals(45, p.liveCorrectionWindowS)
+        // An odd value falls back to 30.
+        assertEquals(30, Prefs.from(JSONObject("""{"live_correction_window_s":33}""")).liveCorrectionWindowS)
+        assertEquals(listOf(20, 30, 45, 60), CORRECTION_WINDOWS_S)
+        assertEquals(90, HomeComputer.from(JSONObject("""{"fp":"a","name":"Desk","online":true,"window_max_s":90}""")).windowMaxS)
+        assertEquals(0, HomeComputer.from(JSONObject("""{"fp":"a","name":"Desk","online":true}""")).windowMaxS)
+    }
+
+    @Test fun correctionNeedsANodeThatCanListenAndSaysWhoDoesIt() {
+        fun c(online: Boolean, transcribe: String?) =
+            HomeComputer.from(JSONObject().put("fp", "x").put("name", "Desk").put("online", online).put("transcribe", transcribe ?: JSONObject.NULL))
+        assertTrue(canCorrectLive(HomeComputers(enabled = true, paired = listOf(c(true, "large")))))
+        assertFalse(canCorrectLive(HomeComputers(enabled = true, paired = listOf(c(true, null)))))
+        assertFalse(canCorrectLive(HomeComputers(enabled = true, paired = listOf(c(false, "large")))))
+        assertFalse(canCorrectLive(HomeComputers(enabled = false, paired = listOf(c(true, "large")))))
+        assertEquals("Corrected by Desk", correctionLabel("Desk"))
+        assertEquals("Corrected by a compute node", correctionLabel(" "))
+        assertEquals("Corrected by Den. Up", correctionLabel("Den; Up"))
+        assertNull(correctionLabel(null))
+        assertNull(windowLimitNote(30, 0))
+        assertNull(windowLimitNote(30, 120))
+        assertNull(windowLimitNote(60, 65))
+        assertEquals("This compute node handles windows up to 40 s, so they are cut shorter.", windowLimitNote(60, 40))
+    }
 }

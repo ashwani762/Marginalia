@@ -62,6 +62,10 @@ enum Cmd {
         /// Start locked: a phone that asks has to be allowed (`approve`) or pair with a code.
         #[arg(long)]
         lock: bool,
+        /// Live correction: an interactive request for this many seconds of audio or less is a short window,
+        /// and runs next to a long recording instead of waiting for it. Phones are told this number.
+        #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u32).range(10..=600))]
+        window_max_seconds: u32,
     },
     /// New phones must be allowed before they can use this compute node.
     Lock,
@@ -113,6 +117,12 @@ enum Cmd {
         /// Language code for `--transcribe` (for example en or hi). Leave out to detect it.
         #[arg(long)]
         language: Option<String>,
+        /// With `--transcribe`: send it as a short window of live audio (interactive priority) and say how long the node took after the last audio.
+        #[arg(long)]
+        window: bool,
+        /// With `--transcribe`: what was said just before this audio, to steer spelling and names.
+        #[arg(long)]
+        prompt: Option<String>,
         /// With `--transcribe`: close the connection after this many seconds, to check that the node stops.
         #[arg(long, hide = true)]
         hang_up_after: Option<f32>,
@@ -200,8 +210,8 @@ async fn main() -> Result<()> {
         Cmd::Approve { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "approve", "who": who})).await?),
         Cmd::Deny { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "deny", "who": who})).await?),
         Cmd::Revoke { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "revoke", "who": who})).await?),
-        Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, hang_up_after } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *hang_up_after).await?,
-        Cmd::Run { port, name, models, chat_model, embed_model, speech_model, no_speech, cpu, ctx, lock } => {
+        Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, window, prompt, hang_up_after } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *window, prompt.clone(), *hang_up_after).await?,
+        Cmd::Run { port, name, models, chat_model, embed_model, speech_model, no_speech, cpu, ctx, lock, window_max_seconds } => {
             let store = Arc::new(state::Store::open(dir.clone())?);
             let identity = store.identity()?;
             if *lock {
@@ -220,7 +230,7 @@ async fn main() -> Result<()> {
                 tracing::warn!("the {} model {} is not in {}, so this node will not do {} jobs. Get it with: marginalia-node models download --only {}", m.role, m.file, models_dir.display(), m.role, m.role);
             }
             tracing::info!("loading models from {}", models_dir.display());
-            let opts = host::Options { models_dir, chat_model: chat_model.clone(), embed_model: embed_model.clone(), speech_model: speech_model.clone(), no_speech: *no_speech, cpu_only: *cpu, ctx: *ctx };
+            let opts = host::Options { models_dir, chat_model: chat_model.clone(), embed_model: embed_model.clone(), speech_model: speech_model.clone(), no_speech: *no_speech, cpu_only: *cpu, ctx: *ctx, window_max_s: *window_max_seconds };
             let host = Arc::new(tokio::task::spawn_blocking(move || host::Host::start(&opts)).await??);
             let shared = Arc::new(server::Shared { store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), stop: Default::default() });
             let ep = server::endpoint(&shared, *port)?;

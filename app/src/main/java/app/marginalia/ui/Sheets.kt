@@ -132,7 +132,8 @@ fun Segmented(options: List<String>, selected: String, onSelect: (String) -> Uni
 @Composable
 internal fun SettingRow(title: String, subtitle: String? = null, trailing: @Composable () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
+        // Room between the words and the switch, so a long description never touches it.
+        Column(Modifier.weight(1f).padding(end = 18.dp)) {
             Text(title, style = type.body)
             if (subtitle != null) Text(subtitle, style = type.caption, modifier = Modifier.padding(top = 2.dp))
         }
@@ -177,12 +178,12 @@ fun YouSheet(vm: AppVm, onDismiss: () -> Unit, scrollToHome: Boolean = false) {
             // numbers
             val hours = stats.seconds / 3600.0
             val grid = listOf(
-                stats.meetings.toString() to "meetings",
+                stats.meetings.toString() to (if (stats.meetings == 1L) "meeting" else "meetings"),
                 (if (hours >= 1) "%.1f h".format(hours) else "${stats.seconds / 60} min") to "transcribed",
-                compact(stats.words) to "words heard",
-                stats.documents.toString() to "documents",
-                compact(stats.chunks) to "passages",
-                stats.questions.toString() to "questions answered",
+                compact(stats.words) to (if (stats.words == 1L) "word heard" else "words heard"),
+                stats.documents.toString() to (if (stats.documents == 1L) "document" else "documents"),
+                compact(stats.chunks) to (if (stats.chunks == 1L) "passage" else "passages"),
+                stats.questions.toString() to (if (stats.questions == 1L) "question answered" else "questions answered"),
             )
             FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(10.dp), maxItemsInEachRow = 3) {
                 grid.forEach { (v, l) ->
@@ -250,7 +251,7 @@ fun YouSheet(vm: AppVm, onDismiss: () -> Unit, scrollToHome: Boolean = false) {
                     Text("Private by design", style = type.headline)
                 }
                 Spacer(Modifier.height(6.dp))
-                Text("Transcription, notes, search and answers run on this phone. Your audio and documents never leave it. If you connect a compute node on your network, the text for notes and answers goes to it while it is in reach, and it keeps none of it. Nothing goes to the internet.", style = type.callout)
+                Text("Transcription, notes, search and answers run on this phone. If you connect a compute node on your network, the text and the recordings it works on go to it while it is in reach, and it keeps none of it. Nothing goes to the internet.", style = type.callout)
                 if (info.isNotBlank()) {
                     Spacer(Modifier.height(10.dp))
                     Text(info, style = type.time)

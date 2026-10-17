@@ -33,12 +33,37 @@
     every 2 seconds, then runs after it. `stats` and `status` show the speech model, jobs, seconds of audio and speed.
   - A node started with only the speech model file (no Gemma, no embedder) serves transcription and says so in its status.
 
+## Short windows for live correction (checked on the RTX 4060)
+
+Second node instance on ports 47690 and 47691, speech model only, `probe --transcribe FILE --window`. Time from the last audio frame
+sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
+
+- Alone: 0.35 to 0.45 s (about 100 times real time). 40 s of denser speech (0.3 s gaps): 0.39 to 0.46 s. A 120 s window: 1.2 s.
+- While a 10 minute recording ran on the other lane (it took 9.2 s instead of 7.6 s alone): 0.47 to 0.56 s, 8 windows in a row.
+- Beam of 5 for windows, for comparison: 0.44 to 0.55 s alone, 0.55 to 0.76 s next to the recording. Greedy was chosen anyway: the windows
+  are replaced by the final pass over the whole recording (beam 5), and it leaves more room for the unmeasured case of Gemma writing
+  on the same card. `MARGINALIA_SPEECH_WINDOW_BEAM=5` brings the beam back.
+- 40 s of digital silence: no segments in 5 ms (the model is not used). 2 s of silence: none. 5 s of noise: none in 0.12 s. 40 s of loud
+  white noise: none in 0.3 s (before the checks it returned "Thank you." and "So,"). A 1 s clip: "Ask not." in 0.11 s.
+- Starting in the middle of "ask not what your country...": segment times are from the start of the window and the same (within 20 ms) with
+  and without a prompt. With a prompt the text follows its style (no comma in "And so my fellow Americans"). A prompt ending in "Thank you all
+  for joining" made the model read "Thank you." back over loud noise, which the node now drops.
+- Lanes: two windows of 120 s at once: the second said "queued behind 1" and finished after the first. Four at once from one phone: two ran,
+  two got "busy" (limit of 2 per phone). A window hung up on after 0.2 s stopped at once (`running_jobs` 0). With `--window-max-seconds 30`
+  a 40 s interactive request queued behind the long recording, no error. Windows are counted apart in `stats` (jobs, failed, seconds of audio).
+- Graphics memory next to the other service (3.1 GB of its own): about 4.28 GB idle with the speech model loaded, peak 4.57 GB with a
+  10 minute recording and windows running together.
+- whisper.cpp's `no_speech_prob` reads 0.00 for this model even over silence, so the old "thank you over silence" check never fired.
+  The node now looks at the sound under each segment instead (loudness of 50 ms frames) and at the model's own word confidence.
+
 ## Not verified yet
 
 - Everything on Windows: the node build, the tray (`compute-node/tray/src/windows.rs` was written without being
   compiled), the Task Scheduler start at login, the firewall prompt, mDNS announcements from Windows.
 - Nodes finding and sharing work with each other (cluster) is designed in `DESIGN.md`, not built.
-- Live (streaming) speech to text on nodes is not built. Only transcription of finished recordings exists on the node.
+- Live (streaming) speech to text on nodes is not built as one open stream. The node side of "live correction" exists (short windows with a prompt, own lane, see below) but no phone sends them yet.
+- The window lane was not tried with Gemma generating at the same time (the 8 GB card is shared with the running service, so a second Gemma did not fit). Windows were measured next to a long recording only.
+- The window lane on a processor (one shared lane) and prompts in other languages were not tried.
 - Transcription on the processor only (`run --cpu`) was tried once while the machine was busy: the 11 s sample took about 20 s (0.5 times real time, same correct text), so the large model is only practical on a graphics card. Vulkan and Windows were not tried.
 - A phone sending a real recording: only the `probe --transcribe` client (same protocol, written like the phone) was used, not the Android app.
 - Real meeting audio in other languages: only the English JFK sample was available, so accuracy on other languages and noisy rooms is not measured.
@@ -81,5 +106,5 @@ Models for the APK are linked by `scripts/stage-models.sh` (symlinks, so use WSL
 
 1. Run `windows\setup.ps1` on Windows, run the node and the tray there and fix what breaks.
 2. Cluster: peers pair and gossip, entry node forwards jobs, block records spread, hot-hot and standby (`DESIGN.md`).
-3. Speech on nodes: the phone uses the `Transcribe` request to replace its live transcript after a meeting (the node side is done and checked), then live streaming with failover.
+3. Speech on nodes: the phone uses the `Transcribe` request to replace its live transcript after a meeting (the node side is done and checked), and sends short windows with a prompt during the meeting (the node side is done and checked, see above), then live streaming with failover.
 4. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).

@@ -268,7 +268,7 @@ impl Panel {
     fn numbers(&self, ui: &mut Ui, i: &Info) {
         card(ui, |ui| {
             ui.columns(3, |cols| {
-                for (col, (value, caption)) in cols.iter_mut().zip([(i.served.to_string(), "jobs served"), (i.phones.len().to_string(), "phones"), (model::uptime_short(i.uptime_s), "up for")]) {
+                for (col, (value, caption)) in cols.iter_mut().zip([(i.served.to_string(), if i.served == 1 { "job served" } else { "jobs served" }), (i.phones.len().to_string(), if i.phones.len() == 1 { "phone" } else { "phones" }), (model::uptime_short(i.uptime_s), "up for")]) {
                     col.vertical_centered(|ui| {
                         ui.label(RichText::new(value).size(20.0).strong().color(TEXT));
                         ui.label(dim(caption));

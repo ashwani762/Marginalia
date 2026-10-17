@@ -1,6 +1,15 @@
 # Marginalia compute node on Windows
 
-One command sets up the node and its tray icon: it checks the tools, builds, installs to `%LOCALAPPDATA%\MarginaliaNode`, downloads the models, starts both at logon and opens the firewall for phones. These scripts were written without a Windows machine to test on, so expect to report small fixes. Everything is safe to run again.
+One command sets up the node and its tray icon: it checks the tools, builds, installs to `%LOCALAPPDATA%\MarginaliaNode`, downloads the models, starts both at logon, opens the firewall for phones and checks the result. These scripts were written without a Windows machine to test on, so expect to report small fixes. Everything is safe to run again, and a second run only does what is not done yet (it prints the skipped steps first).
+
+Working on the node code on Windows? Read `docs/WINDOWS-PLAN.md` first. The short version:
+
+```powershell
+.\compute-node\windows\setup.ps1 -Auto     # once (add -Cpu first if the GPU build gives trouble)
+.\compute-node\windows\verify.ps1          # 20 lines, failures explain themselves, the last lines give the next command
+.\compute-node\windows\dev.ps1 node        # after a change: build, replace, restart, follow node.log (also: tray, or nothing for both)
+.\compute-node\windows\setup.ps1 -Quick    # after a git pull: incremental build, copy, restart, verify
+```
 
 ## Quick start
 
@@ -12,8 +21,9 @@ One command sets up the node and its tray icon: it checks the tools, builds, ins
 6. `.\compute-node\windows\setup.ps1` (add `-Auto` to let it run the winget installs for missing tools).
 7. If it lists missing tools, install them (it prints the exact `winget install` lines), open a NEW PowerShell window and run step 6 again.
 8. Allow the one Windows permission prompt for the firewall rules.
-9. Look for the tray icon by the clock (maybe behind the `^` arrow). On the phone: Settings, Compute nodes. The phone finds this machine by itself, tap Connect.
-10. `marginalia-node.exe stats` (in a new window) shows what the node has done.
+9. Setup ends with `verify.ps1`. Fix the first failing line with the command it prints. Run `.\compute-node\windows\verify.ps1` again any time.
+10. Look for the tray icon by the clock (maybe behind the `^` arrow). On the phone: Settings, Compute nodes. The phone finds this machine by itself, tap Connect.
+11. `marginalia-node.exe stats` (in a new window) shows what the node has done.
 
 To double click instead: right click `setup.ps1` and choose Run with PowerShell. If the window closes too fast to read, use the steps above.
 
@@ -21,10 +31,12 @@ To double click instead: right click `setup.ps1` and choose Run with PowerShell.
 
 | Script | What it does |
 | --- | --- |
-| `setup.ps1` | Everything above. Options: `-Auto`, `-Cpu`, `-Cuda`, `-Vulkan`, `-SkipBuild`, `-SkipModels`, `-ModelsDir D:\models` |
+| `setup.ps1` | Everything above, skipping what is already done. Options: `-Auto`, `-Cpu`, `-Cuda`, `-Vulkan`, `-SkipBuild`, `-SkipModels`, `-SkipSpeech`, `-ModelsDir D:\models`, `-Force` (redo all), `-Quick` (build if needed, copy, restart, verify), `-NoVerify` |
+| `verify.ps1` | The acceptance check: 20 numbered lines (programs, models, tasks, firewall, node, tray, loaded models and speeds, addresses, mDNS, a self test that acts like a phone). Failures explain themselves, the end says `N of M checks passed` and the command for the first failure. Works before anything is installed. `-SkipProbe`, `-SkipSpeech`, `-ModelsDir` |
+| `dev.ps1` | The inner loop for code changes: `dev.ps1 node`, `dev.ps1 tray` or `dev.ps1` for both. Builds, stops what runs, copies the programs, starts them, follows `node.log` (Ctrl+C leaves everything running). `-NoLog`, `-Cpu`, `-Cuda`, `-Vulkan` |
 | `build.ps1` | Only the release build, with the same backend detection (`-Cpu`, `-Cuda`, `-Vulkan`) |
 | `download-models.ps1` | The three model files (about 3.7 GB: chat, search and speech to text). Uses `marginalia-node.exe models download`, or downloads by itself before the first build. `-Dir`, `-Only chat\|search\|speech`, `-ChatModel e2b\|e4b`, `-SkipSpeech` |
-| `status.ps1` | Is the node running, task state, firewall rules, model files, `stats`, addresses, end of the log |
+| `status.ps1` | Is the node running, task state, firewall rules, model files, `stats`, addresses, end of the log. For a pass or fail answer use `verify.ps1` |
 | `uninstall.ps1` | Stops and removes the tasks, firewall rules and installed files. Keeps models and state unless `-Purge` |
 | `firewall.ps1` | The administrator part, started by the others with one prompt. You can run it yourself: `-Action Add -Exe <path>` or `-Action Remove` |
 
@@ -45,11 +57,13 @@ What gets installed, all under your user (only the firewall rules need administr
 | Installing the tools (Visual Studio Build Tools is the big one, about 6 GB) | 10 to 30 minutes, once |
 | First build, CPU | 10 to 25 minutes |
 | First build, CUDA | 20 to 45 minutes (the GPU kernels take long to compile) |
-| Later builds | 1 to 3 minutes |
+| Later builds | 1 to 3 minutes (none at all when nothing changed, `setup.ps1` and `dev.ps1` check) |
 | Model download (about 3.2 GB) | 5 to 30 minutes, can be stopped and continued |
 | Install, tasks, firewall, start | under a minute, plus up to a minute for the node to load the models |
 
 ## Troubleshooting
+
+The likely Windows build problems with the file to look at for each are in `docs/WINDOWS-PLAN.md`. Common ones:
 
 | What you see | Cause and fix |
 | --- | --- |
@@ -73,6 +87,7 @@ marginalia-node.exe models list           # which model files are present
 marginalia-node.exe models download       # get what is missing
 marginalia-node.exe status                # JSON: models, phones, addresses
 marginalia-node.exe stats                 # jobs, speed, errors, no content
+marginalia-node.exe revoke probe          # forget the test phone that verify.ps1 uses (it knocks as "probe")
 marginalia-node.exe pair                  # a one-time code for the phone
 marginalia-node.exe stop                  # stop cleanly (the logon task starts it again next time)
 Start-ScheduledTask -TaskName "Marginalia Node"        # start it again

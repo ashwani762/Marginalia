@@ -584,7 +584,7 @@ async fn pair_and_status_replies_round_trip() {
         proto: PROTO_VERSION,
         node_name: "node".into(),
         version: "0.1.0".into(),
-        caps: Capabilities { chat: Some("gemma".into()), embed: Some("emb".into()), embed_dim: 768, chat_tok_s: 41.5, embed_per_s: 250.0, transcribe: Some("whisper".into()), transcribe_x: 30.0 },
+        caps: Capabilities { chat: Some("gemma".into()), embed: Some("emb".into()), embed_dim: 768, chat_tok_s: 41.5, embed_per_s: 250.0, transcribe: Some("whisper".into()), transcribe_x: 30.0, window_max_s: 120 },
         running: 1,
         waiting: 2,
         clients: 3,
@@ -675,7 +675,7 @@ async fn garbage_body_is_an_error_not_a_panic() {
 #[test]
 fn transcribe_messages_round_trip() {
     use marginalia_proto::{AudioFrame, TranscribeEvent, TranscribeRequest};
-    let req = Request::Transcribe(TranscribeRequest { language: Some("hi".into()), total_ms: 960_000, priority: Priority::Background });
+    let req = Request::Transcribe(TranscribeRequest { language: Some("hi".into()), total_ms: 960_000, priority: Priority::Background, prompt: None });
     let bytes = postcard::to_stdvec(&req).unwrap();
     assert!(matches!(postcard::from_bytes::<Request>(&bytes).unwrap(), Request::Transcribe(r) if r.total_ms == 960_000));
     let pcm = AudioFrame::Pcm(vec![1, 2, 3, 4]);

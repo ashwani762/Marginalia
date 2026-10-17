@@ -830,6 +830,37 @@ impl Store {
         Ok(rows.len())
     }
 
+    /// Swaps the stretch `t0..t1` (seconds) of a meeting's transcript for `new` = (t0, t1, text), in one step, and leaves
+    /// the rest alone. An old segment is inside the stretch when its middle is. Each new segment takes the speaker who
+    /// talked most during its time in the segments it replaces. Blank text is not stored. Notes condensed from the
+    /// transcript are not touched (the caller only calls this for stretches that no condensed note covers).
+    /// Returns how many segments were stored.
+    pub fn replace_segments_range(&self, meeting_id: i64, t0: f64, t1: f64, new: &[(f64, f64, String)]) -> Result<usize> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let old: Vec<(i64, f64, f64, Option<i64>)> = {
+            let mut st = tx.prepare("SELECT id,t0,t1,speaker FROM segments WHERE meeting_id=?1 AND (t0+t1)/2.0 >= ?2 AND (t0+t1)/2.0 < ?3 ORDER BY t0")?;
+            let rows = st.query_map(params![meeting_id, t0, t1], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut rows: Vec<&(f64, f64, String)> = new.iter().filter(|(_, _, t)| !t.trim().is_empty()).collect();
+        rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let spans: Vec<(f64, f64)> = rows.iter().map(|r| (r.0, r.1)).collect();
+        let old_spans: Vec<(f64, f64, Option<i64>)> = old.iter().map(|o| (o.1, o.2, o.3)).collect();
+        let speakers = carry_speakers(&old_spans, &spans);
+        for o in &old {
+            tx.execute("DELETE FROM segments WHERE id=?1", params![o.0])?;
+        }
+        {
+            let mut ins = tx.prepare("INSERT INTO segments(meeting_id,source,t0,t1,text,speaker) VALUES(?1,'mic',?2,?3,?4,?5)")?;
+            for (r, spk) in rows.iter().zip(speakers) {
+                ins.execute(params![meeting_id, r.0, r.1.max(r.0), r.2.trim(), spk])?;
+            }
+        }
+        tx.commit()?;
+        Ok(rows.len())
+    }
+
     /// The language the speech model settled on for this meeting (an ISO code), if it was noted.
     pub fn meeting_language(&self, meeting_id: i64) -> Option<String> {
         self.conn
@@ -1229,6 +1260,34 @@ mod tests {
         assert_eq!(segs.iter().map(|s| s.speaker).collect::<Vec<_>>(), vec![Some(0), Some(1)]);
         assert!(st.sections(id).unwrap().is_empty(), "notes condensed from the old lines are dropped");
         assert_eq!(st.segments(other).unwrap().len(), 1, "other meetings are not touched");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_stretch_of_the_transcript_can_be_swapped_alone() {
+        let (st, dir) = temp_store("range");
+        let id = st.create_meeting("Test").unwrap();
+        let other = st.create_meeting("Other").unwrap();
+        let a = st.add_segment(id, "mic", 0.0, 4.0, "before").unwrap();
+        let b = st.add_segment(id, "mic", 10.0, 14.0, "the gamers are coming").unwrap();
+        let c = st.add_segment(id, "mic", 14.5, 19.0, "to the basement").unwrap();
+        st.add_segment(id, "mic", 30.0, 34.0, "after").unwrap();
+        st.add_segment(other, "mic", 12.0, 13.0, "untouched").unwrap();
+        st.set_segment_speakers(id, &[(a, 0), (b, 1), (c, 1)]).unwrap();
+        st.save_section(id, 0, 2, 0.0, 9.0, "notes stay").unwrap();
+        let n = st
+            .replace_segments_range(id, 9.0, 20.0, &[(14.0, 19.0, "to the basement.".into()), (10.0, 13.8, "The Gamers are coming".into()), (19.0, 19.5, "  ".into())])
+            .unwrap();
+        assert_eq!(n, 2, "blank text is not stored");
+        let segs = st.segments(id).unwrap();
+        assert_eq!(segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), vec!["before", "The Gamers are coming", "to the basement.", "after"]);
+        assert_eq!(segs.iter().map(|s| s.speaker).collect::<Vec<_>>(), vec![Some(0), Some(1), Some(1), None]);
+        assert_eq!(st.sections(id).unwrap().len(), 1, "condensed notes are not dropped");
+        assert_eq!(st.segments(other).unwrap().len(), 1, "other meetings are not touched");
+        // An empty swap just clears the stretch, and a stretch with nothing in it adds the new text.
+        assert_eq!(st.replace_segments_range(id, 40.0, 50.0, &[(41.0, 42.0, "late".into())]).unwrap(), 1);
+        assert_eq!(st.replace_segments_range(id, 9.0, 20.0, &[]).unwrap(), 0);
+        assert_eq!(st.segments(id).unwrap().iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), vec!["before", "after", "late"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
