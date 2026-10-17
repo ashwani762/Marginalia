@@ -106,7 +106,7 @@ sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
 - Windows is beta and will be finished later. Still to try by hand: the tray clicks on Windows, a reboot bringing the node and the tray
   back, mDNS announcements seen from a real phone, and a real phone getting an answer.
 - Nodes finding and sharing work with each other (cluster) is designed in `DESIGN.md`, not built.
-- Live speech to text as one open stream is not built. Live correction in windows exists on both sides (phone and node) and works.
+- Live speech to text as one open stream is not built on purpose. Live correction in windows exists on both sides (phone and node) and works, see "Measured on Linux later". An open stream was decided against: every window is its own request, so failover to another node or to the phone's own captions is free, and a stream would need state per stream on a node that keeps nothing.
 - Wayland (the tray icon was only tried under X11) and a Raspberry Pi.
 - The phone alone still stalls the screen once for about 5 s when it has to load Gemma on the GPU (see docs/DEVELOPMENT.md).
 
@@ -147,5 +147,5 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
 
 1. Later: take Windows out of beta (tray clicks, a reboot, a real phone). The core features work today on Linux.
 2. Cluster: peers pair and gossip, entry node forwards jobs, block records spread, hot-hot and standby (`DESIGN.md`).
-3. Speech on nodes: the phone uses the `Transcribe` request to replace its live transcript after a meeting (the node side is done and checked), and sends short windows with a prompt during the meeting (the node side is done and checked, see above), then live streaming with failover.
+3. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.
 4. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).

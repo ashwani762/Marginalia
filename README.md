@@ -35,7 +35,7 @@ Optional *compute nodes* on your network make the AI faster while you are near t
 - **Better transcripts**: the small model on the phone gives instant captions. After the meeting a compute node listens to the kept
   recording again with a large Whisper model (about 60 to 100 times faster than real time on a GPU). The corrected transcript replaces
   the live one before the notes are written. It is also a button on the Review screen, and an optional switch corrects the captions
-  while recording, a few seconds behind.
+  while recording, in short windows of audio. By default the corrected text runs about 12 seconds behind the speech.
 - **Compute nodes** (optional): a small daemon on a PC does the heavy AI work for the phone. It is found automatically on the Wi-Fi and
   connected with one tap. Notes, answers and search run about six times faster. If a node is lost in the middle of an answer, another
   node or the phone finishes it.
