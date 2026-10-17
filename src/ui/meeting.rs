@@ -3,10 +3,10 @@
 
 use super::anim::{fade_in_up, live, pulse, scale_in, settle_glow, slide_in_right};
 use super::components::{
-    avatar, card, card_header, chip, dot, empty_state, eyebrow, glow_blob, glow_dot, hit_card,
-    icon_tile, level_meter, page_title, pal, waveform,
+    card, card_header, chip, dot, empty_state, eyebrow, glow_dot, hit_card,
+    icon_tile, level_meter, mini_meter, page_title, pal, segment_item, segmented_track, waveform,
 };
-use super::theme::with_alpha;
+use super::theme::{with_alpha, TypeScale};
 use crate::app::{GenTarget, NoteKind, Services};
 use crate::audio::{AudioCapture, AudioMeters, CaptureConfig};
 use crate::config::NoteStyle;
@@ -19,9 +19,11 @@ use crate::rag::{Hit, Scope};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::progress::Progress;
 use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::text::{TextView, TextViewState};
-use gpui_kit::component::{h_flex, v_flex, Icon, Sizable};
+use gpui_kit::component::notification::Notification;
+use gpui_kit::component::{h_flex, v_flex, Icon, Sizable, WindowExt};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::HashSet;
@@ -64,6 +66,43 @@ enum Mode {
     Review(Meeting),
 }
 
+/// What the app is doing between pressing Stop and the review being ready.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WrapStep {
+    Finalizing,
+    Summarizing,
+    Titling,
+    Indexing,
+}
+
+impl WrapStep {
+    fn label(self) -> &'static str {
+        match self {
+            WrapStep::Finalizing => "Finalizing transcript",
+            WrapStep::Summarizing => "Writing summary",
+            WrapStep::Titling => "Naming the meeting",
+            WrapStep::Indexing => "Making it searchable",
+        }
+    }
+    fn progress(self) -> f32 {
+        match self {
+            WrapStep::Finalizing => 12.0,
+            WrapStep::Summarizing => 45.0,
+            WrapStep::Titling => 82.0,
+            WrapStep::Indexing => 95.0,
+        }
+    }
+}
+
+/// A meeting that is hidden but not yet erased, so Delete can be undone.
+struct PendingDelete {
+    meeting: Meeting,
+    _timer: Task<()>,
+}
+
+/// Marker for the single Undo toast.
+struct UndoDeleteToast;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ReviewTab {
     Summary,
@@ -78,6 +117,7 @@ pub struct MeetingView {
     meetings: Vec<Meeting>,
     meeting_id: Option<i64>,
     title: Entity<InputState>,
+    search_input: Entity<InputState>,
     notes: Entity<TextareaState>,
     enhanced: Entity<TextViewState>,
     summary: Entity<TextViewState>,
@@ -123,6 +163,18 @@ pub struct MeetingView {
     summary_text: String,
     review_tab: ReviewTab,
     transcript_open: bool,
+    wrap: Option<WrapStep>,
+    copied: bool,
+    pending_delete: Option<PendingDelete>,
+    title_buf: String,
+    /// End time of the last finalized segment per source (mic, system), used to drop stale partials.
+    last_final: [f64; 2],
+    /// Window-width driven layout flags, refreshed every render.
+    narrow: bool,
+    stacked: bool,
+    /// Too little room for the transcript pane beside the notes: it takes over the detail area.
+    cramped: bool,
+    detail_w: f32,
     _tick: Task<()>,
     _subs: Vec<Subscription>,
 }
@@ -134,8 +186,9 @@ const ENHANCE_MIN_GAP: Duration = Duration::from_secs(6);
 impl MeetingView {
     pub fn new(services: Arc<Services>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let title = cx.new(|cx| InputState::new(window, cx).placeholder("Untitled meeting"));
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search meetings"));
         let notes = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder("Jot shorthand during the call — bullets, fragments, names. Marginalia expands them live.")
+            TextareaState::new(window, cx).placeholder("Jot shorthand: bullets, fragments, names…")
         });
         let enhanced = cx.new(|cx| TextViewState::markdown("", cx));
         let summary = cx.new(|cx| TextViewState::markdown("", cx));
@@ -146,6 +199,11 @@ impl MeetingView {
                 if let InputEvent::Change = ev {
                     this.notes_dirty = true;
                     this.last_note_edit = Instant::now();
+                    cx.notify();
+                }
+            }),
+            cx.subscribe_in(&search_input, window, |_, _, ev: &InputEvent, _w, cx| {
+                if let InputEvent::Change = ev {
                     cx.notify();
                 }
             }),
@@ -163,6 +221,7 @@ impl MeetingView {
         });
         let mut view = Self {
             services,
+            search_input,
             mode: Mode::Idle,
             meetings: Vec::new(),
             meeting_id: None,
@@ -206,12 +265,57 @@ impl MeetingView {
             summary_text: String::new(),
             review_tab: ReviewTab::Summary,
             transcript_open: true,
+            wrap: None,
+            copied: false,
+            pending_delete: None,
+            title_buf: String::new(),
+            last_final: [-1.0; 2],
+            narrow: false,
+            stacked: false,
+            cramped: false,
+            detail_w: 1000.,
             _tick: tick,
             _subs: subs,
         };
         view.note_style = view.services.settings().note_style;
+        let _ = view.services.kb.store.prune_empty_meetings(None);
         view.refresh_meetings(cx);
         view
+    }
+
+    /// Ctrl+Enter: start from the ready screen, or stop an active recording.
+    pub fn toggle_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_recording() {
+            self.stop(window, cx);
+        } else if !self.is_wrapping() {
+            if matches!(self.mode, Mode::Review(_)) {
+                self.new_meeting(window, cx);
+            }
+            self.start(window, cx);
+        }
+    }
+
+    pub fn toggle_transcript(&mut self, cx: &mut Context<Self>) {
+        if self.is_recording() {
+            self.transcript_open = !self.transcript_open;
+            cx.notify();
+        }
+    }
+
+    /// Open a stored meeting by id (command palette).
+    pub fn open_by_id(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(m) = self.meetings.iter().find(|m| m.id == id).cloned() {
+            self.open_review(m, window, cx);
+        }
+    }
+
+    /// Ctrl+F: jump to the meeting search field.
+    pub fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_input.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    pub fn is_wrapping(&self) -> bool {
+        self.wrap.is_some()
     }
 
     pub fn is_recording(&self) -> bool {
@@ -224,7 +328,8 @@ impl MeetingView {
 
     pub fn refresh_meetings(&mut self, cx: &mut Context<Self>) {
         if let Ok(m) = self.services.kb.store.list_meetings() {
-            self.meetings = m;
+            let hidden = self.pending_delete.as_ref().map(|d| d.meeting.id);
+            self.meetings = m.into_iter().filter(|m| Some(m.id) != hidden).collect();
         }
         cx.notify();
     }
@@ -239,7 +344,7 @@ impl MeetingView {
         };
         let mut title = self.title.read(cx).value().to_string();
         if title.trim().is_empty() {
-            title = format!("Meeting · {}", chrono::Local::now().format("%b %-d, %H:%M"));
+            title = "Untitled meeting".to_string();
             self.title
                 .update(cx, |s, cx| s.set_value(title.clone(), window, cx));
         }
@@ -274,6 +379,9 @@ impl MeetingView {
             }
         }
         tracing::info!("meeting {meeting_id} started");
+        self.transcript_open = !self.cramped;
+        self.wrap = None;
+        self.last_final = [-1.0; 2];
         self.meeting_id = Some(meeting_id);
         self.mode = Mode::Live;
         self.refresh_meetings(cx);
@@ -314,14 +422,27 @@ impl MeetingView {
         }
         *self.services.meters.write() = None;
         let secs = self.started.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+        let raw = self.notes.read(cx).value().to_string();
+        if let Some(id) = self.meeting_id.filter(|_| self.lines.is_empty() && raw.trim().is_empty()) {
+            let _ = self.services.kb.store.delete_meeting(id);
+            self.services
+                .notify(NoteKind::Info, "Nothing was captured, so the meeting was discarded.");
+            self.meeting_id = None;
+            self.mode = Mode::Idle;
+            self.started = None;
+            self.partial_mic = None;
+            self.partial_sys = None;
+            self.refresh_meetings(cx);
+            return;
+        }
         if let Some(id) = self.meeting_id {
-            let raw = self.notes.read(cx).value().to_string();
             let _ = self
                 .services
                 .kb
                 .store
                 .update_meeting_notes(id, &raw, &self.enhanced_text);
             let _ = self.services.kb.store.finish_meeting(id, secs as i64);
+            self.wrap = Some(WrapStep::Finalizing);
             if let Some(c) = self.enhance_cancel.take() {
                 c.store(true, Ordering::Relaxed);
             }
@@ -345,13 +466,12 @@ impl MeetingView {
     }
 
     fn generate_summary(&mut self, meeting_id: i64, cx: &mut Context<Self>) {
-        let Some(llm) = self.services.engine.llm() else {
-            return;
-        };
-        if self.lines.is_empty() {
+        let words: usize = self.lines.iter().map(|l| l.text.split_whitespace().count()).sum();
+        let Some(llm) = self.services.engine.llm().filter(|_| words >= 25) else {
             self.finish_review(meeting_id, cx);
             return;
-        }
+        };
+        self.wrap = Some(WrapStep::Summarizing);
         self.summary_in_flight = true;
         self.summary_text.clear();
         self.summary.update(cx, |s, cx| s.set_text("", cx));
@@ -375,7 +495,56 @@ impl MeetingView {
         cx.notify();
     }
 
+    fn title_is_default(&self, cx: &App) -> bool {
+        let t = self.title.read(cx).value();
+        let t = t.trim();
+        t.is_empty() || t.starts_with("Untitled") || t.starts_with("Meeting ·")
+    }
+
+    /// Summary is done: tidy it, then (when the title is still the default) ask the
+    /// model for a short descriptive title before the review is shown.
     fn finish_review(&mut self, meeting_id: i64, cx: &mut Context<Self>) {
+        self.summary_in_flight = false;
+        self.summary_text = clean_summary(&self.summary_text);
+        let cleaned = self.summary_text.clone();
+        self.summary.update(cx, |s, cx| s.set_text(&cleaned, cx));
+        let words: usize = self.lines.iter().map(|l| l.text.split_whitespace().count()).sum();
+        let notes = if self.enhanced_text.trim().is_empty() {
+            self.notes.read(cx).value().to_string()
+        } else {
+            self.enhanced_text.clone()
+        };
+        if self.title_is_default(cx) && (words >= 25 || notes.split_whitespace().count() >= 3) {
+            if let Some(llm) = self.services.engine.llm() {
+                self.wrap = Some(WrapStep::Titling);
+                self.title_buf.clear();
+                let basis = if !cleaned.trim().is_empty() {
+                    cleaned
+                } else if !notes.trim().is_empty() {
+                    notes
+                } else {
+                    self.transcript_text(0, 3000)
+                };
+                llm.generate(GenRequest {
+                    images: Vec::new(),
+                    messages: vec![
+                        ChatMessage::system(TITLE_SYSTEM),
+                        ChatMessage::user(format!("Meeting notes:\n{basis}\n\nTitle:")),
+                    ],
+                    params: GenParams { max_tokens: 24, temperature: 0.2, ..Default::default() },
+                    priority: Priority::High,
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    on_event: self.services.gen_sink(GenTarget::Title(meeting_id)),
+                });
+                cx.notify();
+                return;
+            }
+        }
+        self.complete_review(meeting_id, cx);
+    }
+
+    fn complete_review(&mut self, meeting_id: i64, cx: &mut Context<Self>) {
+        self.wrap = Some(WrapStep::Indexing);
         let _ = self
             .services
             .kb
@@ -406,10 +575,12 @@ impl MeetingView {
         });
         self.refresh_meetings(cx);
         if let Some(m) = self.meetings.iter().find(|m| m.id == meeting_id).cloned() {
+            self.review_tab = ReviewTab::Summary;
             self.mode = Mode::Review(m);
         } else {
             self.mode = Mode::Idle;
         }
+        self.wrap = None;
         self.meeting_id = None;
         cx.notify();
     }
@@ -445,8 +616,9 @@ impl MeetingView {
         self.enhanced_text = m.notes_enhanced.clone();
         self.enhanced
             .update(cx, |s, cx| s.set_text(&m.notes_enhanced, cx));
-        self.summary_text = m.summary.clone();
-        self.summary.update(cx, |s, cx| s.set_text(&m.summary, cx));
+        self.summary_text = clean_summary(&m.summary);
+        let shown = self.summary_text.clone();
+        self.summary.update(cx, |s, cx| s.set_text(&shown, cx));
         self.cards.clear();
         self.elapsed_secs = m.duration_secs.max(0) as u64;
         self.elapsed_f = self.elapsed_secs as f64;
@@ -460,12 +632,14 @@ impl MeetingView {
         cx.notify();
     }
 
-    /// Sidebar action: go to a fresh meeting (or focus the live one).
+    /// Sidebar / Ctrl+N: open a fresh meeting and start recording at once.
+    /// If a recording is live or finishing up, just show it.
     pub fn start_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_recording() {
+        if self.is_recording() || self.is_wrapping() {
             return;
         }
         self.new_meeting(window, cx);
+        self.start(window, cx);
     }
 
     fn new_meeting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -481,7 +655,127 @@ impl MeetingView {
         cx.notify();
     }
 
-    fn delete_meeting(&mut self, id: i64, cx: &mut Context<Self>) {
+    /// Hide the meeting now and erase it after 8 s unless the user taps Undo.
+    fn delete_meeting(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        // A second delete commits the first immediately.
+        self.commit_delete(window, cx);
+        let Some(meeting) = self
+            .meetings
+            .iter()
+            .find(|m| m.id == id)
+            .cloned()
+            .or_else(|| match &self.mode {
+                Mode::Review(m) if m.id == id => Some(m.clone()),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        let name = if meeting.title.trim().is_empty() { "Untitled meeting".to_string() } else { meeting.title.clone() };
+        let timer = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(8)).await;
+            let _ = this.update_in(cx, |v, window, cx| v.commit_delete(window, cx));
+        });
+        self.pending_delete = Some(PendingDelete { meeting, _timer: timer });
+        if matches!(&self.mode, Mode::Review(m) if m.id == id) {
+            self.mode = Mode::Idle;
+        }
+        self.refresh_meetings(cx);
+
+        let weak = cx.weak_entity();
+        let note = Notification::new()
+            .id1::<UndoDeleteToast>("undo-delete")
+            .message(format!("Deleted “{}”", crate::rag::snippet_of(&name, 40)))
+            .placement(Anchor::BottomRight)
+            .action(move |_note, _window, cx| {
+                let weak = weak.clone();
+                let toast = cx.entity();
+                Button::new("undo-delete-btn")
+                    .label("Undo")
+                    .small()
+                    .outline()
+                    .on_click(move |_, window, cx| {
+                        let _ = weak.update(cx, |v, cx| v.undo_delete(cx));
+                        toast.update(cx, |n, cx| n.dismiss(window, cx));
+                    })
+            });
+        window.push_notification(note, cx);
+    }
+
+    /// Markdown for the open meeting: title, summary, then the notes.
+    fn notes_markdown(&self, cx: &App) -> String {
+        let title = self.title.read(cx).value().to_string();
+        let mut md = format!("# {}\n\n", title.trim());
+        if !self.summary_text.trim().is_empty() {
+            md.push_str(self.summary_text.trim());
+            md.push_str("\n\n");
+        }
+        let notes = if self.enhanced_text.trim().is_empty() {
+            self.notes.read(cx).value().to_string()
+        } else {
+            self.enhanced_text.clone()
+        };
+        if !notes.trim().is_empty() {
+            md.push_str("## Notes\n\n");
+            md.push_str(notes.trim());
+            md.push('\n');
+        }
+        md
+    }
+
+    fn copy_notes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let md = self.notes_markdown(cx);
+        cx.write_to_clipboard(ClipboardItem::new_string(md));
+        self.copied = true;
+        cx.notify();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(1600)).await;
+            let _ = this.update(cx, |v, cx| {
+                v.copied = false;
+                cx.notify();
+            });
+        });
+        task.detach();
+    }
+
+    fn export_notes(&mut self, cx: &mut Context<Self>) {
+        let md = self.notes_markdown(cx);
+        let title = self.title.read(cx).value().to_string();
+        let slug: String = title
+            .trim()
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .split('-')
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let name = if slug.is_empty() { "meeting-notes.md".to_string() } else { format!("{slug}.md") };
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Export notes")
+            .set_file_name(&name)
+            .add_filter("Markdown", &["md"])
+            .save_file()
+        {
+            match std::fs::write(&path, md) {
+                Ok(()) => self.services.notify(NoteKind::Success, format!("Saved {}", path.display())),
+                Err(e) => self.services.notify(NoteKind::Error, format!("Could not save: {e}")),
+            }
+        }
+    }
+
+    fn undo_delete(&mut self, cx: &mut Context<Self>) {
+        // Dropping the pending entry also cancels its timer.
+        if self.pending_delete.take().is_some() {
+            self.refresh_meetings(cx);
+        }
+    }
+
+    fn commit_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_delete.take() else {
+            return;
+        };
+        let id = pending.meeting.id;
         let _ = self.services.kb.store.delete_meeting(id);
         if let Ok(Some(doc)) = self
             .services
@@ -491,9 +785,7 @@ impl MeetingView {
         {
             let _ = self.services.kb.remove_document(doc.id);
         }
-        if matches!(&self.mode, Mode::Review(m) if m.id == id) {
-            self.mode = Mode::Idle;
-        }
+        window.remove_notification1::<UndoDeleteToast>("undo-delete", cx);
         self.refresh_meetings(cx);
     }
 
@@ -510,6 +802,10 @@ impl MeetingView {
                 self.elapsed_secs = f as u64;
                 cx.notify();
             }
+        }
+        if self.capture.is_none() {
+            // Wrapping up: the model is busy with the summary; no background work.
+            return;
         }
         let notes_text = self.notes.read(cx).value().to_string();
         let new_transcript = self.lines.len() > self.enhance_lines_seen;
@@ -539,6 +835,14 @@ impl MeetingView {
 
     pub fn on_transcript(&mut self, t: Transcript, _window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.mode, Mode::Live) {
+            return;
+        }
+        let si = match t.source {
+            AudioSource::Microphone => 0,
+            AudioSource::System => 1,
+        };
+        // A provisional line that ends before the last finalized segment is stale.
+        if t.partial && t.t1 <= self.last_final[si] + 0.05 {
             return;
         }
         let (slot, view) = match t.source {
@@ -580,6 +884,7 @@ impl MeetingView {
             return;
         }
         *slot = None;
+        self.last_final[si] = self.last_final[si].max(t.t1);
         view.update(cx, |st, cx| st.set_text("", cx));
         if t.text.trim().is_empty() {
             cx.notify();
@@ -989,6 +1294,18 @@ impl MeetingView {
                     self.finish_review(meeting_id, cx);
                 }
             },
+            GenTarget::Title(meeting_id) => match event {
+                GenEvent::Token(t) => self.title_buf.push_str(&t),
+                GenEvent::Done(_) | GenEvent::Error(_) => {
+                    let title = clean_title(&self.title_buf);
+                    if !title.is_empty() {
+                        let _ = self.services.kb.store.update_meeting_title(meeting_id, &title);
+                        self.title
+                            .update(cx, |s, cx| s.set_value(title.clone(), _window, cx));
+                    }
+                    self.complete_review(meeting_id, cx);
+                }
+            },
             GenTarget::Chat(_) => {}
         }
     }
@@ -1012,7 +1329,12 @@ impl MeetingView {
         let p = pal(cx);
         let recording = self.is_recording();
         let reviewing = matches!(self.mode, Mode::Review(_));
-        let elapsed = fmt_tc(self.elapsed_f);
+        let wrapping = self.is_wrapping();
+        let elapsed = if recording {
+            fmt_tc(self.elapsed_f)
+        } else {
+            fmt_duration(self.elapsed_secs)
+        };
         let transcript_open = self.transcript_open;
         let meters = self.meters.clone();
         let when = match &self.mode {
@@ -1025,9 +1347,10 @@ impl MeetingView {
                 .unwrap_or_default(),
             _ => chrono::Local::now().format("%A, %b %-d").to_string(),
         };
-        v_flex().gap_3().child(
+        v_flex().gap_3().flex_shrink_0().child(
             h_flex()
-                .gap_4()
+                .gap_3()
+                .flex_wrap()
                 .items_center()
                 .child(
                     v_flex()
@@ -1044,14 +1367,14 @@ impl MeetingView {
                                     FontWeight::MEDIUM
                                 })
                                 .text_color(p.text)
-                                .child(Input::new(&self.title).appearance(false).text_2xl()),
+                                .child(Input::new(&self.title).appearance(false).text_2xl().line_height(px(36.)).h(px(44.))),
                         )
                         .child(
                             h_flex()
                                 .gap_2()
                                 .items_center()
                                 .child(div().text_xs().text_color(p.text_faint).child(when))
-                                .when(recording || reviewing, |el| {
+                                .when(recording || reviewing || wrapping, |el| {
                                     el.child(div().text_xs().text_color(p.text_faint).child("·"))
                                         .child(
                                             h_flex()
@@ -1068,7 +1391,7 @@ impl MeetingView {
                                                 })
                                                 .child(
                                                     div()
-                                                        .font_family(super::theme::MONO_FONT)
+                                                        .when(recording, |el| el.font_family(super::theme::MONO_FONT))
                                                         .text_sm()
                                                         .font_weight(FontWeight::MEDIUM)
                                                         .text_color(if recording {
@@ -1082,7 +1405,7 @@ impl MeetingView {
                                 }),
                         ),
                 )
-                .when(recording, |el| {
+                .when(recording && self.detail_w >= 900., |el| {
                     let m = meters.clone();
                     el.child(live(
                         h_flex()
@@ -1112,6 +1435,9 @@ impl MeetingView {
                             )),
                         "meters",
                     ))
+                })
+                .when(recording && self.detail_w < 900., |el| {
+                    el.child(live(mini_meter(meters.clone(), cx), "mini-meters"))
                 })
                 .when(recording, |el| {
                     el.child(
@@ -1149,29 +1475,57 @@ impl MeetingView {
                     h_flex()
                         .gap_2()
                         .child(
-                            Button::new("delete-meeting")
-                                .ghost()
-                                .icon(IconName::Trash)
-                                .tooltip("Delete this meeting")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.delete_meeting(review_id, cx)
-                                })),
+                            Button::new("copy-notes")
+                                .outline()
+                                .small()
+                                .icon(if self.copied { IconName::Check } else { IconName::Copy })
+                                .label(if self.copied { "Copied" } else { "Copy" })
+                                .tooltip("Copy the notes as Markdown")
+                                .on_click(cx.listener(|this, _, window, cx| this.copy_notes(window, cx))),
                         )
                         .child(
-                            Button::new("new-meeting")
-                                .primary()
-                                .icon(IconName::Plus)
-                                .label("New meeting")
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.new_meeting(window, cx)),
-                                ),
+                            Button::new("export-notes")
+                                .outline()
+                                .small()
+                                .icon(IconName::Download)
+                                .label("Export")
+                                .tooltip("Save the notes as a Markdown file")
+                                .on_click(cx.listener(|this, _, _, cx| this.export_notes(cx))),
+                        )
+                        .child(
+                            Button::new("delete-meeting")
+                                .ghost()
+                                .small()
+                                .icon(IconName::Trash)
+                                .tooltip("Delete this meeting (undo for 8 seconds)")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.delete_meeting(review_id, window, cx)
+                                })),
+                        )
+                        .into_any_element()
+                } else if let Some(step) = self.wrap {
+                    // Between Stop and the finished review: say exactly what is happening.
+                    h_flex()
+                        .gap_3()
+                        .items_center()
+                        .px_3()
+                        .py_1p5()
+                        .rounded_full()
+                        .bg(p.surface_3)
+                        .border_1()
+                        .border_color(p.line)
+                        .child(ShimmerText::new(step.label()).id("wrap-shimmer"))
+                        .child(
+                            div()
+                                .w(px(88.))
+                                .child(Progress::new("wrap-progress").value(step.progress()).h(px(4.))),
                         )
                         .into_any_element()
                 } else {
                     Button::new("start")
                         .primary()
                         .icon(IconName::Mic)
-                        .label("Start transcribing")
+                        .label("Start recording")
                         .on_click(cx.listener(|this, _, window, cx| this.start(window, cx)))
                         .into_any_element()
                 }),
@@ -1189,7 +1543,7 @@ impl MeetingView {
     ) -> Div {
         card(cx)
             .flex_1()
-            .h_full()
+            .when(!self.stacked, |c| c.h_full())
             .min_h_0()
             .min_w_0()
             .child(
@@ -1329,7 +1683,7 @@ impl MeetingView {
             .into_any_element()
     }
 
-    fn render_notes_body(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_notes_body(&self, _cx: &mut Context<Self>) -> AnyElement {
         let reviewing = matches!(self.mode, Mode::Review(_));
         div()
             .flex_1()
@@ -1348,23 +1702,16 @@ impl MeetingView {
     }
 
     fn style_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
-        let p = pal(cx);
         let style = self.note_style;
-        let btn = |id: &'static str, label: &'static str, s: NoteStyle, cx: &mut Context<Self>| {
-            Button::new(id)
-                .label(label)
-                .xsmall()
-                .when(style == s, |b| b.primary())
-                .when(style != s, |b| b.ghost())
-                .on_click(cx.listener(move |this, _, _, cx| this.set_style(s, cx)))
-        };
-        h_flex()
-            .gap_0p5()
-            .p_0p5()
-            .rounded(px(8.))
-            .bg(p.surface_3)
-            .child(btn("style-std", "Standard", NoteStyle::Standard, cx))
-            .child(btn("style-concise", "Concise", NoteStyle::Concise, cx))
+        segmented_track(cx)
+            .child(
+                segment_item("style-std", "Standard", None, style == NoteStyle::Standard, cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_style(NoteStyle::Standard, cx))),
+            )
+            .child(
+                segment_item("style-concise", "Concise", None, style == NoteStyle::Concise, cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_style(NoteStyle::Concise, cx))),
+            )
             .into_any_element()
     }
 
@@ -1424,13 +1771,13 @@ impl MeetingView {
     fn render_summary_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
         if self.summary_text.is_empty() && !self.summary_in_flight {
-            return empty_state(
-                IconName::ScrollText,
-                "No summary",
-                "Summaries are written automatically when a recording stops.",
-                cx,
-            )
-            .into_any_element();
+            let words: usize = self.lines.iter().map(|l| l.text.split_whitespace().count()).sum();
+            let (title, body) = if words < 25 {
+                ("Too short to summarize", "There wasn't enough speech to write a summary. Your notes and transcript are saved in the other tabs.")
+            } else {
+                ("No summary yet", "A summary is written automatically when a recording stops.")
+            };
+            return empty_state(IconName::ScrollText, title, body, cx).into_any_element();
         }
         div()
             .id("summary-scroll")
@@ -1515,7 +1862,8 @@ impl MeetingView {
                     .child(
                         Button::new(SharedString::from(format!("dismiss-{id}")))
                             .ghost()
-                            .xsmall()
+                            .small()
+                            .tooltip("Dismiss")
                             .icon(IconName::X)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.cards.retain(|c| c.id != id);
@@ -1590,11 +1938,23 @@ impl MeetingView {
             Mode::Live => self.meeting_id,
             Mode::Idle => None,
         };
-        let is_live = matches!(self.mode, Mode::Live);
+        let query = self.search_input.read(cx).value().trim().to_lowercase();
+        let visible: Vec<&Meeting> = self
+            .meetings
+            .iter()
+            .filter(|m| {
+                query.is_empty()
+                    || m.title.to_lowercase().contains(&query)
+                    || m.summary.to_lowercase().contains(&query)
+                    || m.notes_enhanced.to_lowercase().contains(&query)
+                    || m.notes_raw.to_lowercase().contains(&query)
+            })
+            .collect();
+        let no_results = !query.is_empty() && visible.is_empty();
         // Group by day.
         let mut groups: Vec<(String, Vec<&Meeting>)> = Vec::new();
         let today = chrono::Local::now().date_naive();
-        for m in &self.meetings {
+        for m in visible {
             let d = chrono::DateTime::from_timestamp(m.started_at, 0)
                 .map(|d| d.with_timezone(&chrono::Local).date_naive())
                 .unwrap_or(today);
@@ -1611,7 +1971,7 @@ impl MeetingView {
             }
         }
         v_flex()
-            .w(px(300.))
+            .w(px(if self.narrow { 240. } else { 300. }))
             .h_full()
             .flex_shrink_0()
             .border_r_1()
@@ -1627,17 +1987,17 @@ impl MeetingView {
                         "Meetings",
                         format!("{} recorded", self.meetings.len()),
                         cx,
-                    )))
-                    .child(
-                        Button::new("list-new")
-                            .primary()
-                            .icon(IconName::Plus)
-                            .tooltip("New meeting")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.new_meeting(window, cx)),
-                            ),
-                    ),
+                    ))),
             )
+            .when(!self.meetings.is_empty(), |el| {
+                el.child(
+                    div().px_3().pb_2().child(
+                        Input::new(&self.search_input)
+                            .cleanable(true)
+                            .prefix(Icon::new(IconName::Search).small().text_color(p.text_faint)),
+                    ),
+                )
+            })
             .child(
                 div()
                     .id("meeting-list")
@@ -1649,34 +2009,15 @@ impl MeetingView {
                     .child(
                         v_flex()
                             .gap_1()
-                            .when(!is_live && selected.is_none(), |el| {
+                            .when(no_results, |el| {
                                 el.child(
-                                    h_flex()
-                                        .gap_2p5()
-                                        .items_center()
+                                    div()
                                         .px_3()
-                                        .py_2p5()
-                                        .rounded(p.radius_sm())
-                                        .bg(with_alpha(p.accent_2, 0.10))
-                                        .border_1()
-                                        .border_color(with_alpha(p.accent_2, 0.35))
-                                        .child(icon_tile(IconName::Mic, p.accent_2, 28., cx))
-                                        .child(
-                                            v_flex()
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_weight(FontWeight::SEMIBOLD)
-                                                        .text_color(p.text)
-                                                        .child("New meeting"),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(p.text_dim)
-                                                        .child("Ready when you are"),
-                                                ),
-                                        ),
+                                        .py_6()
+                                        .t_footnote()
+                                        .text_color(p.text_dim)
+                                        .text_center()
+                                        .child(format!("No meetings match “{}”.", crate::rag::snippet_of(&query, 28))),
                                 )
                             })
                             .children(groups.into_iter().flat_map(|(label, items)| {
@@ -1703,21 +2044,34 @@ impl MeetingView {
                                         format!("{} s", m.duration_secs)
                                     };
                                     let preview = plain_preview(
-                                        if m.summary.is_empty() {
+                                        &clean_summary(if m.summary.is_empty() {
                                             &m.notes_enhanced
                                         } else {
                                             &m.summary
-                                        },
+                                        }),
                                         90,
                                     );
                                     let row = v_flex()
                                         .id(SharedString::from(format!("meeting-{id}")))
+                                        .relative()
                                         .gap_1()
                                         .px_3()
                                         .py_2p5()
+                                        .min_h(px(56.))
                                         .rounded(p.radius_sm())
                                         .cursor_pointer()
-                                        .when(active, |el| el.bg(p.surface_3))
+                                        .when(active, |el| {
+                                            el.bg(p.surface_3).child(
+                                                div()
+                                                    .absolute()
+                                                    .left_0()
+                                                    .top(px(10.))
+                                                    .bottom(px(10.))
+                                                    .w(px(2.))
+                                                    .rounded_full()
+                                                    .bg(p.accent_2),
+                                            )
+                                        })
                                         .hover(move |s| s.bg(p.surface_3))
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.open_review(m2.clone(), window, cx)
@@ -1731,14 +2085,14 @@ impl MeetingView {
                                                         .flex_1()
                                                         .min_w_0()
                                                         .truncate()
-                                                        .text_sm()
+                                                        .t_body()
                                                         .font_weight(FontWeight::SEMIBOLD)
                                                         .text_color(p.text)
                                                         .child(m.title.clone()),
                                                 )
                                                 .child(
                                                     div()
-                                                        .text_xs()
+                                                        .t_caption()
                                                         .text_color(p.text_faint)
                                                         .child(time),
                                                 ),
@@ -1752,17 +2106,17 @@ impl MeetingView {
                                                         .flex_1()
                                                         .min_w_0()
                                                         .truncate()
-                                                        .text_xs()
+                                                        .t_footnote()
                                                         .text_color(p.text_dim)
                                                         .child(if preview.is_empty() {
-                                                            "No notes yet".to_string()
+                                                            "No notes".to_string()
                                                         } else {
                                                             preview
                                                         }),
                                                 )
                                                 .child(
                                                     div()
-                                                        .text_xs()
+                                                        .t_caption()
                                                         .text_color(p.text_faint)
                                                         .child(dur),
                                                 ),
@@ -1788,8 +2142,8 @@ impl MeetingView {
             h_flex()
                 .gap_3()
                 .items_start()
-                .flex_1()
-                .min_w(px(200.))
+                .w(px(268.))
+                .flex_shrink_0()
                 .child(icon_tile(icon, p.accent_2, 32., cx))
                 .child(
                     v_flex()
@@ -1798,18 +2152,12 @@ impl MeetingView {
                         .gap_0p5()
                         .child(
                             div()
-                                .text_sm()
+                                .t_body()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(p.text)
                                 .child(title),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(p.text_dim)
-                                .line_height(rems(1.5))
-                                .child(body),
-                        ),
+                        .child(div().t_footnote().text_color(p.text_dim).child(body)),
                 )
         };
         // 3D orbital graphic: two perspective-tilted concentric rings + drifting nodes
@@ -1858,35 +2206,27 @@ impl MeetingView {
                                 window.paint_path(path, super::theme::with_alpha(color, alpha));
                             }
                         }
-                        // Satellite dot on each ring
+                        // Satellite dot on each ring: faint, and never over the headline band
+                        // (a bright dot between letters reads as stray punctuation).
                         let lead = t * speed + phase;
                         let sx = cx_f + rx * lead.cos();
                         let sy = cy_f + ry * lead.sin();
-                        let vis = (lead.sin() * 0.5 + 0.5).powf(1.6);
-                        let dot_r = 2.5 + vis * 2.0;
-                        window.paint_quad(
-                            fill(
-                                Bounds::new(
-                                    point(px(sx - dot_r / 2.0), px(sy - dot_r / 2.0)),
-                                    gpui_kit::size(px(dot_r), px(dot_r)),
-                                ),
-                                super::theme::with_alpha(color, 0.55 + 0.35 * vis),
-                            )
-                            .corner_radii(px(dot_r * 0.5)),
-                        );
+                        let in_text_band = (sy - oy) > h * 0.34 && (sy - oy) < h * 0.66 && (sx - cx_f).abs() < w * 0.34;
+                        if !in_text_band {
+                            let vis = (lead.sin() * 0.5 + 0.5).powf(1.6);
+                            let dot_r = 2.0 + vis * 1.2;
+                            window.paint_quad(
+                                fill(
+                                    Bounds::new(
+                                        point(px(sx - dot_r / 2.0), px(sy - dot_r / 2.0)),
+                                        gpui_kit::size(px(dot_r), px(dot_r)),
+                                    ),
+                                    super::theme::with_alpha(color, 0.18 + 0.20 * vis),
+                                )
+                                .corner_radii(px(dot_r * 0.5)),
+                            );
+                        }
                     }
-                    // Soft ambient glow blob at centre
-                    let blob_r = w * 0.22;
-                    window.paint_quad(
-                        fill(
-                            Bounds::new(
-                                point(px(cx_f - blob_r), px(cy_f - blob_r * 0.9)),
-                                gpui_kit::size(px(blob_r * 2.0), px(blob_r * 1.8)),
-                            ),
-                            super::theme::with_alpha(accent, 0.025),
-                        )
-                        .corner_radii(px(blob_r)),
-                    );
                 },
             )
             .absolute()
@@ -1896,6 +2236,9 @@ impl MeetingView {
             div().into_any_element()
         };
 
+        // First run gets the full pitch; once there is history, the screen is a calm "ready".
+        let first_run = self.meetings.is_empty();
+        let headline_weight = if p.dark { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM };
         let hero = v_flex()
             .relative()
             .overflow_hidden()
@@ -1903,23 +2246,22 @@ impl MeetingView {
             .items_center()
             .justify_center()
             .p_8()
-            .gap_6()
+            .gap_8()
             .child(live(orbital_bg, "hero-orbital"))
-            .child(
-                scale_in(v_flex()
+            .child(scale_in(
+                v_flex()
                     .items_center()
-                    .gap_3()
-                    .max_w(px(640.))
-                    .child(chip("Fully local · nothing leaves this machine", p.success, cx))
-                    .child(
+                    .gap_4()
+                    .max_w(px(620.))
+                    .child(chip("On this device · nothing is uploaded", p.success, cx))
+                    .child(if first_run {
                         v_flex()
                             .items_center()
-                            .gap_1()
                             .child(
                                 div()
                                     .font_family(p.display_font())
-                                    .text_3xl()
-                                    .font_weight(if p.dark { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                                    .t_display()
+                                    .font_weight(headline_weight)
                                     .text_color(p.text)
                                     .text_center()
                                     .child("Take notes in shorthand."),
@@ -1927,36 +2269,66 @@ impl MeetingView {
                             .child(
                                 div()
                                     .font_family(p.display_font())
-                                    .text_3xl()
-                                    .font_weight(if p.dark { FontWeight::BOLD } else { FontWeight::MEDIUM })
+                                    .t_display()
+                                    .font_weight(headline_weight)
                                     .text_color(p.text)
                                     .text_center()
                                     .child("Get the whole story."),
-                            ),
-                    )
-                    .child(div().text_sm().text_color(p.text_dim).text_center().line_height(rems(1.65)).max_w(px(520.)).child(
-                        "Marginalia listens to your microphone and system audio, transcribes with Whisper, expands your bullets with Gemma 4, and watches for questions it can answer from your documents, with exact citations.",
-                    ))
+                            )
+                            .into_any_element()
+                    } else {
+                        div()
+                            .font_family(p.display_font())
+                            .t_display()
+                            .font_weight(headline_weight)
+                            .text_color(p.text)
+                            .text_center()
+                            .child("Ready when you are.")
+                            .into_any_element()
+                    })
                     .child(
-                        h_flex().gap_3().mt_2().child(
-                            Button::new("hero-start")
-                                .primary()
-                                .large()
-                                .icon(IconName::Mic)
-                                .label("Start transcribing")
-                                .on_click(cx.listener(|this, _, window, cx| this.start(window, cx))),
-                        ),
-                    ), "hero-content", 80)
-            )
-            .child(
-                h_flex()
-                    .gap_6()
-                    .max_w(px(920.))
-                    .w_full()
-                    .child(fade_in_up(feature(IconName::Captions, "Live transcript", "Both sides of any call, tagged You / Others, in any meeting app.", cx), "feat-0", 160))
-                    .child(fade_in_up(feature(IconName::WandSparkles, "Live Enhance", "Your fragments become complete notes while the meeting is still going.", cx), "feat-1", 240))
-                    .child(fade_in_up(feature(IconName::Lightbulb, "Live Assistance", "Questions get answered from your documents before anyone opens a search box.", cx), "feat-2", 320)),
-            );
+                        div()
+                            .t_body()
+                            .text_color(p.text_dim)
+                            .text_center()
+                            .max_w(px(500.))
+                            .child(if first_run {
+                                "Marginalia listens to your microphone and system audio, transcribes it, expands your bullets as you type, and answers questions from your own documents, with exact citations."
+                            } else {
+                                "Jot fragments while you listen. Marginalia writes them up, and finds answers in your documents."
+                            }),
+                    )
+                    .child(
+                        v_flex()
+                            .items_center()
+                            .gap_2()
+                            .mt_2()
+                            .child(
+                                Button::new("hero-start")
+                                    .primary()
+                                    .large()
+                                    .icon(IconName::Mic)
+                                    .label("Start recording")
+                                    .on_click(cx.listener(|this, _, window, cx| this.start(window, cx))),
+                            )
+                            .child(div().t_caption().text_color(p.text_faint).child("or press Ctrl+Enter")),
+                    ),
+                "hero-content",
+                80,
+            ))
+            .when(first_run, |el| {
+                el.child(
+                    h_flex()
+                        .items_start()
+                        .justify_center()
+                        .gap_6()
+                        .w_full()
+                        .flex_wrap()
+                        .child(fade_in_up(feature(IconName::Captions, "Live transcript", "Both sides of any call, tagged You and Others, in any meeting app.", cx), "feat-0", 160))
+                        .child(fade_in_up(feature(IconName::WandSparkles, "Live Enhance", "Your fragments become complete notes while the meeting runs.", cx), "feat-1", 240))
+                        .child(fade_in_up(feature(IconName::Lightbulb, "Live Assistance", "Questions are answered from your documents before anyone searches.", cx), "feat-2", 320)),
+                )
+            });
         fade_in_up(hero, "hero", 0)
     }
 
@@ -1977,8 +2349,9 @@ impl MeetingView {
                 .flex_1()
                 .min_h_0()
                 .items_start()
-                .h_full()
+                .when(!self.stacked, |el| el.h_full())
                 .gap_4()
+                .when(self.stacked, |el| el.flex_col().items_stretch())
                 .child(
                     self.panel(
                         "Notes",
@@ -2022,18 +2395,6 @@ impl MeetingView {
                 .into_any_element()
         } else {
             let tab = self.review_tab;
-            let seg =
-                |id: &'static str, label: &'static str, t: ReviewTab, cx: &mut Context<Self>| {
-                    Button::new(id)
-                        .label(label)
-                        .small()
-                        .when(tab == t, |b| b.primary())
-                        .when(tab != t, |b| b.ghost())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.review_tab = t;
-                            cx.notify();
-                        }))
-                };
             let body: AnyElement = match tab {
                 ReviewTab::Summary => self
                     .panel(
@@ -2052,8 +2413,9 @@ impl MeetingView {
                     .flex_1()
                     .min_h_0()
                     .items_start()
-                    .h_full()
+                    .when(!self.stacked, |el| el.h_full())
                     .gap_4()
+                    .when(self.stacked, |el| el.flex_col().items_stretch())
                     .child(self.panel(
                         "Notes",
                         IconName::NotebookPen,
@@ -2096,64 +2458,157 @@ impl MeetingView {
                 .min_h_0()
                 .gap_4()
                 .child(
-                    h_flex()
-                        .gap_0p5()
-                        .p_0p5()
-                        .rounded(px(10.))
-                        .bg(p.surface_2)
-                        .border_1()
-                        .border_color(p.line)
-                        .w(px(420.))
-                        .child(seg("tab-summary", "Summary", ReviewTab::Summary, cx))
-                        .child(seg("tab-notes", "Notes", ReviewTab::Notes, cx))
-                        .child(seg(
-                            "tab-transcript",
-                            "Transcript",
-                            ReviewTab::Transcript,
-                            cx,
-                        ))
-                        .child(seg("tab-cards", "Assistance", ReviewTab::Assistance, cx)),
+                    h_flex().child(
+                        segmented_track(cx)
+                            .child(
+                                segment_item("tab-summary", "Summary", None, tab == ReviewTab::Summary, cx)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.review_tab = ReviewTab::Summary;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                segment_item("tab-notes", "Notes", None, tab == ReviewTab::Notes, cx)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.review_tab = ReviewTab::Notes;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                segment_item(
+                                    "tab-transcript",
+                                    "Transcript",
+                                    Some(self.lines.len()),
+                                    tab == ReviewTab::Transcript,
+                                    cx,
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.review_tab = ReviewTab::Transcript;
+                                    cx.notify();
+                                })),
+                            ),
+                    ),
                 )
                 .child(body)
                 .into_any_element()
         };
-        let show_inline_cards = live && !self.transcript_open && !self.cards.is_empty();
-        let main =
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .p_5()
-                .gap_4()
-                .child(self.render_control_bar(cx))
-                .when(show_inline_cards, |el| {
-                    el.child(
-                        div()
-                            .id("cards-strip")
-                            .max_h(px(260.))
-                            .overflow_y_scroll()
-                            .child(v_flex().gap_2().children(
-                                self.cards.iter().take(3).map(|c| self.render_card(c, cx)),
-                            )),
-                    )
-                })
-                .child(panels);
-        if live && self.transcript_open {
+        // Where the transcript lives: a side pane when there is room, otherwise a drawer
+        // (expanded) or a one-line caption dock (collapsed). Notes never lose their space.
+        let side_pane = live && self.transcript_open && !self.cramped;
+        let drawer = live && self.transcript_open && self.cramped;
+        let dock = live && !side_pane && !drawer;
+        let show_inline_cards = live && !side_pane && !drawer && !self.cards.is_empty();
+        let main = v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .p_5()
+            .gap_4()
+            .child(self.render_control_bar(cx))
+            .when(show_inline_cards, |el| {
+                el.child(
+                    div()
+                        .id("cards-strip")
+                        .max_h(px(220.))
+                        .overflow_y_scroll()
+                        .child(v_flex().gap_2().children(
+                            self.cards.iter().take(2).map(|c| self.render_card(c, cx)),
+                        )),
+                )
+            })
+            .child(panels)
+            .when(dock, |el| el.child(self.render_caption_dock(cx)))
+            .when(drawer, |el| el.child(self.render_transcript_pane(true, cx)));
+        if side_pane {
             h_flex()
                 .flex_1()
                 .min_w_0()
                 .h_full()
                 .items_start()
                 .child(main)
-                .child(self.render_transcript_pane(cx))
+                .child(self.render_transcript_pane(false, cx))
                 .into_any_element()
         } else {
             main.into_any_element()
         }
     }
 
+    /// One calm line that proves the app is listening, with the latest words fading in.
+    fn render_caption_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = pal(cx);
+        let recording = self.is_recording();
+        let partial = [
+            (&self.partial_sys, &self.partial_view_sys),
+            (&self.partial_mic, &self.partial_view_mic),
+        ]
+        .into_iter()
+        .find(|(l, _)| l.as_ref().map(|l| !l.text.trim().is_empty()).unwrap_or(false));
+        let last_final = self.lines.last();
+        let enabled = self.services.settings().live_assistance;
+        let answers = self
+            .cards
+            .iter()
+            .filter(|c| c.state == CardState::Done)
+            .count();
+        h_flex()
+            .id("caption-dock")
+            .w_full()
+            .flex_shrink_0()
+            .h(px(44.))
+            .px_3()
+            .gap_3()
+            .items_center()
+            .rounded(p.radius_sm())
+            .bg(p.surface_2)
+            .border_1()
+            .border_color(p.line)
+            .child(Icon::new(IconName::Captions).small().text_color(p.text_faint))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(22.))
+                    .overflow_hidden()
+                    .t_footnote()
+                    .text_color(p.text_dim)
+                    .child(if let Some((_, view)) = partial {
+                        TextView::new(view).stream_fade(true).into_any_element()
+                    } else if let Some(l) = last_final {
+                        l.text.clone().into_any_element()
+                    } else {
+                        div()
+                            .text_color(p.text_faint)
+                            .child(if recording { "Listening…" } else { "Recording stopped" })
+                            .into_any_element()
+                    }),
+            )
+            .when(recording && enabled && answers > 0, |el| {
+                el.child(chip(format!("{answers} answered"), p.success, cx))
+            })
+            .when(recording && enabled && answers == 0, |el| {
+                el.child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(pulse(dot(p.success, 6.), "dock-dot", 1600, 0.3, 1.0))
+                        .child(div().t_caption().text_color(p.text_faint).child("watching")),
+                )
+            })
+            .when(recording, |el| el.child(
+                Button::new("dock-expand")
+                    .ghost()
+                    .small()
+                    .icon(IconName::ChevronUp)
+                    .label("Transcript")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.transcript_open = true;
+                        cx.notify();
+                    })),
+            ))
+    }
+
     /// Collapsible right-hand transcript pane for live sessions.
-    fn render_transcript_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_transcript_pane(&self, docked: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
         let queued = self
             .services
@@ -2162,16 +2617,25 @@ impl MeetingView {
             .map(|w| w.queue_len())
             .unwrap_or(0);
         v_flex()
-            .w(px(400.))
-            .h_full()
-            .flex_shrink_0()
             .bg(p.surface_2)
-            .border_l_1()
             .border_color(p.line)
+            .flex_shrink_0()
+            .when(!docked, |el| {
+                el.w(px(if self.narrow { 320. } else { 400. }))
+                    .h_full()
+                    .border_l_1()
+            })
+            .when(docked, |el| {
+                el.w_full()
+                    .h(px(300.))
+                    .rounded(p.radius_sm())
+                    .border_1()
+                    .overflow_hidden()
+            })
             .child(
                 h_flex()
                     .px_3()
-                    .py_3()
+                    .py_2p5()
                     .gap_2()
                     .items_center()
                     .border_b_1()
@@ -2179,7 +2643,7 @@ impl MeetingView {
                     .child(icon_tile(IconName::Captions, p.accent_2, 26., cx))
                     .child(
                         div()
-                            .text_sm()
+                            .t_body()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(p.text)
                             .child("Transcript"),
@@ -2188,17 +2652,20 @@ impl MeetingView {
                     .when(queued > 0, |el| {
                         el.child(chip("transcribing", p.text_faint, cx))
                     })
-                    .child(chip("Live", p.danger, cx))
-                    .child(
-                        Button::new("close-transcript")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::X)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.transcript_open = false;
-                                cx.notify();
-                            })),
-                    ),
+                    .when(self.is_recording(), |el| el.child(chip("Live", p.danger, cx)))
+                    .when(docked, |el| {
+                        el.child(
+                            Button::new("drawer-collapse")
+                                .ghost()
+                                .small()
+                                .icon(IconName::ChevronDown)
+                                .tooltip("Collapse transcript")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.transcript_open = false;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
             )
             .child(self.render_assistance_section(cx))
             .child(
@@ -2261,10 +2728,14 @@ impl MeetingView {
             .when(self.cards.is_empty(), |el| {
                 let docs = self.services.kb.chunk_count();
                 el.child(
-                    div().px_3().py_2p5().text_xs().text_color(p.text_faint).line_height(rems(1.5)).child(if enabled {
-                        format!("Listening for questions the knowledge base can answer · {docs} passages indexed. Matches appear here with the exact passage.")
+                    div().px_3().py_2().t_footnote().text_color(p.text_faint).child(if enabled {
+                        if docs == 0 {
+                            "Add documents in Knowledge so questions can be answered here.".to_string()
+                        } else {
+                            format!("Answers appear here when a question matches your {docs} indexed passages.")
+                        }
                     } else {
-                        "Turn on Live Assistance in Settings to get cited answers while the meeting runs.".to_string()
+                        "Turned off in Settings.".to_string()
                     }),
                 )
             })
@@ -2283,7 +2754,19 @@ impl MeetingView {
 }
 
 impl Render for MeetingView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let w = f32::from(window.viewport_size().width);
+        self.narrow = w < 1280.;
+        let chrome = (if w < 1100. { 68. } else { 240. }) + if self.narrow { 240. } else { 300. };
+        let pane = if self.narrow { 320. } else { 400. };
+        self.cramped = w - chrome - pane < 640.;
+        let side = if self.transcript_open && !self.cramped && matches!(self.mode, Mode::Live) {
+            pane
+        } else {
+            0.
+        };
+        self.detail_w = w - chrome - side;
+        self.stacked = self.detail_w < 780.;
         h_flex()
             .size_full()
             .child(self.render_list_pane(cx))
@@ -2293,9 +2776,12 @@ impl Render for MeetingView {
 
 /// Markdown-free one-liner for list previews.
 fn plain_preview(md: &str, max: usize) -> String {
-    let cleaned: String = md
-        .lines()
-        .map(|l| l.trim().trim_start_matches(['#', '-', '*', '>']).trim())
+    let lines: Vec<&str> = md.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let has_body = lines.iter().any(|l| !l.starts_with('#'));
+    let cleaned: String = lines
+        .into_iter()
+        .filter(|l| !(has_body && l.starts_with('#')))
+        .map(|l| l.trim_start_matches(['#', '-', '*', '>']).trim())
         .filter(|l| !l.is_empty() && !l.eq_ignore_ascii_case("summary"))
         .collect::<Vec<_>>()
         .join(" ");
@@ -2413,4 +2899,127 @@ const SCAN_SYSTEM: &str = "You extract questions from a live meeting transcript.
 
 const CARD_SYSTEM: &str = "You answer a question raised during a live meeting using only the provided passages. Reply in at most 60 words, plain and direct, then cite the passage numbers you used like [1]. If the passages do not answer it, say 'Not covered in your documents.' Output only the answer.";
 
-const SUMMARY_SYSTEM: &str = "You are Marginalia, an on-device meeting assistant. Write meeting notes in Markdown with these sections: '## Summary' (3-5 sentences), '## Key decisions' (bullets), '## Action items' (bullets with owner if known), '## Open questions' (bullets). Base everything on the transcript and notes; do not invent. Omit a section if empty. No preamble.";
+const TITLE_SYSTEM: &str = "Write a short descriptive title for this meeting, 3 to 7 words, in sentence case (capitalise only the first word and proper nouns). No quotes, no trailing punctuation, no date, no prefix like 'Title:'. Output only the title.";
+
+
+const SUMMARY_SYSTEM: &str = "You are Marginalia, an on-device meeting note-taker. Write the notes in Markdown. Begin directly with two to four plain sentences saying what the meeting was about and what was concluded: no heading before them. Then add only the sections that have real content, each as a '## ' heading with bullets: 'Decisions', 'Action items' (owner first when known), 'Open questions'. Never write a section that would say None or N/A. Never mention 'the transcript', 'the recording' or 'the provided text'; write as the person who took the notes. Base everything on the material; do not invent. If there is too little substance, write one sentence saying so.";
+
+/// Drop sentences that talk about the input instead of the meeting, e.g.
+/// "No decisions were made based on the provided material."
+fn strip_meta(text: &str) -> String {
+    const META: [&str; 6] = [
+        "provided material",
+        "provided transcript",
+        "provided text",
+        "the transcript",
+        "the recording",
+        "the material provided",
+    ];
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut kept = String::new();
+        for sentence in line.split_inclusive(['.', '!', '?']) {
+            let lower = sentence.to_ascii_lowercase();
+            let is_meta = META.iter().any(|m| lower.contains(m));
+            let is_negative = lower.trim_start().starts_with("no ") || lower.contains("were made") || lower.contains("was made");
+            if is_meta && is_negative {
+                continue;
+            }
+            kept.push_str(sentence);
+        }
+        let kept = kept
+            .replace("The provided transcript", "The discussion")
+            .replace("the provided transcript", "the discussion")
+            .replace("The transcript", "The discussion")
+            .replace("the transcript", "the discussion");
+        if !kept.trim().is_empty() || line.trim().is_empty() {
+            out.push(kept.trim_end().to_string());
+        }
+    }
+    out.join("\n")
+}
+
+/// Remove the model's habits that add noise: a redundant leading "Summary" heading
+/// and sections that only say "none".
+fn clean_summary(md: &str) -> String {
+    let mut blocks: Vec<(Option<String>, Vec<String>)> = vec![(None, Vec::new())];
+    for line in md.lines() {
+        if let Some(h) = line.trim_start().strip_prefix("## ") {
+            blocks.push((Some(h.trim().to_string()), Vec::new()));
+        } else {
+            blocks.last_mut().unwrap().1.push(line.to_string());
+        }
+    }
+    let is_none = |l: &str| {
+        let t = l.trim().trim_start_matches(['-', '*', '•']).trim().to_ascii_lowercase();
+        t.is_empty()
+            || t.starts_with("none")
+            || t.starts_with("n/a")
+            || t.starts_with("no specific")
+            || t.starts_with("no action")
+            || t.starts_with("no open")
+            || t.starts_with("no decisions")
+            || t.starts_with("nothing")
+    };
+    let mut out = String::new();
+    let blocks: Vec<(Option<String>, Vec<String>)> = blocks
+        .into_iter()
+        .map(|(h, l)| (h, strip_meta(&l.join("\n")).lines().map(String::from).collect()))
+        .collect();
+    for (i, (heading, lines)) in blocks.iter().enumerate() {
+        let body: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
+        let empty = body.is_empty() || body.iter().all(|l| is_none(l));
+        match heading {
+            // A "Summary" heading above the lead paragraph just repeats the card title.
+            Some(h) if h.eq_ignore_ascii_case("summary") => {
+                if !empty {
+                    out.push_str(&lines.join("\n").trim_matches('\n').to_string());
+                    out.push_str("\n\n");
+                }
+            }
+            Some(h) => {
+                if !empty {
+                    out.push_str(&format!("## {h}\n{}\n\n", lines.join("\n").trim_matches('\n')));
+                }
+            }
+            None => {
+                if i == 0 && !empty {
+                    out.push_str(&lines.join("\n").trim_matches('\n').to_string());
+                    out.push_str("\n\n");
+                }
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
+/// First line, no quotes/markup/trailing punctuation, at most ~60 characters.
+fn clean_title(raw: &str) -> String {
+    let line = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = line
+        .trim_start_matches(['#', '*', '-', '>', ' '])
+        .trim_start_matches("Title:")
+        .trim()
+        .trim_matches(['"', '\'', '“', '”', '*', '`'])
+        .trim_end_matches(['.', ':', ';'])
+        .trim();
+    if line.chars().count() <= 60 {
+        return line.to_string();
+    }
+    let mut cut: String = line.chars().take(60).collect();
+    if let Some(i) = cut.rfind(' ') {
+        cut.truncate(i);
+    }
+    cut
+}
+
+/// "1 min 3 s", "42 s", "1 h 05 min".
+fn fmt_duration(secs: u64) -> String {
+    if secs >= 3600 {
+        format!("{} h {:02} min", secs / 3600, (secs / 60) % 60)
+    } else if secs >= 60 {
+        format!("{} min {} s", secs / 60, secs % 60)
+    } else {
+        format!("{secs} s")
+    }
+}

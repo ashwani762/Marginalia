@@ -128,6 +128,22 @@ impl VectorIndex {
         best
     }
 
+    /// Top-k by cosine similarity among only the ids in `allowed` (a folder, for example).
+    /// Exact: a subset is small enough that no pre-filter is needed.
+    pub fn search_among(&self, query: &[f32], k: usize, allowed: &std::collections::HashSet<i64>) -> Vec<(i64, f32)> {
+        if query.len() != EMBED_DIM || k == 0 || allowed.is_empty() {
+            return vec![];
+        }
+        let rows: Vec<usize> = allowed.iter().filter_map(|id| self.pos.get(id).copied()).collect();
+        let mut exact: Vec<(i64, f32)> = rows
+            .into_par_iter()
+            .map(|row| (self.ids[row], dot(&self.full[row * EMBED_DIM..(row + 1) * EMBED_DIM], query)))
+            .collect();
+        exact.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        exact.truncate(k);
+        exact
+    }
+
     /// Top-k by cosine similarity (inputs are unit vectors).
     pub fn search(&self, query: &[f32], k: usize) -> Vec<(i64, f32)> {
         let n = self.ids.len();

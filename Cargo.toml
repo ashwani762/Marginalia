@@ -11,7 +11,9 @@ name = "marginalia"
 path = "src/main.rs"
 
 [features]
-default = ["cuda"]
+default = ["cuda", "llama"]
+# llama.cpp engine for chat and embeddings (the Android build serves both from LiteRT-LM instead).
+llama = []
 cuda = ["llama-cpp-2/cuda"]
 vulkan = ["llama-cpp-2/vulkan"]
 

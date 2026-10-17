@@ -322,7 +322,8 @@ impl KnowledgeView {
                             .child(
                                 Button::new(SharedString::from(format!("rm-{id}")))
                                     .ghost()
-                                    .xsmall()
+                                    .small()
+                                    .tooltip("Remove from the knowledge base")
                                     .icon(IconName::Trash)
                                     .on_click(cx.listener(move |this, _, _, cx| this.remove_doc(id, cx))),
                             );

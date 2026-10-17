@@ -1,8 +1,7 @@
 //! Ask: retrieval-augmented chat over documents and past meetings.
 
 use super::anim::{fade_in_up, live};
-use super::components::{brand_mark, card, chip, doc_icon, empty_state, eyebrow, page_title, pal};
-use super::theme::with_alpha;
+use super::components::{brand_mark, card, chip, doc_icon, empty_state, eyebrow, page_title, pal, segment_item, segmented_track};
 use crate::app::{GenTarget, NoteKind, Services};
 use crate::engine::{ChatMessage, GenEvent, GenParams, GenRequest, Priority};
 use crate::rag::store::DocKind;
@@ -37,6 +36,8 @@ pub struct ChatView {
     turns: Vec<Turn>,
     next_id: u64,
     scope: Scope,
+    /// Starter questions derived from the user's own meetings and documents.
+    suggestions: Vec<String>,
     scroll: ScrollHandle,
     _subs: Vec<Subscription>,
 }
@@ -59,9 +60,46 @@ impl ChatView {
             turns: Vec::new(),
             next_id: 1,
             scope: Scope::All,
+            suggestions: Vec::new(),
             scroll: ScrollHandle::new(),
             _subs: subs,
         }
+    }
+
+    /// Rebuild the starter questions from what is actually in the app.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        let short = |t: &str| crate::rag::snippet_of(t.trim(), 38);
+        let mut out: Vec<String> = Vec::new();
+        if let Ok(meetings) = self.services.kb.store.list_meetings() {
+            let named = |m: &&crate::rag::store::Meeting| {
+                let t = m.title.trim();
+                !(t.is_empty() || t.starts_with("Untitled") || t.starts_with("Meeting ·"))
+            };
+            if let Some(m) = meetings.iter().filter(named).find(|m| !m.summary.trim().is_empty()) {
+                out.push(format!("What were the key points of “{}”?", short(&m.title)));
+            } else if let Some(m) = meetings.iter().find(|m| m.segment_count > 0) {
+                out.push(format!("What was said in the meeting on {}?", chrono::DateTime::from_timestamp(m.started_at, 0)
+                    .map(|d| d.with_timezone(&chrono::Local).format("%b %-d").to_string())
+                    .unwrap_or_default()));
+            }
+            if meetings.iter().filter(|m| !m.summary.trim().is_empty()).count() >= 2 {
+                out.push("List every action item from my recent meetings".to_string());
+            }
+        }
+        if let Ok(docs) = self.services.kb.documents() {
+            for d in docs.iter().filter(|d| d.kind != crate::rag::store::DocKind::Meeting).take(2) {
+                out.push(format!("Summarize “{}”", short(&d.title)));
+            }
+        }
+        out.truncate(3);
+        self.suggestions = out;
+        cx.notify();
+    }
+
+    /// Ask a question programmatically (command palette).
+    pub fn ask(&mut self, question: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.input.update(cx, |s, cx| s.set_value(question, window, cx));
+        self.send(window, cx);
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -300,7 +338,7 @@ impl ChatView {
                                         .child(
                                             Button::new(SharedString::from(format!("stop-{id}")))
                                                 .ghost()
-                                                .xsmall()
+                                                .small()
                                                 .icon(IconName::Square)
                                                 .label("Stop")
                                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -391,18 +429,6 @@ impl Render for ChatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = pal(cx);
         let scope = self.scope;
-        let scope_btn =
-            |id: &'static str, label: &'static str, s: Scope, cx: &mut Context<Self>| {
-                Button::new(id)
-                    .label(label)
-                    .xsmall()
-                    .when(scope == s, |b| b.primary())
-                    .when(scope != s, |b| b.ghost())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.scope = s;
-                        cx.notify();
-                    }))
-            };
         v_flex()
             .size_full()
             .p_5()
@@ -413,23 +439,29 @@ impl Render for ChatView {
                     .gap_3()
                     .child(div().flex_1().child(page_title("Ask", "Answers grounded in your documents and meetings, with exact citations.", cx)))
                     .child(
-                        h_flex()
-                            .gap_1()
-                            .p_0p5()
-                            .rounded(px(8.))
-                            .bg(p.surface_3)
-                            .child(scope_btn("scope-all", "Everything", Scope::All, cx))
-                            .child(scope_btn("scope-docs", "Documents", Scope::Documents, cx))
-                            .child(scope_btn("scope-meet", "Meetings", Scope::Meetings, cx)),
+                        segmented_track(cx)
+                            .child(
+                                segment_item("scope-all", "Everything", None, scope == Scope::All, cx).on_click(cx.listener(|this, _, _, cx| {
+                                    this.scope = Scope::All;
+                                    cx.notify();
+                                })),
+                            )
+                            .child(
+                                segment_item("scope-docs", "Documents", None, scope == Scope::Documents, cx).on_click(cx.listener(|this, _, _, cx| {
+                                    this.scope = Scope::Documents;
+                                    cx.notify();
+                                })),
+                            )
+                            .child(
+                                segment_item("scope-meet", "Meetings", None, scope == Scope::Meetings, cx).on_click(cx.listener(|this, _, _, cx| {
+                                    this.scope = Scope::Meetings;
+                                    cx.notify();
+                                })),
+                            ),
                     ),
             )
             .child(if self.turns.is_empty() {
-                let suggestion = |id: &'static str, text: &'static str, cx: &mut Context<Self>| {
-                    Button::new(id).outline().small().label(text).on_click(cx.listener(move |this, _, window, cx| {
-                        this.input.update(cx, |s, cx| s.set_value(text, window, cx));
-                        this.send(window, cx);
-                    }))
-                };
+                let has_data = !self.suggestions.is_empty();
                 card(cx)
                     .flex_1()
                     .min_h_0()
@@ -439,22 +471,36 @@ impl Render for ChatView {
                             .items_center()
                             .justify_center()
                             .gap_4()
-                            .child(empty_state(
-                                IconName::MessagesSquare,
-                                "Ask anything you have on file",
-                                "Answers come with numbered citations you can expand to the exact passage.",
-                                cx,
-                            ).h_auto())
                             .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .justify_center()
-                                    .gap_2()
-                                    .pb_8()
-                                    .child(suggestion("sug-1", "What did we decide in the last meeting?", cx))
-                                    .child(suggestion("sug-2", "Summarize the pricing tiers", cx))
-                                    .child(suggestion("sug-3", "What are the termination terms in our contracts?", cx)),
-                            ),
+                                empty_state(
+                                    IconName::MessagesSquare,
+                                    if has_data { "Ask about what you have on file" } else { "Nothing to ask about yet" },
+                                    if has_data {
+                                        "Answers come with numbered citations you can expand to the exact passage."
+                                    } else {
+                                        "Record a meeting or add documents in Knowledge, then ask questions about them here."
+                                    },
+                                    cx,
+                                )
+                                .h_auto(),
+                            )
+                            .when(has_data, |el| {
+                                el.child(
+                                    h_flex().flex_wrap().justify_center().gap_2().pb_8().children(
+                                        self.suggestions.iter().enumerate().map(|(i, text)| {
+                                            let q = text.clone();
+                                            Button::new(SharedString::from(format!("sug-{i}")))
+                                                .outline()
+                                                .small()
+                                                .label(text.clone())
+                                                .on_click(cx.listener(move |this, _, window, cx| {
+                                                    this.input.update(cx, |s, cx| s.set_value(q.clone(), window, cx));
+                                                    this.send(window, cx);
+                                                }))
+                                        }),
+                                    ),
+                                )
+                            }),
                     )
                     .into_any_element()
             } else {

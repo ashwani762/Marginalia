@@ -1,6 +1,6 @@
 //! Reusable visual building blocks.
 
-use super::theme::{hexa, palette, with_alpha, Palette};
+use super::theme::{hexa, palette, with_alpha, Palette, TypeScale};
 use crate::audio::{AudioMeters, WAVE_POINTS};
 use crate::engine::AudioSource;
 use crate::rag::store::DocKind;
@@ -536,6 +536,123 @@ pub fn level_meter(
                     .id(SharedString::from(format!("bar-{}-{}", label, i)))
             }),
         ))
+}
+
+/// Track for a segmented control: a sunken pill holding 2-4 mutually exclusive views.
+pub fn segmented_track(cx: &App) -> Div {
+    let p = pal(cx);
+    h_flex().gap_0p5().p_0p5().rounded(px(9.)).bg(p.surface_3).border_1().border_color(p.line)
+}
+
+/// One segment. The selected segment is *raised* (not a second accent fill), so the single
+/// solid accent on a screen stays reserved for the primary action. 28 px tall.
+pub fn segment_item(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    count: Option<usize>,
+    selected: bool,
+    cx: &App,
+) -> Stateful<Div> {
+    let p = pal(cx);
+    h_flex()
+        .id(id)
+        .h(px(28.))
+        .px_3()
+        .gap_1p5()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .cursor_pointer()
+        .when(selected, |el| {
+            el.bg(if p.dark { p.surface_4 } else { p.surface_2 })
+                .border_1()
+                .border_color(p.line)
+        })
+        .when(!selected, |el| el.border_1().border_color(with_alpha(p.line, 0.0)).hover(move |s| s.bg(with_alpha(p.text, 0.05))))
+        .child(
+            div()
+                .t_footnote()
+                .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                .text_color(if selected { p.text } else { p.text_dim })
+                .child(label.into()),
+        )
+        .when_some(count.filter(|n| *n > 0), |el, n| {
+            el.child(div().t_caption().text_color(p.text_faint).child(n.to_string()))
+        })
+}
+
+/// A selectable pill for choosing one item from a longer list (e.g. microphones).
+/// Selected = accent border + tint + accent text; 28 px tall.
+pub fn choice_chip(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool, cx: &App) -> Stateful<Div> {
+    let p = pal(cx);
+    h_flex()
+        .id(id)
+        .h(px(28.))
+        .px_3()
+        .gap_1p5()
+        .items_center()
+        .rounded_full()
+        .cursor_pointer()
+        .border_1()
+        .border_color(if selected { p.accent_2 } else { p.line_strong })
+        .bg(if selected { p.tonal() } else { with_alpha(p.text, 0.0) })
+        .hover(move |s| s.bg(if selected { p.tonal_hover() } else { with_alpha(p.text, 0.05) }))
+        .when(selected, |el| el.child(Icon::new(IconName::Check).xsmall().text_color(p.accent_2)))
+        .child(
+            div()
+                .t_footnote()
+                .font_weight(if selected { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                .text_color(if selected { p.accent_2 } else { p.text })
+                .child(label.into()),
+        )
+}
+
+/// Tonal (accent-tinted) button style for secondary-prominence actions.
+pub fn tonal_variant(cx: &App) -> gpui_kit::component::button::ButtonCustomVariant {
+    let p = pal(cx);
+    gpui_kit::component::button::ButtonCustomVariant::new(cx)
+        .color(p.tonal())
+        .foreground(p.accent_2)
+        .hover(p.tonal_hover())
+        .active(p.tonal_hover())
+}
+
+/// Compact "I am hearing you" indicator that fits at any width: a mic and a speaker
+/// glyph, each with three eased bars. Always shown while recording (status visibility).
+pub fn mini_meter(meters: Option<Arc<AudioMeters>>, cx: &App) -> Div {
+    let p = pal(cx);
+    let (mic, sys) = match &meters {
+        Some(m) => (m.smoothed_level(AudioSource::Microphone), m.smoothed_level(AudioSource::System)),
+        None => (0.0, 0.0),
+    };
+    let one = |icon: IconName, color: Hsla, level: f32, tag: &'static str| {
+        let db = 20.0 * level.max(1e-5).log10();
+        let v = ((db + 50.0) / 50.0).clamp(0.0, 1.0);
+        let active = v > 0.06;
+        h_flex()
+            .gap_1p5()
+            .items_center()
+            .child(Icon::new(icon).xsmall().text_color(if active { color } else { p.text_faint }))
+            .child(h_flex().gap_0p5().items_center().h(px(14.)).children([0.7f32, 1.0, 0.7].into_iter().enumerate().map(move |(i, w)| {
+                div()
+                    .id(SharedString::from(format!("mm-{tag}-{i}")))
+                    .w(px(3.))
+                    .h(px(3.0 + (v * w).powf(0.75) * 11.0))
+                    .rounded_full()
+                    .bg(with_alpha(color, if active { 0.5 + 0.5 * (v * w).min(1.0) } else { 0.25 }))
+            })))
+    };
+    h_flex()
+        .gap_3()
+        .items_center()
+        .px_2p5()
+        .py_1()
+        .rounded_full()
+        .bg(p.surface_3)
+        .border_1()
+        .border_color(p.line)
+        .child(one(IconName::Mic, p.mic, mic, "mic"))
+        .child(one(IconName::MonitorSpeaker, p.system, sys, "sys"))
 }
 
 /// Voice-memo style waveform with 3D perspective depth:

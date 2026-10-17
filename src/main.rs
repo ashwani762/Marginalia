@@ -67,7 +67,7 @@ fn main() {
     let app = gpui_kit::application().with_assets(AllAssets);
     app.run(move |cx| {
         gpui_kit::init(cx);
-        ui::theme::apply(settings.dark_mode, cx);
+        ui::theme::apply(settings.resolve_dark(cx.window_appearance()), cx);
         cx.activate(true);
 
         let bounds = Bounds::centered(None, size(px(1380.), px(880.)), cx);
@@ -79,10 +79,11 @@ fn main() {
         };
         let services2 = services.clone();
         let rx = events_rx.clone();
-        gpui_kit::open_window(options, cx, move |window, cx| {
+        let (handle, root) = gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| ui::Marginalia::new(services2, rx, window, cx))
         })
         .expect("open window");
+        ui::install_shortcuts(handle, root, cx);
 
         app::bootstrap(services.clone());
 

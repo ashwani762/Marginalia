@@ -495,7 +495,9 @@ fn main() {
         bindings_builder = bindings_builder
             .clang_arg(format!("--sysroot={}", tc.sysroot))
             .clang_arg(format!("-D__ANDROID_API__={}", tc.api))
-            .clang_arg("-D__ANDROID__");
+            .clang_arg("-D__ANDROID__")
+            // NDK r27+ headers refuse an unversioned triple.
+            .clang_arg(format!("--target={}{}", tc.arch_triple, tc.api));
 
         // Add include paths in correct order
         if let Some(ref builtin_includes) = clang_builtin_includes {
@@ -518,7 +520,8 @@ fn main() {
         if env::var("CARGO_SUBCOMMAND").as_deref() == Ok("ndk") {
             std::env::set_var(
                 "BINDGEN_EXTRA_CLANG_ARGS",
-                format!("--target={}", target_triple),
+                // NDK r27+ headers refuse an unversioned triple.
+                format!("--target={}{}", tc.arch_triple, tc.api),
             );
         }
     }

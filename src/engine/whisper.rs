@@ -138,7 +138,13 @@ fn load(cfg: &WhisperConfig) -> Result<Ctx> {
         ws::whisper_log_set(Some(quiet_log), std::ptr::null_mut());
         let mut params = ws::whisper_context_default_params();
         params.use_gpu = cfg.use_gpu;
-        params.flash_attn = cfg.use_gpu;
+        // Flash attention is on for the GPU, and on the phone's CPU too (13% faster there, measured, with the same output).
+        // MARGINALIA_FLASH=0 or 1 overrides it for measuring.
+        params.flash_attn = match std::env::var("MARGINALIA_FLASH").ok().as_deref() {
+            Some("1") => true,
+            Some("0") => false,
+            _ => cfg.use_gpu || crate::engine::gate::enabled(),
+        };
         let path = CString::new(cfg.model_path.to_string_lossy().as_bytes())?;
         let ctx = ws::whisper_init_from_file_with_params_no_state(path.as_ptr(), params);
         if ctx.is_null() {
@@ -179,6 +185,10 @@ pub fn spawn(cfg: WhisperConfig, out: Sender<Transcript>) -> Result<WhisperHandl
 }
 
 fn run_loop(ctx: Ctx, rx: Receiver<Job>, out: Sender<Transcript>, language: &mut String, threads: i32, seconds: Arc<AtomicU64>) {
+    // With the language left on auto, the first few finished sentences vote and the winner is kept for the
+    // rest of the recording. Whisper deciding again for every snippet flips between close languages (Hindi
+    // and Urdu, say) in the middle of a meeting.
+    let mut votes: Vec<String> = Vec::new();
     while let Ok(first) = rx.recv() {
         // Drain the queue: finals first; keep only the newest partial per source.
         let mut jobs = vec![first];
@@ -202,7 +212,10 @@ fn run_loop(ctx: Ctx, rx: Receiver<Job>, out: Sender<Transcript>, language: &mut
         for job in finals {
         match job {
             Job::Shutdown => return,
-            Job::SetLanguage(l) => *language = l,
+            Job::SetLanguage(l) => {
+                *language = l;
+                votes.clear();
+            }
             Job::Batch { pcm, reply } => {
                 let res = transcribe(&ctx, pcm, language, threads);
                 let _ = reply.send(res);
@@ -214,8 +227,31 @@ fn run_loop(ctx: Ctx, rx: Receiver<Job>, out: Sender<Transcript>, language: &mut
                 }
                 let started = Instant::now();
                 let dur = seg.t1 - seg.t0;
-                let utterances = match transcribe_with(&ctx, seg.pcm, language, threads, seg.partial) {
-                    Ok(u) => u,
+                let utterances = match transcribe_with(&ctx, seg.pcm, language, threads, seg.partial, true) {
+                    Ok((u, heard)) => {
+                        if !seg.partial && crate::engine::gate::enabled() && dur >= 1.5 {
+                            if let Some(h) = heard {
+                                votes.push(h);
+                                if votes.len() >= 3 {
+                                    let mut best: (&str, usize) = ("", 0);
+                                    for v in &votes {
+                                        let n = votes.iter().filter(|x| *x == v).count();
+                                        if n > best.1 {
+                                            best = (v.as_str(), n);
+                                        }
+                                    }
+                                    if best.1 * 3 >= votes.len() * 2 {
+                                        tracing::info!("language settled on {} ({} of {} sentences)", best.0, best.1, votes.len());
+                                        *language = best.0.to_string();
+                                        votes.clear();
+                                    } else if votes.len() >= 6 {
+                                        votes.remove(0);
+                                    }
+                                }
+                            }
+                        }
+                        u
+                    }
                     Err(e) => {
                         tracing::warn!("whisper failed: {e:#}");
                         continue;
@@ -236,11 +272,12 @@ fn run_loop(ctx: Ctx, rx: Receiver<Job>, out: Sender<Transcript>, language: &mut
 }
 
 fn transcribe(ctx: &Ctx, pcm: Vec<f32>, language: &str, threads: i32) -> Result<Vec<Utterance>> {
-    transcribe_with(ctx, pcm, language, threads, false)
+    transcribe_with(ctx, pcm, language, threads, false, false).map(|(u, _)| u)
 }
 
 /// `fast` trades a little accuracy for latency (provisional captions).
-fn transcribe_with(ctx: &Ctx, mut pcm: Vec<f32>, language: &str, threads: i32, fast: bool) -> Result<Vec<Utterance>> {
+/// Returns the utterances and, when the language was left to Whisper, the language it heard.
+fn transcribe_with(ctx: &Ctx, mut pcm: Vec<f32>, language: &str, threads: i32, fast: bool, live: bool) -> Result<(Vec<Utterance>, Option<String>)> {
     // whisper wants at least ~1 s of audio.
     let min_len = 16_000 + 1_600;
     if pcm.len() < min_len {
@@ -251,6 +288,7 @@ fn transcribe_with(ctx: &Ctx, mut pcm: Vec<f32>, language: &str, threads: i32, f
     } else {
         "en".to_string()
     };
+    let lang_auto = lang == "auto";
     let lang_c = CString::new(lang)?;
     unsafe {
         let mut p = ws::whisper_full_default_params(ws::WHISPER_SAMPLING_GREEDY);
@@ -271,13 +309,28 @@ fn transcribe_with(ctx: &Ctx, mut pcm: Vec<f32>, language: &str, threads: i32, f
             p.single_segment = true;
             p.no_speech_thold = 0.5;
         }
+        if live && crate::engine::gate::enabled() {
+            // Whisper's encoder always works on a 30 s window, so a 2 s snippet costs as much as 30 s
+            // of speech. Shrink the window to the snippet (50 frames per second plus some room): the
+            // work falls in proportion, which is what makes live captions keep up on a phone.
+            let secs = pcm.len() as f32 / 16_000.0;
+            p.audio_ctx = ((secs * 50.0).ceil() as i32 + 128).clamp(256, 1500);
+        }
         p.language = lang_c.as_ptr();
         p.detect_language = false;
         p.greedy.best_of = 1;
+        let _speech = crate::engine::gate::Speech::begin();
         let rc = ws::whisper_full_with_state(ctx.ctx, ctx.state, p, pcm.as_ptr(), pcm.len() as i32);
         if rc != 0 {
             return Err(anyhow!("whisper_full failed with code {rc}"));
         }
+        let heard = if lang_auto {
+            let id = ws::whisper_full_lang_id_from_state(ctx.state);
+            let c = ws::whisper_lang_str(id);
+            if id >= 0 && !c.is_null() { Some(CStr::from_ptr(c).to_string_lossy().to_string()) } else { None }
+        } else {
+            None
+        };
         let n = ws::whisper_full_n_segments_from_state(ctx.state);
         let mut out = Vec::with_capacity(n.max(0) as usize);
         for i in 0..n {
@@ -296,7 +349,7 @@ fn transcribe_with(ctx: &Ctx, mut pcm: Vec<f32>, language: &str, threads: i32, f
             let t1 = ws::whisper_full_get_segment_t1_from_state(ctx.state, i) as f64 / 100.0;
             out.push(Utterance { t0, t1, text });
         }
-        Ok(out)
+        Ok((out, heard))
     }
 }
 
@@ -318,6 +371,20 @@ pub fn clean_transcript(text: &str) -> String {
     ];
     if lowered.is_empty() || JUNK.iter().any(|j| lowered == *j) {
         return String::new();
+    }
+    // Silence and music sometimes come back as soup: one character repeated many times, or symbols from
+    // scripts nobody was speaking (Canadian syllabics, Ethiopic, Cherokee and the like).
+    let mut run = 0usize;
+    let mut prev = None;
+    for c in t.chars() {
+        if Some(c) == prev { run += 1; } else { run = 1; prev = Some(c); }
+        if run >= 8 && !c.is_whitespace() && c != '.' && c != '-' {
+            return String::new();
+        }
+        let u = c as u32;
+        if (0x1200..=0x139F).contains(&u) || (0x13A0..=0x13FF).contains(&u) || (0x1400..=0x167F).contains(&u) {
+            return String::new();
+        }
     }
     if t.chars().all(|c| !c.is_alphanumeric()) {
         return String::new();

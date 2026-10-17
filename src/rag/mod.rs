@@ -433,6 +433,20 @@ impl Kb {
         notes: &str,
         summary: &str,
     ) -> Result<usize> {
+        self.ingest_meeting_with(meeting_id, title, segments, notes, summary, &[])
+    }
+
+    /// Like [`Kb::ingest_meeting`], plus extra passages `(section label, text)` such as
+    /// descriptions of photos taken during the meeting.
+    pub fn ingest_meeting_with(
+        &self,
+        meeting_id: i64,
+        title: &str,
+        segments: &[(String, f64, f64, String)],
+        notes: &str,
+        summary: &str,
+        extras: &[(String, String)],
+    ) -> Result<usize> {
         let embed = self.embedder()?;
         let source = format!("meeting://{meeting_id}");
         if let Some(existing) = self.store.find_document_by_source(&source)? {
@@ -448,6 +462,11 @@ impl Kb {
         }
         if !notes.trim().is_empty() {
             items.push(("Notes".into(), notes.trim().to_string(), 0, 0));
+        }
+        for (section, text) in extras {
+            if !text.trim().is_empty() {
+                items.push((section.clone(), text.trim().to_string(), 0, 0));
+            }
         }
         if items.is_empty() {
             return Ok(0);
@@ -485,12 +504,50 @@ impl Kb {
         Ok(())
     }
 
+    /// Embed every passage again with the current embedding model, then swap the index in one step.
+    /// Used when the model that built the vectors is not the one that will answer questions.
+    pub fn reembed_all(&self, mut progress: impl FnMut(usize, usize)) -> Result<usize> {
+        let embed = self.embedder()?;
+        let docs = self.store.list_documents()?;
+        let total: usize = docs.iter().map(|d| d.chunk_count.max(0) as usize).sum();
+        let mut done = 0usize;
+        for d in &docs {
+            let rows = self.store.doc_chunk_texts(d.id)?;
+            for batch in rows.chunks(16) {
+                let texts: Vec<String> = batch
+                    .iter()
+                    .map(|(_, section, text)| {
+                        let t = if section.is_empty() { d.title.clone() } else { format!("{} › {}", d.title, section) };
+                        format_document(&t, text)
+                    })
+                    .collect();
+                let vecs = embed.embed(texts, EmbedKind::Raw)?;
+                let items: Vec<(i64, Vec<f32>)> = batch.iter().map(|(id, _, _)| *id).zip(vecs).collect();
+                self.store.set_chunk_embeddings(&items)?;
+                done += batch.len();
+                progress(done, total);
+            }
+        }
+        let mut fresh = VectorIndex::new();
+        for (id, doc, section, v) in self.store.all_embeddings()? {
+            fresh.add_grouped(id, &v, section_group(doc, &section));
+        }
+        *self.index.write() = fresh;
+        Ok(done)
+    }
+
     pub fn documents(&self) -> Result<Vec<Document>> {
         self.store.list_documents()
     }
 
     /// Hybrid search. `k` final results; returns hits best-first.
     pub fn search(&self, query: &str, k: usize, scope: Scope) -> Result<Vec<Hit>> {
+        self.search_in(query, k, scope, None)
+    }
+
+    /// Like [`Kb::search`], limited to the documents in `folder` when one is given. The limit is
+    /// applied before ranking, so a small folder is never crowded out by a large library.
+    pub fn search_in(&self, query: &str, k: usize, scope: Scope, folder: Option<i64>) -> Result<Vec<Hit>> {
         let query = query.trim();
         if query.is_empty() || self.index.read().is_empty() {
             return Ok(vec![]);
@@ -499,8 +556,24 @@ impl Kb {
         let embed = self.embedder()?;
         let qv = embed.embed_one(query, EmbedKind::Query)?;
         let pool = (k * 10).max(40);
-        let dense = self.index.read().search_routed(&qv, pool, 12);
-        let lexical = self.store.bm25(query, pool).unwrap_or_default();
+        let allowed = match folder {
+            Some(f) => Some(self.store.chunk_ids_in_folder(f)?),
+            None => None,
+        };
+        if let Some(a) = &allowed {
+            if a.is_empty() {
+                return Ok(vec![]);
+            }
+        }
+        let dense = match &allowed {
+            Some(a) => self.index.read().search_among(&qv, pool, a),
+            None => self.index.read().search_routed(&qv, pool, 12),
+        };
+        let mut lexical = self.store.bm25(query, if allowed.is_some() { pool * 12 } else { pool }).unwrap_or_default();
+        if let Some(a) = &allowed {
+            lexical.retain(|(id, _)| a.contains(id));
+            lexical.truncate(pool);
+        }
 
         // Reciprocal rank fusion (dense weighted a little higher).
         const RRF_K: f32 = 60.0;

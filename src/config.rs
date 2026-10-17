@@ -47,6 +47,15 @@ pub enum WhisperModel {
     LargeTurbo,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Appearance {
+    /// Follow the operating system.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoteStyle {
     Standard,
@@ -63,7 +72,9 @@ pub struct Settings {
     pub language: String,
     pub mic_device: Option<String>,
     pub capture_system_audio: bool,
+    /// Kept for settings files written before `appearance` existed.
     pub dark_mode: bool,
+    pub appearance: Appearance,
     pub note_style: NoteStyle,
     pub live_assistance: bool,
     pub chunk_tokens: usize,
@@ -83,6 +94,7 @@ impl Default for Settings {
             mic_device: None,
             capture_system_audio: true,
             dark_mode: true,
+            appearance: Appearance::System,
             note_style: NoteStyle::Standard,
             live_assistance: true,
             chunk_tokens: 220,
@@ -94,6 +106,15 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Resolve the theme for the current OS appearance.
+    pub fn resolve_dark(&self, system: gpui_kit::WindowAppearance) -> bool {
+        match self.appearance {
+            Appearance::Light => false,
+            Appearance::Dark => true,
+            Appearance::System => matches!(system, gpui_kit::WindowAppearance::Dark | gpui_kit::WindowAppearance::VibrantDark),
+        }
+    }
+
     pub fn load(paths: &Paths) -> Self {
         std::fs::read_to_string(&paths.settings_path)
             .ok()

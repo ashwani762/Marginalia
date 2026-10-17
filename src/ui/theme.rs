@@ -28,6 +28,8 @@ pub struct Palette {
     pub success: Hsla,
     pub warning: Hsla,
     pub danger: Hsla,
+    /// Fill for solid danger controls (white label >= 4.5:1).
+    pub danger_fill: Hsla,
     pub mic: Hsla,
     pub system: Hsla,
     pub dark: bool,
@@ -51,7 +53,8 @@ pub fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
 pub fn palette(dark: bool) -> Palette {
     if dark {
         Palette {
-            accent: hex(0x7C6CF6),
+            // accent = fill (white label 4.9:1); accent_2 = ink for text/glyphs (6.8:1)
+            accent: hex(0x6A58F0),
             accent_2: hex(0xA78BFA),
             accent_3: hex(0x22D3EE),
             glow: hexa(0x7C6CF6, 0.50),
@@ -64,10 +67,11 @@ pub fn palette(dark: bool) -> Palette {
             highlight: hexa(0xFFFFFF, 0.06),
             text: hex(0xEDF0F7),
             text_dim: hex(0x9AA4B8),
-            text_faint: hex(0x5F6A82),
+            text_faint: hex(0x8794AB), // was 5F6A82 (3.2:1); now >= 5.0:1 on every surface
             success: hex(0x34D399),
             warning: hex(0xFBBF24),
             danger: hex(0xF87171),
+            danger_fill: hex(0xD33A3A),
             mic: hex(0x67E8F9),
             system: hex(0xC4B5FD),
             dark: true,
@@ -76,7 +80,7 @@ pub fn palette(dark: bool) -> Palette {
         // "Paper": warm gallery neutrals, ink for actions, pigments used sparingly.
         Palette {
             accent: hex(0x151413),   // Ink
-            accent_2: hex(0xB4533A), // Terracotta
+            accent_2: hex(0x9C442D), // Terracotta ink (text-safe, >= 5.2:1)
             accent_3: hex(0x1F3FBF), // Klein blue
             glow: hexa(0xB4533A, 0.18),
             surface: hex(0xF6F3EE),   // Paper
@@ -88,18 +92,26 @@ pub fn palette(dark: bool) -> Palette {
             highlight: hexa(0xFFFFFF, 0.8),
             text: hex(0x151413),       // Ink
             text_dim: hex(0x4A4642),   // Graphite
-            text_faint: hex(0x8F887E), // Stone
-            success: hex(0x7C8A6E),    // Sage
-            warning: hex(0xC8962E),    // Ochre
+            text_faint: hex(0x645E55), // Stone, deepened from 8F887E (2.9:1) to >= 4.7:1
+            success: hex(0x55624A),    // Sage ink (pigment 7C8A6E was 3.0:1)
+            warning: hex(0x80590E),    // Ochre ink (pigment C8962E was 2.2:1)
             danger: hex(0xA23B2A),
+            danger_fill: hex(0xA23B2A),
             mic: hex(0x1F3FBF),
-            system: hex(0xB4533A),
+            system: hex(0x9C442D),
             dark: false,
         }
     }
 }
 
 impl Palette {
+    /// Tonal fill for secondary-prominence controls (accent at low alpha).
+    pub fn tonal(&self) -> Hsla {
+        with_alpha(self.accent_2, if self.dark { 0.16 } else { 0.12 })
+    }
+    pub fn tonal_hover(&self) -> Hsla {
+        with_alpha(self.accent_2, if self.dark { 0.24 } else { 0.18 })
+    }
     /// Headline face: Inter Display on graphite, a serif on paper.
     pub fn display_font(&self) -> &'static str {
         if self.dark {
@@ -242,6 +254,11 @@ pub fn apply(dark: bool, cx: &mut App) {
         theme.radius = p.radius_sm();
         theme.radius_lg = p.radius();
         theme.shadow = p.dark;
+        // Toasts sit bottom-right so they never cover page actions (top-right).
+        theme.notification.placement = Anchor::BottomRight;
+        theme.notification.margins = gpui_kit::base::Edges { top: px(16.), right: px(20.), bottom: px(20.), left: px(20.) };
+        theme.notification.width = px(340.);
+        theme.notification.max_items = 3;
         let white = hex(0xFFFFFF);
         let c = &mut theme.colors;
         c.background = p.surface;
@@ -250,8 +267,8 @@ pub fn apply(dark: bool, cx: &mut App) {
         c.muted = p.surface_3;
         c.muted_foreground = p.text_dim;
         c.primary = p.accent;
-        c.primary_hover = p.accent_2;
-        c.primary_active = p.accent;
+        c.primary_hover = if p.dark { hex(0x5F4BE8) } else { hex(0x2B2926) };
+        c.primary_active = if p.dark { hex(0x5440D8) } else { hex(0x000000) };
         c.primary_foreground = white;
         c.accent = p.surface_3;
         c.accent_foreground = p.text;
@@ -265,17 +282,16 @@ pub fn apply(dark: bool, cx: &mut App) {
         c.button_active = p.line_strong;
         c.button_foreground = p.text;
         c.button_primary = p.accent;
-        c.button_primary_hover = p.accent_2;
-        c.button_primary_active = p.accent;
+        c.button_primary_hover = if p.dark { hex(0x5F4BE8) } else { hex(0x2B2926) };
+        c.button_primary_active = if p.dark { hex(0x5440D8) } else { hex(0x000000) };
         c.button_primary_foreground = white;
         c.button_secondary = p.surface_3;
         c.button_secondary_hover = p.surface_4;
         c.button_secondary_active = p.line_strong;
         c.button_secondary_foreground = p.text;
-        c.button_danger = p.danger;
-        c.button_danger_hover = with_alpha(p.danger, 0.85);
-        c.button_primary_hover = if p.dark { p.accent_2 } else { hex(0x2B2926) };
-        c.button_danger_active = p.danger;
+        c.button_danger = p.danger_fill;
+        c.button_danger_hover = if p.dark { hex(0xC22F2F) } else { hex(0x8A2F20) };
+        c.button_danger_active = if p.dark { hex(0xAA2626) } else { hex(0x75281B) };
         c.button_danger_foreground = white;
         c.button_success = p.success;
         c.button_success_foreground = hex(0x062B22);
@@ -332,4 +348,51 @@ pub fn apply(dark: bool, cx: &mut App) {
         c.drag_border = p.accent;
     });
     cx.refresh_windows();
+}
+
+
+/// Marginalia type scale (px / line-height). See DESIGN.md section 3.2.
+pub trait TypeScale: Styled + Sized {
+    /// 12/16 — timestamps, eyebrows. Never smaller.
+    fn t_caption(self) -> Self {
+        self.text_size(px(12.)).line_height(px(16.))
+    }
+    /// 13/18 — helper text.
+    fn t_footnote(self) -> Self {
+        self.text_size(px(13.)).line_height(px(18.))
+    }
+    /// 14.5/22 — UI body.
+    fn t_body(self) -> Self {
+        self.text_size(px(14.5)).line_height(px(22.))
+    }
+    /// 16/26 — surfaces people read or write for minutes (notes, summaries).
+    fn t_writing(self) -> Self {
+        self.text_size(px(16.)).line_height(px(26.))
+    }
+    /// 18/24 — panel titles.
+    fn t_title3(self) -> Self {
+        self.text_size(px(18.)).line_height(px(24.))
+    }
+    /// 22/28 — page titles.
+    fn t_title2(self) -> Self {
+        self.text_size(px(22.)).line_height(px(28.))
+    }
+    /// 28/32 — meeting title.
+    fn t_title1(self) -> Self {
+        self.text_size(px(28.)).line_height(px(32.))
+    }
+    /// 36/41 — hero only; leading 1.15.
+    fn t_display(self) -> Self {
+        self.text_size(px(36.)).line_height(px(41.))
+    }
+}
+impl<T: Styled + Sized> TypeScale for T {}
+
+/// Motion tokens. See DESIGN.md section 3.4.
+pub mod motion {
+    use std::time::Duration;
+    pub const MICRO: Duration = Duration::from_millis(120);
+    pub const STANDARD: Duration = Duration::from_millis(200);
+    pub const EMPHASIS: Duration = Duration::from_millis(320);
+    pub const PAGE: Duration = Duration::from_millis(480);
 }

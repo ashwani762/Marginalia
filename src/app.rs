@@ -24,6 +24,7 @@ pub enum GenTarget {
     Card { card: u64, gen: u64 },
     Chat(u64),
     Summary(i64),
+    Title(i64),
     QuestionScan(u64),
 }
 

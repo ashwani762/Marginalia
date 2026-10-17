@@ -104,3 +104,20 @@ src/
 
 Data lives in `~/.local/share/marginalia/` (`marginalia.sqlite3`, `settings.json`, `models/`);
 override the root with `MARGINALIA_DATA=/path`.
+
+## Keyboard
+
+| Keys | Action |
+|---|---|
+| Ctrl+N | Start recording |
+| Ctrl+Enter | Start or stop recording |
+| Ctrl+K | Command palette |
+| Ctrl+F | Search meetings |
+| Ctrl+1 … 5 | Meetings, Knowledge, Ask, Stats, Settings |
+| Ctrl+Shift+T | Toggle transcript |
+| Ctrl+, | Settings |
+
+## Design
+
+The UI follows the design system in [DESIGN.md](DESIGN.md): principles, the UX audit with fixes,
+colour and type tokens with measured contrast, motion, components and interaction patterns.
