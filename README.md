@@ -83,9 +83,15 @@ A job that fails moves to the next node and an answer cut off halfway carries on
 | AI on the phone | Gemma 4 E2B and EmbeddingGemma 2 on Google LiteRT-LM (GPU first), whisper.cpp for speech, sherpa-onnx for speakers | `app/`, `core/`, `vendor/` |
 | Wire protocol and trust | Rust, QUIC (quinn), pinned certificates, pairing codes | `compute-node/proto/` |
 | Compute node | Rust, tokio, llama.cpp with CUDA or Vulkan | `compute-node/node/` |
-| Tray icon | Rust, `ksni` on Linux, `tray-icon` on Windows, `egui` details panel | `compute-node/tray/` |
+| Tray icon | Rust, `ksni` on Linux, `tray-icon` on Windows (beta), `egui` details panel | `compute-node/tray/` |
 
 ## Quick start
+
+| Platform | Support |
+| --- | --- |
+| Phone app, Android 14 or newer | Supported |
+| Compute node on Linux (Ubuntu tested) | Supported |
+| Compute node on Windows 11 | **Beta**, builds and runs but is not fully tested yet |
 
 ### The phone app
 
@@ -167,7 +173,7 @@ compute-node/
 scripts/        every script, grouped by use
   app/          build the phone core, fetch libraries, stage and push models (bash)
   node/         build and install the compute node on Linux (bash)
-  windows/      setup, verify, dev, build, status and uninstall for the compute node (PowerShell)
+  windows/      setup, verify, dev, build, status and uninstall for the compute node (PowerShell, beta)
 vendor/         ggml and whisper.cpp used by core/
 docs/           architecture, development, plans, screenshots
 ```
@@ -199,7 +205,7 @@ cargo test -p marginalia-node-tray      # tray icon logic
 | --- | --- |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Pieces, job routing, failover, diagrams |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Building the app and the node, debug intents, conventions |
-| [docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md) | Start here when working on Windows |
+| [docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md) | Start here when working on Windows (beta) |
 | [compute-node/README.md](compute-node/README.md) | Using and running a node |
 | [compute-node/DESIGN.md](compute-node/DESIGN.md) | Protocol and the planned cluster of nodes |
 | [compute-node/STATUS.md](compute-node/STATUS.md) | What is checked, what is not, next steps |
