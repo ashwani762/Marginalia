@@ -1,123 +1,71 @@
-# Marginalia
+# Marginalia for Android
 
-Notes in the margins of your meetings. A local-first meeting companion for the desktop, written in
-Rust with [GPUI](https://www.gpui.rs/). It records your meetings, expands shorthand notes while people
-are still talking, surfaces answers from your own documents with exact citations, and lets you ask
-questions across everything afterwards. Nothing leaves your machine: no Python, no helper processes,
-no cloud.
+The phone version of Marginalia: record a meeting, jot as it happens, and get notes, a summary and
+answers from your own documents. **Everything runs on the phone.** Nothing is sent anywhere.
 
-## What it does
+## How it is built
 
-- **Transcription** — microphone *and* system audio (PipeWire monitor through the ALSA plugin, so any
-  meeting app or browser tab works), voice-activity segmented, transcribed in-process by whisper.cpp
-  (`large-v3-turbo` on GPU, `small` on CPU), tagged *You* / *Others*, merged into readable sentences.
-- **Live Enhance** — type fragments; Gemma 4 rewrites them into complete notes from the live transcript,
-  in *Standard* or *Concise* style, and keeps them current.
-- **Live Assistance** — questions raised in the conversation are detected (heuristics + Gemma), answered
-  from your knowledge base, and shown as context cards with the exact passage and locator.
-- **Knowledge base** — PDF, Word, PowerPoint, Excel, OpenDocument, EPUB, RTF, Markdown, text, HTML,
-  subtitles, code, web links, **images** (captioned by Gemma 4 vision) and **audio files** (transcribed).
-  Everything is parsed in Rust.
-- **Ask** — retrieval-augmented chat over documents and past meetings with numbered citations and
-  expandable sources. Prompts are token-budgeted so long chats never overflow the context window.
-- **Summaries** — when a recording stops: Summary / Key decisions / Action items / Open questions, and
-  the meeting itself becomes searchable.
-- **Two themes** — Graphite (dark) and Paper (warm gallery neutrals, serif display face).
-
-## Retrieval
-
-Built to stay fast and precise as the corpus grows:
-
-| Stage | What happens |
+| Part | What runs it |
 | --- | --- |
-| Ingest | structure-aware extraction → heading path per block → sentence packing to ~220 tokens with sentence overlap → `title › section \| text` contextual embeddings, batched 32 sequences per llama batch |
-| Routing | every section keeps a running centroid; a query scores sections first, then scores every chunk of the best sections exactly, unioned with the global top-k (Matryoshka 256-d prefilter above 4k chunks) |
-| Lexical | SQLite FTS5 (porter + unicode61) BM25 over text, section and title |
-| Fusion | Reciprocal Rank Fusion plus an evidence bonus for a decisive keyword hit or a very close vector |
-| Late rescoring | the sentences of the top candidates are embedded in one batch; the best sentence sharpens the chunk score (MaxSim-style) and becomes the **quoted citation** |
-| Diversity | MMR with a same-document penalty, then neighbour chunks are appended for the LLM |
+| Screens, gestures, notifications | Kotlin and Jetpack Compose (`app/`) |
+| Gemma 4 E2B: notes, summaries, answers, reading photos | Google **LiteRT-LM** on the GPU (CPU as a fallback), through a Kotlin bridge |
+| EmbeddingGemma 2 (270M): search | Google **LiteRT-LM** `EmbeddingEngine`, on the CPU |
+| Speech to text | **whisper.cpp** (small, multilingual) on the CPU |
+| Search, documents, meetings, folders, long-meeting logic | Rust (`core/`) |
 
-A query over a few thousand passages takes about 50 ms end to end on a desktop GPU.
+The Kotlin and Rust halves talk through four JNI calls (`app.marginalia.Native`) that carry JSON and raw
+audio.
 
-## Models (downloaded on first launch into `~/.local/share/marginalia/models`)
+### Why Whisper is not on LiteRT
 
-| Role | Model | Size |
-| --- | --- | --- |
-| Embeddings | `ggml-org/embeddinggemma-2-GGUF` · Q8_0 (+ vision projector) | 310 MB + 555 MB |
-| Chat / notes / captions | `ggml-org/gemma-4-E2B-it-GGUF` · Q4_0 (+ vision projector), or E4B | 2.8 GB + 557 MB |
-| Speech | `ggerganov/whisper.cpp` · `large-v3-turbo` q5_0 (default) or `small` q8_0 | 574 MB / 264 MB |
+The LiteRT Whisper exports use a fixed 30 second window and a decoder that re-runs the whole sequence
+at every step. Live captions need the opposite: short snippets, decoded fast. whisper.cpp with a window
+trimmed to the snippet decodes 2 to 3 seconds of speech in about 0.7 seconds on the test phone (about
+0.3x real time). The two speech models built for LiteRT-LM (Qwen3-ASR 1.7B and Fun-ASR-Nano) are far
+larger and give nothing back in speed. If a streaming LiteRT speech model appears, it plugs in behind the
+same `WhisperHandle`.
 
-All repositories are public. `HF_TOKEN` in the environment is honoured for gated repos.
-
-Models load with fallback tiers (full GPU offload → partial → CPU) and the chat model is moved to CPU
-automatically if a GPU generation ever fails at runtime; a notification tells you when that happens.
-
-## Build & run
-
-Requirements: Rust 1.85+, a C/C++ toolchain, CMake, and for the default GPU build the CUDA toolkit
-(tested with an RTX 4060, CUDA 13.2). On Linux: `libxkbcommon-dev`, `libwayland-dev`, `libvulkan-dev`,
-`libfontconfig-dev`, `libasound2-dev`, PipeWire with `pipewire-alsa`, and GTK 3 dev headers for the file
-picker. Fonts used if installed: Inter, Inter Display, EB Garamond, DejaVu Sans Mono.
+## Build
 
 ```bash
-cargo run --release                        # CUDA build (default feature)
-cargo run --release --no-default-features  # CPU-only
+# 1. Native libraries (needs the Android NDK and the Rust Android targets; cargo-ndk)
+scripts/build-native.sh            # arm64 (baseline + i8mm) and x86_64 (emulator)
+
+# 2. Models
+scripts/stage-models.sh            # link the models so Gradle embeds them in the APK
+./gradlew assembleRelease          # embedded models (about 3.1 GB)
+
+# or, for development: a small APK and models pushed over USB
+./gradlew assembleDebug -Pmarginalia.embedModels=false
+scripts/push-models.sh
 ```
 
-`.cargo/config.toml` pins `CUDAARCHS=89` (Ada); change it for other GPUs.
+Models used: `gemma-4-E2B-it.litertlm` (litert-community/gemma-4-E2B-it-litert-lm),
+`embeddinggemma-2-text-270m.litertlm` (litert-community/embeddinggemma-2-text-270m-litert-lm),
+`ggml-small-q8_0.bin` (whisper.cpp).
 
-### Headless mode
+## Things worth knowing
+
+- **Real time.** Live speech gets the processor first. Whisper decodes each snippet in well under its
+  own duration, so captions follow speech by under a second. Gemma runs on the GPU, so it does not
+  compete for the CPU cores speech needs.
+- **Closing the app.** Notes are written by a foreground service. Swipe the app away and the work
+  continues, and a notification says when it is done. If Android kills the process anyway, the next launch
+  finishes any meeting that was left half done.
+- **Long meetings.** Notes on finished stretches are written while recording, merged at the end, and
+  the summary is built from those, so nothing earlier is lost to the context window.
+- **Folders.** Meetings and documents can be filed in folders; Ask and Live Assistance can be limited to
+  one folder.
+
+See `AUDIT.md` for the design and testing notes.
+
+## Tools
 
 ```bash
-marginalia ingest <paths|urls…>   # add to the knowledge base
-marginalia search <query>         # hybrid retrieval with scores and quotes
-marginalia ask <question>         # cited answer
-marginalia caption <image>        # Gemma 4 vision description
-marginalia transcribe <audio>     # transcribe a file
-marginalia listen <seconds>       # live mic + system capture
-marginalia docs                   # list indexed documents
+scripts/fetch-sherpa.sh     # the speaker separation library (about 50 MB, not committed)
+cd core && cargo test --lib # Rust tests, on the host
+./gradlew :app:testDebugUnitTest
 ```
 
-## How the native pieces fit
-
-- `vendor/llama-cpp-sys-2` is the published crate with a current llama.cpp checkout (the crates.io
-  bundle predates the `gemma-embedding2` architecture) and `tools/mtmd` for vision.
-- `vendor/whisper.cpp` is compiled by `build.rs` against the same ggml that llama.cpp uses, so the
-  process carries exactly one ggml and one CUDA context.
-- `vendor/syslibs` holds a symlink used only when `libxkbcommon-x11-dev` is not installed.
-
-## Layout
-
-```
-src/
-  main.rs / cli.rs      app bootstrap, window, headless commands
-  app.rs                services, event bus, model bootstrap, GPU fallbacks
-  config.rs / models.rs settings, model catalog, resumable downloader
-  engine/               llama.cpp backend: embed.rs (EmbeddingGemma 2 + vision), llm.rs (Gemma 4,
-                        streaming, priority queues, images), whisper.rs (+ whisper_sys.rs bindings)
-  audio/                cpal capture (mic + PipeWire sink monitor), decode.rs (symphonia), VAD
-  rag/                  extract.rs, chunk.rs, store.rs (SQLite + FTS5), vector.rs (routed index),
-                        mod.rs (ingest, hybrid search, late rescoring)
-  ui/                   GPUI views: meeting (list + live + review), knowledge, chat, stats, settings;
-                        theme.rs (Graphite / Paper), components.rs, anim.rs
-```
-
-Data lives in `~/.local/share/marginalia/` (`marginalia.sqlite3`, `settings.json`, `models/`);
-override the root with `MARGINALIA_DATA=/path`.
-
-## Keyboard
-
-| Keys | Action |
-|---|---|
-| Ctrl+N | Start recording |
-| Ctrl+Enter | Start or stop recording |
-| Ctrl+K | Command palette |
-| Ctrl+F | Search meetings |
-| Ctrl+1 … 5 | Meetings, Knowledge, Ask, Stats, Settings |
-| Ctrl+Shift+T | Toggle transcript |
-| Ctrl+, | Settings |
-
-## Design
-
-The UI follows the design system in [DESIGN.md](DESIGN.md): principles, the UX audit with fixes,
-colour and type tokens with measured contrast, motion, components and interaction patterns.
+Development switches (debug builds): a `tune.properties` file in the app's files folder accepts `mtp=true|false|auto`,
+`maxTokens=2048` and `embedGpu=true`. Debug intents are listed in `MainActivity.kt`.

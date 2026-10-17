@@ -1,9 +1,0 @@
-[env]
-# Ada Lovelace (RTX 4060). CMake reads CUDAARCHS as the default CMAKE_CUDA_ARCHITECTURES.
-CUDAARCHS = "89"
-CMAKE_BUILD_PARALLEL_LEVEL = "16"
-
-[target.x86_64-unknown-linux-gnu]
-# libxkbcommon-x11-dev is not installed on this machine; link against the
-# runtime library through a local symlink instead (vendor/syslibs).
-rustflags = ["-L", "native=vendor/syslibs"]

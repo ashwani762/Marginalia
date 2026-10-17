@@ -1,2 +1,12 @@
-/target
-*.log
+.gradle/
+build/
+app/build/
+local.properties
+app/src/main/jniLibs/
+models-stage/
+core/target*/
+*.apk
+*.aab
+.idea/
+app/libs/
+.kotlin/

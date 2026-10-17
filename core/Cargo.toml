@@ -1,0 +1,51 @@
+[package]
+name = "marginalia-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Marginalia for Android: the on-device engine (whisper.cpp, RAG, meetings) behind a small JNI surface"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "marginalia_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+symphonia = { version = "0.6", features = ["mp3", "aac", "isomp4", "ogg", "vorbis", "flac", "wav", "pcm"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+rayon = "1"
+pdf-extract = "0.12"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+quick-xml = "0.42"
+html2text = "0.17"
+ureq = { version = "3", features = ["rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+blake3 = "1"
+regex = "1"
+unicode-segmentation = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_log-sys = "0.3"
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }
+cmake = "0.1"
+bindgen = "0.72"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 8
+strip = "symbols"
+panic = "unwind"
