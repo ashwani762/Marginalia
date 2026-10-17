@@ -8,14 +8,26 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 bin="$root/target/release/marginalia-node"
+tray="$root/target/release/marginalia-node-tray"
 
 if [[ ! -x "$bin" ]]; then
   echo "No binary at $bin. Run compute-node/build.sh first." >&2
   exit 1
 fi
 
+# The tray icon is small and quick to build (pure Rust, no system packages). Build it when it is missing.
+if [[ ! -x "$tray" ]] && command -v cargo >/dev/null; then
+  (cd "$root" && cargo build --release -p marginalia-node-tray) || echo "Could not build the tray icon, installing the node without it." >&2
+fi
+
 mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user" "$HOME/.local/share/marginalia/models"
 install -m 755 "$bin" "$HOME/.local/bin/marginalia-node"
+if [[ -x "$tray" ]]; then
+  mkdir -p "$HOME/.config/autostart"
+  install -m 755 "$tray" "$HOME/.local/bin/marginalia-node-tray"
+  sed "s|@HOME@|$HOME|g" "$here/marginalia-node-tray.desktop" > "$HOME/.config/autostart/marginalia-node-tray.desktop"
+  chmod 644 "$HOME/.config/autostart/marginalia-node-tray.desktop"
+fi
 install -m 644 "$here/marginalia-node.service" "$HOME/.config/systemd/user/marginalia-node.service"
 
 systemctl --user daemon-reload
@@ -23,6 +35,12 @@ systemctl --user enable --now marginalia-node.service
 
 echo
 echo "Installed to ~/.local/bin/marginalia-node and started as a user service."
+if [[ -x "$HOME/.local/bin/marginalia-node-tray" ]]; then
+  echo "The tray icon is installed and starts at login (~/.config/autostart/marginalia-node-tray.desktop)."
+  echo "Start it now with: ~/.local/bin/marginalia-node-tray &"
+  echo "On Ubuntu it shows in the top bar through the AppIndicator extension, which is on by default."
+  echo "If you do not see it: sudo apt install gnome-shell-extension-appindicator, then log out and in."
+fi
 echo "Models go in ~/.local/share/marginalia/models (the node will not start without them)."
 echo "Logs:    journalctl --user -u marginalia-node -f"
 echo "Pair:    ~/.local/bin/marginalia-node pair"

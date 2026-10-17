@@ -911,6 +911,10 @@ impl Core {
                 r.set_enabled(args.get("on").and_then(Value::as_bool).unwrap_or(true));
                 Ok(json!({}))
             }
+            "nodes.network" => {
+                r.network(args.get("up").and_then(Value::as_bool).unwrap_or(true));
+                Ok(json!({}))
+            }
             "nodes.refresh" => {
                 r.refresh();
                 Ok(r.list())
@@ -2402,7 +2406,13 @@ impl Core {
 
     /// A model call for background work: low priority, and retried when something the person is
     /// waiting for takes the model first.
-    fn gen_job(&self, messages: Vec<ChatMessage>, params: GenParams, mut on_text: impl FnMut(&str)) -> Result<(String, GenStats)> {
+    fn gen_job(&self, messages: Vec<ChatMessage>, params: GenParams, on_text: impl FnMut(&str)) -> Result<(String, GenStats)> {
+        self.gen_job_with(true, messages, params, on_text)
+    }
+
+    /// [`Self::gen_job`], optionally without taking the write-up turn. Parts written side by side on
+    /// several home computers hold the turn once for all of them instead.
+    fn gen_job_with(&self, gated: bool, messages: Vec<ChatMessage>, params: GenParams, mut on_text: impl FnMut(&str)) -> Result<(String, GenStats)> {
         for _ in 0..400 {
             // A meeting being recorded has the phone to itself: transcription must keep up in real time.
             let mut told = false;
@@ -2416,7 +2426,7 @@ impl Core {
             if told {
                 self.emit(json!({"type": "wrap_hold", "waiting": false}));
             }
-            let _turn = self.finish_gate.lock();
+            let _turn = gated.then(|| self.finish_gate.lock());
             let (t, st) = self.gen_blocking(messages.clone(), params.clone(), Priority::Low, Arc::new(AtomicBool::new(false)), &mut on_text)?;
             if st.preempted {
                 std::thread::sleep(Duration::from_millis(1500));
@@ -2474,6 +2484,68 @@ impl Core {
         };
         let total_parts = sections.len() + remaining_parts;
         let mut done_parts = sections.len();
+        // With several home computers up, the parts are written side by side, one per computer.
+        let workers = crate::remote::get().map(|r| r.chat_parallelism()).unwrap_or(0).min(4);
+        if workers >= 2 && remaining_parts >= 2 {
+            let mut todo: Vec<(usize, usize)> = Vec::new();
+            let mut i = covered.min(lines.len());
+            while i < lines.len() {
+                let to = window_end(lines, i, SECTION_WINDOW_TOKENS);
+                todo.push((i, to));
+                i = to;
+            }
+            let workers = workers.min(todo.len());
+            tracing::info!("writing {} parts on {} computers at once", todo.len(), workers);
+            let results: parking_lot::Mutex<(Vec<Option<Section>>, usize)> = parking_lot::Mutex::new((vec![None; todo.len()], 0));
+            let next = AtomicUsize::new(0);
+            let finished = AtomicUsize::new(done_parts);
+            let failure: parking_lot::Mutex<Option<anyhow::Error>> = parking_lot::Mutex::new(None);
+            let _turn = self.finish_gate.lock();
+            std::thread::scope(|sc| {
+                for _ in 0..workers {
+                    sc.spawn(|| loop {
+                        if failure.lock().is_some() {
+                            break;
+                        }
+                        let k = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&(from, to)) = todo.get(k) else { break };
+                        let text = window_text(lines, from, to, SECTION_WINDOW_TOKENS + 200);
+                        let r = self.gen_job_with(false, vec![ChatMessage::system(SECTION_SYSTEM), ChatMessage::user(format!("Part of the meeting:\n{text}\n\nWrite the notes for this part."))], GenParams { max_tokens: 260, temperature: 0.2, ..Default::default() }, |_| {});
+                        match r {
+                            Ok((t, _)) => {
+                                let sec = Section { from, to, t0: lines[from].t0, t1: lines[to - 1].t1, text: t.trim().to_string() };
+                                let mut g = results.lock();
+                                g.0[k] = Some(sec);
+                                // Parts are saved in order, so a restart picks up right after the last one saved.
+                                while g.1 < g.0.len() {
+                                    let Some(s) = g.0[g.1].clone() else { break };
+                                    let _ = self.kb.store.save_section(mid, s.from, s.to, s.t0, s.t1, &s.text);
+                                    g.1 += 1;
+                                }
+                                drop(g);
+                                let n = finished.fetch_add(1, Ordering::Relaxed) + 1;
+                                self.wrap(mid, "summarizing", &format!("Summarizing part {n} of {total_parts}"), 30.0 + 50.0 * n as f32 / total_parts.max(1) as f32);
+                            }
+                            Err(e) => {
+                                *failure.lock() = Some(e);
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+            drop(_turn);
+            let (written, saved) = results.into_inner();
+            // Whatever was saved in order is kept even if a later part failed.
+            for sec in written.into_iter().take(saved.max(0)).flatten() {
+                covered = sec.to;
+                sections.push(sec);
+            }
+            if let Some(e) = failure.into_inner() {
+                return Err(e);
+            }
+            done_parts = sections.len();
+        }
         while covered < lines.len() {
             let to = window_end(lines, covered, SECTION_WINDOW_TOKENS);
             let text = window_text(lines, covered, to, SECTION_WINDOW_TOKENS + 200);

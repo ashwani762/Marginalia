@@ -252,21 +252,61 @@ fn call_generator(method: &str, sig: &str, args: &[JValue]) -> anyhow::Result<()
     Ok(())
 }
 
+/// The job now using the phone's own model: whether it is background work, and how to stop it.
+static LOCAL_HOLDER: Mutex<Option<(bool, Arc<std::sync::atomic::AtomicBool>)>> = parking_lot::const_mutex(None);
+static LOCAL_LLM: Mutex<()> = parking_lot::const_mutex(());
+static LOCAL_EMBED: Mutex<()> = parking_lot::const_mutex(());
+
+struct LocalSlot {
+    _guard: parking_lot::MutexGuard<'static, ()>,
+}
+
+impl Drop for LocalSlot {
+    fn drop(&mut self) {
+        *LOCAL_HOLDER.lock() = None;
+    }
+}
+
+fn lock_local_llm(req: &GenRequest) -> LocalSlot {
+    use crate::engine::llm::Priority;
+    // An urgent request asks background work holding the phone's model to stop and retry later.
+    if req.priority == Priority::High {
+        if let Some((true, cancel)) = LOCAL_HOLDER.lock().as_ref() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+    let guard = LOCAL_LLM.lock();
+    *LOCAL_HOLDER.lock() = Some((req.priority == Priority::Low, req.cancel.clone()));
+    LocalSlot { _guard: guard }
+}
+
 /// A chat model whose generations run in Kotlin (LiteRT-LM), behind high and low
 /// priority queues.
 fn external_llm() -> LlmHandle {
     LlmHandle::external(Arc::new(|req: &GenRequest| -> anyhow::Result<GenStats> {
         // A home computer takes the job when one is paired, on, and reachable. If it cannot start
         // the job, the phone does it itself, as it always did.
-        if let Some(done) = crate::remote::get().and_then(|r| r.chat(req)) {
-            return done;
+        let mut messages = req.messages.clone();
+        let mut seam: Option<crate::remote::SeamFilter> = None;
+        if let Some(outcome) = crate::remote::get().and_then(|r| r.chat(req)) {
+            match outcome {
+                crate::remote::ChatOutcome::Done(done) => return done,
+                // Every computer dropped out partway: the phone finishes the answer from the words already sent.
+                crate::remote::ChatOutcome::Continue { partial } => {
+                    seam = Some(crate::remote::SeamFilter::new(&partial));
+                    messages = crate::remote::continuation(&messages, &partial);
+                }
+            }
         }
+        // The phone's own model runs one job at a time. Jobs that went to home computers never get here,
+        // so they run side by side. An urgent job asks a background one on the phone to give way.
+        let _local = lock_local_llm(req);
         let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = crossbeam_channel::unbounded::<(i32, String)>();
         REQUESTS.lock().get_or_insert_with(HashMap::new).insert(id, tx);
         let role = |r: Role| match r { Role::System => "system", Role::User => "user", Role::Assistant => "assistant" };
         let body = json!({
-            "messages": req.messages.iter().map(|m: &ChatMessage| json!({"role": role(m.role), "text": m.content})).collect::<Vec<_>>(),
+            "messages": messages.iter().map(|m: &ChatMessage| json!({"role": role(m.role), "text": m.content})).collect::<Vec<_>>(),
             "images": req.images.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "max_tokens": req.params.max_tokens, "temperature": req.params.temperature,
             "top_p": req.params.top_p, "top_k": req.params.top_k,
@@ -280,8 +320,14 @@ fn external_llm() -> LlmHandle {
             let mut stats = GenStats::default();
             loop {
                 match rx.recv_timeout(std::time::Duration::from_millis(30)) {
-                    Ok((0, t)) => (req.on_event)(GenEvent::Token(t)),
+                    Ok((0, t)) => match seam.as_mut() {
+                        Some(f) => f.push(&t, &mut |x| (req.on_event)(GenEvent::Token(x.to_string()))),
+                        None => (req.on_event)(GenEvent::Token(t)),
+                    },
                     Ok((1, s)) => {
+                        if let Some(f) = seam.as_mut() {
+                            f.finish(&mut |x| (req.on_event)(GenEvent::Token(x.to_string())));
+                        }
                         let v: Value = serde_json::from_str(&s).unwrap_or(json!({}));
                         stats.prompt_tokens = v["prompt_tokens"].as_u64().unwrap_or(0) as usize;
                         stats.generated_tokens = v["generated_tokens"].as_u64().unwrap_or(0) as usize;
@@ -317,6 +363,7 @@ fn external_embed() -> EmbedHandle {
         if let Some(v) = crate::remote::get().and_then(|r| r.embed(&texts)) {
             return Ok(v);
         }
+        let _local = LOCAL_EMBED.lock();
         let vm = VM.get().ok_or_else(|| anyhow::anyhow!("no JVM"))?;
         let emb = wait_for(&EMBEDDER, "the search model")?;
         let mut env = vm.attach_current_thread()?;

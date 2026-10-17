@@ -14,6 +14,8 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -33,6 +35,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -59,9 +62,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalDensity
@@ -93,20 +98,37 @@ fun AskScreen(vm: AppVm, onCite: (Source) -> Unit) {
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val barSpace by animateDpAsState(if (imeVisible || win.rail) 0.dp else 96.dp + MiniBar.height, Motion.soft(), label = "ask-bar")
 
-    // Follow the answer as it streams, unless the reader has scrolled up.
+    // Follow the answer as it streams. The reader takes control by dragging and gets it back at the bottom.
+    var follow by remember { mutableStateOf(true) }
     val last = turns.lastOrNull()
-    LaunchedEffect(turns.size, last?.answer?.length?.div(60), last?.state) {
-        if (turns.isNotEmpty()) {
-            val atEnd = list.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= list.layoutInfo.totalItemsCount - 2 } ?: true
-            if (atEnd) list.animateScrollToItem(list.layoutInfo.totalItemsCount.coerceAtLeast(1) - 1)
+    LaunchedEffect(list) {
+        list.interactionSource.interactions.collect {
+            when (it) {
+                is DragInteraction.Start -> follow = false
+                is DragInteraction.Stop, is DragInteraction.Cancel -> if (!list.canScrollForward) follow = true
+            }
         }
     }
+    LaunchedEffect(list) {
+        // Also covers the answer card growing a little after the text arrived.
+        snapshotFlow { list.canScrollForward }.collect { more ->
+            if (!more) follow = true
+            else if (follow && !list.isScrollInProgress) list.scrollBy(1_000_000f)
+        }
+    }
+    LaunchedEffect(turns.size, last?.answer?.length?.div(60), last?.state) {
+        if (turns.isNotEmpty() && follow && !list.isScrollInProgress) list.scrollBy(1_000_000f)
+    }
 
+    val ask = { q: String ->
+        follow = true
+        vm.ask(q)
+    }
     val send = {
         val q = input.trim()
         if (q.isNotEmpty() && ready && !busy) {
             haptic.performHapticFeedback(HapticFeedbackType.ContextClick)
-            vm.ask(q)
+            ask(q)
             input = ""
         }
     }
@@ -114,42 +136,41 @@ fun AskScreen(vm: AppVm, onCite: (Source) -> Unit) {
     AskScopeHost(vm, showScope) { showScope = false }
     CappedPane(max = 760.dp) {
         Column(Modifier.fillMaxSize().imePadding()) {
-            Box(Modifier.weight(1f)) {
-                LazyColumn(state = list, contentPadding = PaddingValues(bottom = 12.dp), modifier = Modifier.fillMaxSize()) {
-                    item(key = "title") { LargeTitle("Ask", null, showSubtitle = false) }
-                    item(key = "sub") {
-                        SubtitleRow(if (turns.isEmpty()) "Answers come with their sources" else null)
-                    }
-                    item(key = "scope") {
-                        AskScopeBar(
-                            label = scopeLabel(scope, folders.firstOrNull { it.id == askFolder }),
-                            onScope = { showScope = true },
-                            showClear = turns.isNotEmpty(), onClear = { vm.clearChat() },
-                        )
-                    }
-                    if (turns.isEmpty()) {
-                        item(key = "empty") {
-                            Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
-                                if (suggestions.isEmpty()) {
-                                    EmptyState(
-                                        if (askFolder != null) "Nothing in this folder yet" else "Ask your own knowledge",
-                                        if (askFolder != null) "Add meetings or files to this folder and the AI will answer from them."
-                                        else "Record a meeting or add a document, then ask about it. Everything is answered on this phone.",
-                                    )
-                                } else {
-                                    Text("TRY ASKING", style = type.micro, modifier = Modifier.padding(bottom = 8.dp))
-                                    suggestions.forEach { s -> SuggestionRow(s) { vm.ask(s) } }
-                                }
+            // Fixed bar: it never scrolls and the chat below it never slides underneath.
+            Row(
+                Modifier.fillMaxWidth().statusBarsPadding().height(if (win.shortH) 48.dp else 56.dp).padding(start = 20.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Ask", style = type.title, modifier = Modifier.weight(1f))
+                AnimatedVisibility(turns.isNotEmpty(), enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
+                    IconAction(Icons.Rounded.DeleteSweep, "Clear conversation") { vm.clearChat() }
+                }
+            }
+            AskScopeBar(
+                label = scopeLabel(scope, folders.firstOrNull { it.id == askFolder }),
+                onScope = { showScope = true },
+                showClear = turns.isNotEmpty(), onClear = { vm.clearChat() },
+            )
+            Box(Modifier.fillMaxWidth().height(1.dp).background(if (list.canScrollBackward) p.line else Color.Transparent))
+            LazyColumn(state = list, contentPadding = PaddingValues(top = 4.dp, bottom = 12.dp), modifier = Modifier.weight(1f).fillMaxWidth()) {
+                if (turns.isEmpty()) {
+                    item(key = "empty") {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
+                            if (suggestions.isEmpty()) {
+                                EmptyState(
+                                    if (askFolder != null) "Nothing in this folder yet" else "Ask your own knowledge",
+                                    if (askFolder != null) "Add meetings or files to this folder and the AI will answer from them."
+                                    else "Record a meeting or add a document, then ask about it. Everything is answered on this phone.",
+                                )
+                            } else {
+                                Text("Answers come with their sources", style = type.callout, modifier = Modifier.padding(bottom = 14.dp))
+                                Text("TRY ASKING", style = type.micro, modifier = Modifier.padding(bottom = 8.dp))
+                                suggestions.forEach { s -> SuggestionRow(s) { ask(s) } }
                             }
                         }
                     }
-                    items(turns, key = { it.id }) { t -> TurnView(t, onCite, Modifier.animateItem()) }
                 }
-                TopBarOverlay("Ask", list, Modifier.align(Alignment.TopCenter)) {
-                    AnimatedVisibility(turns.isNotEmpty(), enter = fadeIn() + scaleIn(), exit = fadeOut() + scaleOut()) {
-                        IconAction(Icons.Rounded.DeleteSweep, "Clear conversation") { vm.clearChat() }
-                    }
-                }
+                items(turns, key = { it.id }) { t -> TurnView(t, onCite, Modifier.animateItem()) }
             }
             Composer(
                 value = input, onChange = { input = it }, busy = busy, enabled = ready,

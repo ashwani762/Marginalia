@@ -90,6 +90,7 @@ pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>,
     loop {
         match wire::read_frame::<ChatEvent>(&mut recv).await?.context("closed")? {
             ChatEvent::Queued { ahead } => println!("chat queued behind {ahead}"),
+            ChatEvent::Working => {}
             ChatEvent::Token(s) => {
                 first.get_or_insert_with(|| t.elapsed());
                 text.push_str(&s);

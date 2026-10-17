@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
 # The phone core is built by scripts/build-native.sh (cargo-ndk), the node with a plain `cargo build -p marginalia-node`.
-members = ["compute-node/proto", "compute-node/node", "core"]
+# The tray icon is built on its own: `cargo build --release -p marginalia-node-tray`.
+members = ["compute-node/proto", "compute-node/node", "compute-node/tray", "core"]
 default-members = ["compute-node/proto", "compute-node/node"]
 
 [patch.crates-io]

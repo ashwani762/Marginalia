@@ -55,6 +55,9 @@ pub struct ChatRequest {
 pub enum ChatEvent {
     /// The node has other work first. `ahead` is how many jobs are in front of this one.
     Queued { ahead: u32 },
+    /// Sent every couple of seconds while the node is busy with the job and has nothing else to say.
+    /// It lets the phone tell a slow node from a lost one: silence for a few seconds means lost.
+    Working,
     Token(String),
     /// `elapsed_ms` is how long the node spent generating, so the phone can show the node's own speed.
     Done { prompt_tokens: u32, generated_tokens: u32, elapsed_ms: u32 },
@@ -130,4 +133,7 @@ pub struct StatusReply {
     pub served: u64,
     pub uptime_s: u64,
     pub pending: Vec<PendingPhone>,
+    /// The node keeps its models loaded but turns new chat and search jobs away. Last on purpose:
+    /// a reader of the older layout ignores the extra byte.
+    pub paused: bool,
 }

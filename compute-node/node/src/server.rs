@@ -40,6 +40,11 @@ pub struct Shared {
     /// instead of being let in. By default any phone on the network that its owner trusts this
     /// computer from may use it. The node keeps nothing, so a phone that gets in can only borrow its speed.
     pub locked: std::sync::atomic::AtomicBool,
+    /// Paused: models stay loaded, new chat and search jobs are turned away, running jobs finish.
+    /// Kept in memory only, so a restart is never paused.
+    pub paused: AtomicBool,
+    /// Woken by the `shutdown` command to make the node stop.
+    pub stop: tokio::sync::Notify,
 }
 
 impl Shared {
@@ -104,8 +109,18 @@ impl Shared {
         KnockReply::Pending { node_name: self.name.clone() }
     }
 
+    /// Jobs accepted and not finished yet (the one being worked on plus those waiting).
+    pub fn in_flight(&self) -> u32 {
+        self.host.chat_jobs.load(Ordering::Relaxed) + self.host.embed_jobs.load(Ordering::Relaxed)
+    }
+
+    /// Chat and search jobs finished since the node started.
+    pub fn served(&self) -> u64 {
+        self.metrics.chat_jobs.load(Ordering::Relaxed) + self.metrics.embed_jobs.load(Ordering::Relaxed)
+    }
+
     fn status(&self) -> StatusReply {
-        let running = self.host.chat_jobs.load(Ordering::Relaxed) + self.host.embed_jobs.load(Ordering::Relaxed);
+        let running = self.in_flight();
         StatusReply {
             proto: marginalia_proto::PROTO_VERSION,
             node_name: self.name.clone(),
@@ -114,9 +129,10 @@ impl Shared {
             running: running.min(1),
             waiting: running.saturating_sub(1),
             clients: self.store.list().len() as u32,
-            served: self.metrics.chat_jobs.load(Ordering::Relaxed) + self.metrics.embed_jobs.load(Ordering::Relaxed),
+            served: self.served(),
             uptime_s: self.metrics.uptime_s(),
             pending: self.pending_list(),
+            paused: self.paused.load(Ordering::Relaxed),
         }
     }
 }
@@ -245,6 +261,10 @@ fn try_pair(sh: &Shared, conn: &quinn::Connection, fp: &str, name: String, proof
 }
 
 async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut quinn::SendStream, client: crate::state::Client) -> Result<()> {
+    if sh.paused.load(Ordering::Relaxed) {
+        wire::write_frame(send, &ChatEvent::Error("paused".into())).await?;
+        return Ok(());
+    }
     let Some(llm) = sh.host.llm.clone() else {
         wire::write_frame(send, &ChatEvent::Error("This computer does not serve chat.".into())).await?;
         return Ok(());
@@ -293,7 +313,12 @@ async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut qui
             let _ = tx.send(out);
         }),
     });
-    while let Some(ev) = rx.recv().await {
+    let mut beat = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        let ev = tokio::select! {
+            ev = rx.recv() => match ev { Some(e) => e, None => break },
+            _ = beat.tick() => ChatEvent::Working,
+        };
         let last = matches!(ev, ChatEvent::Done { .. } | ChatEvent::Error(_));
         if wire::write_frame(send, &ev).await.is_err() {
             // The phone went away or gave up: stop generating for nobody.
@@ -308,6 +333,10 @@ async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut qui
 }
 
 async fn embed(sh: &Arc<Shared>, r: marginalia_proto::EmbedRequest, send: &mut quinn::SendStream, client: crate::state::Client) -> Result<()> {
+    if sh.paused.load(Ordering::Relaxed) {
+        wire::write_frame(send, &EmbedReply::Error("paused".into())).await?;
+        return Ok(());
+    }
     let Some(handle) = sh.host.embed.clone() else {
         wire::write_frame(send, &EmbedReply::Error("This computer does not serve search.".into())).await?;
         return Ok(());
@@ -319,14 +348,27 @@ async fn embed(sh: &Arc<Shared>, r: marginalia_proto::EmbedRequest, send: &mut q
     }
     let texts = r.texts;
     let (count, t0) = (texts.len() as u64, Instant::now());
-    let out = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>> {
+    let mut work = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<f32>>> {
         let mut all = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(32) {
             all.extend(handle.embed(chunk.to_vec(), engine::EmbedKind::Raw)?);
         }
         Ok(all)
-    })
-    .await;
+    });
+    let mut beat = tokio::time::interval(Duration::from_secs(2));
+    let out = loop {
+        tokio::select! {
+            r = &mut work => break r,
+            // Tells the phone this node is still alive while a large batch runs.
+            _ = beat.tick() => {
+                if wire::write_frame(send, &EmbedReply::Queued { ahead: 0 }).await.is_err() {
+                    // The phone is gone. The batch finishes in the background and its result is dropped.
+                    jobs.fetch_sub(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+            }
+        }
+    };
     jobs.fetch_sub(1, Ordering::Relaxed);
     sh.metrics.embed_done(&client.fp, &client.name, count, t0.elapsed().as_millis() as u64, matches!(out, Ok(Ok(_))));
     let reply = match out {

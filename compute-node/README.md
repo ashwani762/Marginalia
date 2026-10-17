@@ -62,6 +62,8 @@ At start the node runs a short measurement and reports tokens per second for cha
 marginalia-node run [--port 47615] [--name NAME] [--models DIR] [--cpu]
 marginalia-node pair
 marginalia-node status
+marginalia-node pause | resume
+marginalia-node stop
 marginalia-node revoke <id or name>
 marginalia-node probe <addr:port> [--code CODE]
 ```
@@ -71,12 +73,35 @@ marginalia-node probe <addr:port> [--code CODE]
 - `status` prints what the running node serves, its measured speed and the paired phones with their ids.
 - `stats` prints how much work the node has done: jobs, failures, tokens and passages, speed, per phone totals and the size and duration of recent jobs. Numbers only, never any content. The counters live in memory and restart from zero with the node.
 - `approve` / `deny` answer a phone that is waiting (when locked). `lock` / `unlock` switch between the two modes.
+- `pause` makes the node turn new chat and search jobs away (the phone gets "paused" and uses its own speed instead). The models stay loaded, jobs that are already running finish, and `status` shows `"paused": true`. `resume` takes jobs again. A pause lives in memory only, so a restarted node is never paused.
+- `stop` stops the running node cleanly: it stops accepting phones and new jobs, lets running jobs finish for up to 10 seconds, leaves the network (mDNS) and exits with status 0. Ctrl-C and a system stop request (SIGTERM) do the same. With the systemd unit a clean exit is not restarted, use `systemctl --user start marginalia-node` to bring it back.
 - `revoke` forgets a phone. Use the id from `status` or the phone's name. That phone is a stranger again and has to pair anew.
 - `probe` behaves like a phone: connects to an address, optionally pairs with `--code`, and tries each job type. It is for checking that a node works, for example from another computer.
 
-`pair`, `status` and `revoke` talk to the running node through a control channel on `127.0.0.1:47616` (change with `--admin-port`). It only listens on this computer, so these commands must be run on the same machine as `run`.
+`pair`, `status`, `pause`, `stop`, `revoke` and the tray icon talk to the running node through a control channel on `127.0.0.1:47616` (change with `--admin-port`). It only listens on this computer, so these commands must be run on the same machine as `run`.
+
+`status` prints one JSON object with the node name, whether it is paused or locked, `running_jobs`, `waiting_jobs`, `served` (chat and search jobs since start), `uptime_s`, the number of `phones`, the models and measured speed, the paired phones and the addresses the node can be reached at. `stats` adds failures and per phone totals. Both hold counts, names and timings only.
 
 State (identity and paired list) lives in `~/.config/marginalia-node` on Linux. Change with `--state-dir`. Delete that folder to make the node a new device that no phone knows.
+
+## Tray icon
+
+`marginalia-node-tray` is a small separate program that puts the node in the Ubuntu top bar (or the Windows system tray). It talks only to the node's local control channel (`127.0.0.1:47616`, change with `--admin-port`), polls it every 2 seconds and shows counts and names. It never sees anything a phone asked.
+
+```sh
+cargo build --release -p marginalia-node-tray   # pure Rust, no system packages
+compute-node/packaging/install-linux.sh         # installs it and adds it to ~/.config/autostart
+marginalia-node-tray --print                    # prints the menu as text and exits, to check the setup
+```
+
+- The icon is a ring with a dot: green when the node is running, amber when it is paused, grey when it is not running. Hover for a line such as "falcon: running, 12 jobs served, 2 phones".
+- Click it to open the menu. It starts with read-only lines: the node's name and state, jobs served and paired phones, the chat and search models, the measured speed, uptime, jobs and failures, whether new phones must be allowed first, each paired phone with its job counts and the addresses the node can be reached at. The pairing code is never shown there.
+- Then the actions: **Pause** or **Resume**, **Lock new phones** or **Unlock**, **Show pairing code** (a notification with the code and the addresses, nothing is copied), **Show details** (the same as `marginalia-node stats`, in a zenity window if zenity is installed, otherwise a notification) and **Stop node**. **Quit tray** only closes the icon.
+- When the node is not running the menu offers **Start node**. On Linux it starts the `marginalia-node` user service if that is installed, otherwise it runs `marginalia-node run` from next to the tray or from PATH.
+- On Ubuntu the top bar shows the icon through the AppIndicator extension, which ships and is on by default. On a plain GNOME without it: `sudo apt install gnome-shell-extension-appindicator` and log in again. The icon uses the StatusNotifierItem protocol over D-Bus (the `ksni` crate), so no GTK libraries are needed.
+- Messages use `notify-send`, so the `libnotify-bin` package must be installed (Ubuntu has it).
+- On Windows it uses the `tray-icon` crate. That part could not be built or tried where it was written. See `packaging/windows.md` for starting it at login.
+- It is built on its own and is not part of the default workspace build.
 
 ## Firewall and network
 
@@ -110,5 +135,6 @@ These are plans, not features:
 
 - `proto/` shared wire protocol, identity and pairing (crate `marginalia-proto`), with tests in `proto/tests/`.
 - `node/` the node program.
+- `tray/` the tray icon program (crate `marginalia-node-tray`).
 - `vendor/` a patched `llama-cpp-sys-2` that includes support for EmbeddingGemma 2.
-- `packaging/` systemd unit, Linux install script, Windows notes, CPU-only Dockerfile.
+- `packaging/` systemd unit, tray autostart entry, Linux install script, Windows notes, CPU-only Dockerfile.

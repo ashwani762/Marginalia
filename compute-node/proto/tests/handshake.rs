@@ -591,6 +591,7 @@ async fn pair_and_status_replies_round_trip() {
         served: 42,
         uptime_s: 3600,
         pending: vec![PendingPhone { id: "0123456789abcdef".into(), name: "Pixel".into(), waited_s: 7 }],
+        paused: true,
     }, StatusReply::default()]))
     .await;
 }

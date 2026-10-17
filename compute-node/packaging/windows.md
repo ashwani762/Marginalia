@@ -24,9 +24,23 @@ There is no installer and no service wrapper yet. The simplest reliable way is t
 
 The node runs in a console window. To keep it out of sight, tick **Run whether user is logged on or not** in General (Windows then asks for your password), or minimise the window.
 
+## Tray icon
+
+`marginalia-node-tray.exe` puts a small status icon in the system tray (the area by the clock, maybe behind the `^` arrow). Click it to see what the node is doing. The menu can pause or resume the node, lock new phones, show a pairing code, show details and stop the node. When the node is not running it offers "Start node".
+
+Note: the Windows version of the tray is written but has not been compiled or run yet. Please report anything that does not work.
+
+1. Build it with `cargo build --release -p marginalia-node-tray` and copy `marginalia-node-tray.exe` into the same folder as `marginalia-node.exe`. "Start node" looks for `marginalia-node.exe` next to the tray, then in PATH.
+2. Start it at login with the Startup folder: press Win+R, type `shell:startup`, and put a shortcut to `marginalia-node-tray.exe` in the folder that opens. (Task Scheduler works too: another task with trigger **At log on**, Start a program, no arguments.)
+3. If you gave the node a different `--admin-port`, give the tray the same: add `--admin-port 47620` to the shortcut's Target, after the path.
+
+The tray only talks to the node on this computer (127.0.0.1) and only receives counts and names. A pairing code or the details open in a small message box.
+
+When you pick "Stop node" the node finishes running jobs (up to 10 seconds) and exits cleanly, so Task Scheduler's "restart if the task fails" does not bring it back. Use "Start node" in the tray, or run the task again.
+
 ## Notes
 
-- `pair`, `status` and `revoke` must be run on the same computer as the running node.
+- `pair`, `status`, `pause`, `resume`, `stop` and `revoke` must be run on the same computer as the running node.
 - If the computer sleeps, the node is unreachable. Set **Sleep** to Never while plugged in if you want it always available.
 - Files: identity and paired phones live in `%APPDATA%\marginalia-node`.
-- To stop it: End the task in Task Scheduler, or close its window.
+- To stop it: `marginalia-node.exe stop`, or "Stop node" in the tray, or End the task in Task Scheduler, or close its window.

@@ -1,0 +1,13 @@
+# Autostart entry for the tray icon. install-linux.sh copies this to ~/.config/autostart/ and fills in
+# @HOME@ with your home folder (a .desktop file does not expand ~ or $HOME).
+# By hand: replace @HOME@ yourself, or use Exec=marginalia-node-tray if ~/.local/bin is in your PATH at login.
+[Desktop Entry]
+Type=Application
+Name=Marginalia node tray
+Comment=Shows the Marginalia compute node in the top bar and lets you pause, lock and stop it
+Exec=@HOME@/.local/bin/marginalia-node-tray
+Terminal=false
+Icon=network-server
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3

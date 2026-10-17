@@ -141,3 +141,41 @@ impl Metrics {
         })
     }
 }
+
+pub fn ago(secs: u64) -> String {
+    match secs {
+        s if s < 90 => format!("{s} s"),
+        s if s < 5400 => format!("{} min", s / 60),
+        s => format!("{:.1} h", s as f64 / 3600.0),
+    }
+}
+
+/// The text `marginalia-node stats` prints (and the tray shows). Numbers and names only.
+pub fn report(v: &Value) -> String {
+    let n = |x: &Value| x.as_u64().unwrap_or(0);
+    let f = |x: &Value| x.as_f64().unwrap_or(0.0);
+    let (c, s) = (&v["chat"], &v["search"]);
+    let mut out = format!(
+        "{} up for {}\n\nChat    {} jobs, {} failed, {} tokens written, {:.0} tokens a second while working\nSearch  {} jobs, {} failed, {} passages, {:.0} passages a second while working\nPaired {} times, {} unknown phones turned away\n",
+        v["name"].as_str().unwrap_or("node"), ago(n(&v["uptime_s"])),
+        n(&c["jobs"]), n(&c["errors"]), n(&c["generated_tokens"]), f(&c["tokens_per_s"]),
+        n(&s["jobs"]), n(&s["errors"]), n(&s["passages"]), f(&s["passages_per_s"]),
+        n(&v["pairings"]), n(&v["refused"]),
+    );
+    let state = match (v["paused"].as_bool().unwrap_or(false), v["locked"].as_bool().unwrap_or(false)) {
+        (true, true) => "Paused. New phones must be allowed first.",
+        (true, false) => "Paused. New jobs are turned away.",
+        (false, true) => "Running. New phones must be allowed first.",
+        (false, false) => "Running.",
+    };
+    out.push_str(&format!("{state}\n"));
+    out.push_str("\nPhones\n");
+    for p in v["phones"].as_array().into_iter().flatten() {
+        out.push_str(&format!("  {} ({}): {} chat, {} search\n", p["name"].as_str().unwrap_or(""), p["id"].as_str().unwrap_or(""), n(&p["chat_jobs"]), n(&p["search_jobs"])));
+    }
+    out.push_str("\nLatest jobs (newest first, sizes only)\n");
+    for r in v["recent"].as_array().into_iter().flatten().take(10) {
+        out.push_str(&format!("  {} {} {} ms, {}{}\n", r["kind"].as_str().unwrap_or(""), if r["ok"].as_bool().unwrap_or(false) { "ok    " } else { "failed" }, n(&r["ms"]), n(&r["size"]), if r["kind"] == "chat" { " tokens" } else { " passages" }));
+    }
+    out
+}

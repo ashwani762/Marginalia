@@ -14,6 +14,7 @@ pub struct Options {
     pub chat_model: Option<PathBuf>,
     pub embed_model: Option<PathBuf>,
     pub cpu_only: bool,
+    pub ctx: u32,
 }
 
 pub struct Host {
@@ -74,7 +75,7 @@ impl Host {
         let llm = if chat_path.is_file() {
             let mut found = None;
             for layers in tiers(opts.cpu_only) {
-                let cfg = crate::engine::llm::LlmConfig { model_path: chat_path.clone(), mmproj_path: None, gpu_layers: layers, use_gpu: layers > 0, n_ctx: 16384, threads: threads() };
+                let cfg = crate::engine::llm::LlmConfig { model_path: chat_path.clone(), mmproj_path: None, gpu_layers: layers, use_gpu: layers > 0, n_ctx: opts.ctx, threads: threads() };
                 match crate::engine::llm::spawn(backend.clone(), cfg) {
                     Ok(h) => {
                         tracing::info!("chat model loaded ({} GPU layers)", layers);

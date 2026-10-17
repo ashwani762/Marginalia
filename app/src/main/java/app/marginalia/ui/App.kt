@@ -109,6 +109,23 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.unit.Velocity
+import kotlin.math.abs
 import androidx.core.content.ContextCompat
 import app.marginalia.AppVm
 import app.marginalia.Boot
@@ -126,7 +143,7 @@ fun App(vm: AppVm) {
     MarginaliaTheme(prefs.appearance) {
         val boot by vm.boot.collectAsState()
         androidx.compose.runtime.CompositionLocalProvider(LocalWin provides rememberWin()) {
-            Box(Modifier.fillMaxSize().background(pal.surface)) {
+            KeyboardGuard(Modifier.fillMaxSize().background(pal.surface)) {
                 // On its side a phone has a cutout or the navigation bar at one edge: keep the app clear of both.
                 Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout.union(WindowInsets.navigationBars).only(WindowInsetsSides.Horizontal))) {
                     val introduced by vm.introduced.collectAsState()
@@ -135,6 +152,69 @@ fun App(vm: AppVm) {
                         else -> if (introduced) Shell(vm) else Onboarding(onDone = vm::finishIntro)
                     }
                 }
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Keyboard: one place that lets it get out of the way on every screen
+// ------------------------------------------------------------------------------------------------
+
+/**
+ * The root of the app. A tap on empty space, or dragging a list, hides the keyboard, and a small
+ * button above the keyboard hides it too. Taps that a text field or a button handles are left alone.
+ * Bottom sheets live in their own window, so they keep the system behaviour.
+ */
+@Composable
+private fun KeyboardGuard(modifier: Modifier, content: @Composable BoxScope.() -> Unit) {
+    val p = pal
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focus = LocalFocusManager.current
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    val visible by rememberUpdatedState(imeVisible)
+    val hide by rememberUpdatedState({ keyboard?.hide(); focus.clearFocus() })
+    val slop = with(density) { 16.dp.toPx() }
+    val connection = remember(slop) {
+        object : NestedScrollConnection {
+            var travelled = 0f
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && visible) {
+                    travelled += abs(available.y)
+                    if (travelled > slop) { travelled = 0f; keyboard?.hide() }
+                }
+                return Offset.Zero
+            }
+            override suspend fun onPreFling(available: Velocity): Velocity { travelled = 0f; return Velocity.Zero }
+        }
+    }
+    Box(
+        modifier
+            .nestedScroll(connection)
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    // Last in line: only a touch that nothing below claimed counts as a tap on empty space.
+                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)
+                    if (down.isConsumed || !visible) return@awaitEachGesture
+                    val up = waitForUpOrCancellation(PointerEventPass.Final)
+                    if (up != null && !up.isConsumed) hide()
+                }
+            },
+    ) {
+        content()
+        AnimatedVisibility(
+            visible = imeVisible,
+            enter = fadeIn() + scaleIn(),
+            exit = fadeOut() + scaleOut(),
+            // Clear of the note box and the Ask box, which sit right on the keyboard.
+            modifier = Modifier.align(Alignment.BottomEnd).imePadding().padding(end = 8.dp, bottom = 128.dp),
+        ) {
+            Box(Modifier.size(48.dp).pressable(pressedScale = 0.88f, onClick = { hide() }), contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier.size(36.dp).shadow(4.dp, CircleShape).clip(CircleShape).background(p.surface3.copy(alpha = 0.96f)).border(1.dp, p.line, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Rounded.KeyboardArrowDown, "Hide keyboard", tint = p.textDim, modifier = Modifier.size(22.dp)) }
             }
         }
     }

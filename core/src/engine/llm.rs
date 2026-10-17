@@ -169,6 +169,9 @@ impl LlmHandle {
 /// A generator that lives outside this crate (for example LiteRT-LM on Android). It must
 /// stream text through `req.on_event(GenEvent::Token(..))`, watch `req.cancel`, and return
 /// the token counts when it is done. Done / Error events are sent by the worker.
+/// How many generations an external handle runs at once (one per home computer, plus the phone).
+pub const EXTERNAL_SLOTS: usize = 4;
+
 pub type ExternalGenerator = Arc<dyn Fn(&GenRequest) -> Result<GenStats> + Send + Sync>;
 
 impl LlmHandle {
@@ -182,9 +185,19 @@ impl LlmHandle {
         let tokens_processed = Arc::new(AtomicU64::new(0));
         let (gen_count, proc_count) = (tokens_generated.clone(), tokens_processed.clone());
         let watch_rx = high_rx.clone();
+        // Several jobs may be in flight at once, so every home computer can be busy together. The
+        // generator itself decides what has to wait its turn (the phone's own model runs one at a time).
+        let (slot_tx, slot_rx) = crossbeam_channel::bounded::<()>(EXTERNAL_SLOTS);
+        for _ in 0..EXTERNAL_SLOTS {
+            let _ = slot_tx.send(());
+        }
         let join = std::thread::Builder::new()
             .name("llm-external".into())
             .spawn(move || loop {
+                // Wait for a free slot first, so the most urgent waiting job is the one that takes it.
+                if slot_rx.recv().is_err() {
+                    break;
+                }
                 let job = match high_rx.try_recv() {
                     Ok(j) => j,
                     Err(_) => crossbeam_channel::select! {
@@ -196,37 +209,41 @@ impl LlmHandle {
                     Job::Shutdown => break,
                     Job::Gen(r) => r,
                 };
-                let started = Instant::now();
-                let preempted = Arc::new(AtomicBool::new(false));
-                let done = Arc::new(AtomicBool::new(false));
-                let watcher = (req.priority == Priority::Low).then(|| {
-                    let (rx, cancel, pre, done) = (watch_rx.clone(), req.cancel.clone(), preempted.clone(), done.clone());
-                    std::thread::spawn(move || {
-                        while !done.load(Ordering::Relaxed) {
-                            if !rx.is_empty() {
-                                pre.store(true, Ordering::Relaxed);
-                                cancel.store(true, Ordering::Relaxed);
-                                break;
+                let (generator, watch_rx, gen_count, proc_count, slot_tx) = (generator.clone(), watch_rx.clone(), gen_count.clone(), proc_count.clone(), slot_tx.clone());
+                std::thread::spawn(move || {
+                    let started = Instant::now();
+                    let preempted = Arc::new(AtomicBool::new(false));
+                    let done = Arc::new(AtomicBool::new(false));
+                    let watcher = (req.priority == Priority::Low).then(|| {
+                        let (rx, cancel, pre, done) = (watch_rx.clone(), req.cancel.clone(), preempted.clone(), done.clone());
+                        std::thread::spawn(move || {
+                            while !done.load(Ordering::Relaxed) {
+                                if !rx.is_empty() {
+                                    pre.store(true, Ordering::Relaxed);
+                                    cancel.store(true, Ordering::Relaxed);
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(40));
                             }
-                            std::thread::sleep(std::time::Duration::from_millis(40));
-                        }
-                    })
-                });
-                let result = generator(&req);
-                done.store(true, Ordering::Relaxed);
-                if let Some(w) = watcher {
-                    let _ = w.join();
-                }
-                match result {
-                    Ok(mut st) => {
-                        st.elapsed_ms = started.elapsed().as_millis();
-                        st.preempted = preempted.load(Ordering::Relaxed);
-                        gen_count.fetch_add(st.generated_tokens as u64, Ordering::Relaxed);
-                        proc_count.fetch_add(st.prompt_tokens as u64, Ordering::Relaxed);
-                        (req.on_event)(GenEvent::Done(st));
+                        })
+                    });
+                    let result = generator(&req);
+                    done.store(true, Ordering::Relaxed);
+                    if let Some(w) = watcher {
+                        let _ = w.join();
                     }
-                    Err(e) => (req.on_event)(GenEvent::Error(format!("{e:#}"))),
-                }
+                    match result {
+                        Ok(mut st) => {
+                            st.elapsed_ms = started.elapsed().as_millis();
+                            st.preempted = preempted.load(Ordering::Relaxed);
+                            gen_count.fetch_add(st.generated_tokens as u64, Ordering::Relaxed);
+                            proc_count.fetch_add(st.prompt_tokens as u64, Ordering::Relaxed);
+                            (req.on_event)(GenEvent::Done(st));
+                        }
+                        Err(e) => (req.on_event)(GenEvent::Error(format!("{e:#}"))),
+                    }
+                    let _ = slot_tx.send(());
+                });
             })
             .expect("spawn external llm worker");
         LlmHandle {

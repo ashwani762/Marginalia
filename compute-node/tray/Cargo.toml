@@ -1,0 +1,27 @@
+[package]
+name = "marginalia-node-tray"
+version = "0.1.0"
+edition = "2021"
+description = "A small tray icon (Ubuntu top bar, Windows system tray) that shows and controls a running marginalia-node"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "marginalia-node-tray"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+# The details panel: a small frameless window. glow (OpenGL) and no system dev packages needed, X11 and Wayland libraries are loaded at run time.
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+
+# Linux: the StatusNotifierItem protocol over D-Bus, in pure Rust. No GTK and no system packages.
+# Ubuntu's top bar shows these through the AppIndicator extension that ships with it.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
+
+# Windows: the system tray, with winit supplying the message loop.
+[target.'cfg(windows)'.dependencies]
+tray-icon = { version = "0.26", default-features = false }
+winit = "0.30"

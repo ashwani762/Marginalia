@@ -108,38 +108,54 @@ impl EmbedHandle {
 
 /// Embeddings produced elsewhere (LiteRT-LM on Android): texts in, one vector per text out.
 /// The texts arrive already formatted with the task prefix.
+/// How many embedding batches an external handle has out at once.
+pub const EXTERNAL_EMBED_SLOTS: usize = 3;
+
 pub type ExternalEmbedder = Arc<dyn Fn(Vec<String>) -> Result<Vec<Vec<f32>>> + Send + Sync>;
 
 impl EmbedHandle {
     /// A handle backed by [`ExternalEmbedder`].
     pub fn external(embedder: ExternalEmbedder) -> EmbedHandle {
         let (tx, rx) = unbounded::<Job>();
+        // Several batches may be out at once, so more than one home computer can embed together.
+        // The embedder itself makes the phone's own model take them one at a time.
+        let (slot_tx, slot_rx) = crossbeam_channel::bounded::<()>(EXTERNAL_EMBED_SLOTS);
+        for _ in 0..EXTERNAL_EMBED_SLOTS {
+            let _ = slot_tx.send(());
+        }
         let join = std::thread::Builder::new()
             .name("embed-external".into())
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
                     match job {
                         Job::Embed { texts, kind, reply } => {
-                            let started = Instant::now();
-                            let formatted: Vec<String> = texts
-                                .iter()
-                                .map(|t| match kind {
-                                    EmbedKind::Raw => t.clone(),
-                                    EmbedKind::Query => format_query(t),
-                                    EmbedKind::Document => format_document("none", t),
-                                })
-                                .collect();
-                            let result = embedder(formatted).map(|vs| {
-                                vs.into_iter()
-                                    .map(|v| {
-                                        let mut v = normalize(&v);
-                                        v.resize(EMBED_DIM, 0.0);
-                                        v
+                            if slot_rx.recv().is_err() {
+                                break;
+                            }
+                            let (embedder, slot_tx) = (embedder.clone(), slot_tx.clone());
+                            std::thread::spawn(move || {
+                                let started = Instant::now();
+                                let formatted: Vec<String> = texts
+                                    .iter()
+                                    .map(|t| match kind {
+                                        EmbedKind::Raw => t.clone(),
+                                        EmbedKind::Query => format_query(t),
+                                        EmbedKind::Document => format_document("none", t),
                                     })
-                                    .collect()
+                                    .collect();
+                                let result = embedder(formatted).map(|vs| {
+                                    vs.into_iter()
+                                        .map(|v| {
+                                            let mut v = normalize(&v);
+                                            v.resize(EMBED_DIM, 0.0);
+                                            v
+                                        })
+                                        .collect()
+                                });
+                                tracing::debug!("embedded {} texts in {:.0} ms", texts.len(), started.elapsed().as_secs_f64() * 1000.0);
+                                let _ = reply.send(result);
+                                let _ = slot_tx.send(());
                             });
-                            tracing::debug!("embedded {} texts in {:.0} ms", texts.len(), started.elapsed().as_secs_f64() * 1000.0);
-                            let _ = reply.send(result);
                         }
                         Job::CountTokens { texts, reply } => {
                             // No tokenizer here: about 3.3 characters per token for plain text, one per character otherwise.

@@ -19,6 +19,119 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Counts a job as out on a computer for as long as it is held.
+struct Out<'a> {
+    r: &'a Remote,
+    fp: String,
+}
+
+impl<'a> Out<'a> {
+    fn new(r: &'a Remote, fp: &str) -> Out<'a> {
+        *r.inflight.lock().entry(fp.to_string()).or_insert(0) += 1;
+        Out { r, fp: fp.to_string() }
+    }
+}
+
+impl Drop for Out<'_> {
+    fn drop(&mut self) {
+        if let Some(n) = self.r.inflight.lock().get_mut(&self.fp) {
+            *n = n.saturating_sub(1);
+        }
+    }
+}
+
+/// What became of a chat job that was offered to the home computers.
+pub enum ChatOutcome {
+    /// A computer finished it (or it was cancelled), or it failed in a way that cannot be recovered.
+    Done(Result<GenStats>),
+    /// Every computer failed partway. These words were already shown, the phone carries on from them.
+    Continue { partial: String },
+}
+
+/// The same chat with the answer so far added, asking for the rest. Used when a computer drops out
+/// halfway and another one, or the phone, has to finish the answer.
+pub fn continuation(messages: &[crate::engine::llm::ChatMessage], partial: &str) -> Vec<crate::engine::llm::ChatMessage> {
+    let mut m = messages.to_vec();
+    m.push(crate::engine::llm::ChatMessage::assistant(partial.to_string()));
+    m.push(crate::engine::llm::ChatMessage::user(
+        "Your answer was cut off. Carry on from exactly where it stopped, without repeating anything and without a new introduction.",
+    ));
+    m
+}
+
+/// Joins a resumed answer onto the words already shown. A model asked to carry on tends to say the last
+/// sentence again, so the first words of the new text are held back until it is clear whether they repeat
+/// the end of what was shown, and any repeat is dropped.
+pub struct SeamFilter {
+    tail: String,
+    buf: String,
+    released: bool,
+}
+
+impl SeamFilter {
+    const HOLD: usize = 100;
+    const MIN_OVERLAP: usize = 12;
+
+    pub fn new(shown: &str) -> SeamFilter {
+        let start = shown.char_indices().rev().nth(239).map(|(i, _)| i).unwrap_or(0);
+        SeamFilter { tail: shown[start..].to_string(), buf: String::new(), released: false }
+    }
+
+    pub fn push(&mut self, text: &str, emit: &mut dyn FnMut(&str)) {
+        if self.released {
+            emit(text);
+            return;
+        }
+        self.buf.push_str(text);
+        if self.buf.chars().count() >= Self::HOLD {
+            self.release(emit);
+        }
+    }
+
+    pub fn finish(&mut self, emit: &mut dyn FnMut(&str)) {
+        if !self.released {
+            self.release(emit);
+        }
+    }
+
+    fn release(&mut self, emit: &mut dyn FnMut(&str)) {
+        self.released = true;
+        let buf = std::mem::take(&mut self.buf);
+        let mut rest = buf.as_str();
+        // The longest end of what was shown that the new text starts with.
+        let starts: Vec<usize> = self.tail.char_indices().map(|(i, _)| i).collect();
+        for &i in &starts {
+            let suffix = &self.tail[i..];
+            if suffix.chars().count() < Self::MIN_OVERLAP {
+                break;
+            }
+            if rest.starts_with(suffix) {
+                rest = &rest[suffix.len()..];
+                break;
+            }
+        }
+        if rest.is_empty() {
+            return;
+        }
+        // The shown text may stop in the middle of a word or right after a sentence: keep words apart.
+        let last = self.tail.chars().last();
+        let first = rest.chars().next();
+        if let (Some(l), Some(f)) = (last, first) {
+            let needs_space = !l.is_whitespace() && !f.is_whitespace() && f.is_alphanumeric() && (".!?:;,)\"".contains(l) || (l.is_alphanumeric() && f.is_uppercase()));
+            if needs_space {
+                emit(" ");
+            }
+        }
+        emit(rest);
+    }
+}
+
+/// The node sends something every two seconds while it works. Silence for this long means the link is gone.
+const STALL: Duration = Duration::from_secs(6);
+
+/// A live node that produces no words for this long is stuck.
+const NO_PROGRESS: Duration = Duration::from_secs(120);
+
 /// A computer is only used for chat when it is clearly faster than a phone (about 10 tokens a second).
 const MIN_CHAT_TOK_S: f32 = 15.0;
 /// And for search when it beats the phone's one passage a second by a wide margin.
@@ -93,6 +206,9 @@ struct Inner {
 }
 
 pub struct Remote {
+    /// Jobs this phone has out on each computer right now, by fingerprint. A computer's own status can
+    /// be a few seconds old, so the phone counts its own jobs too when it chooses where to send the next.
+    inflight: Mutex<HashMap<String, u32>>,
     rt: tokio::runtime::Runtime,
     ep: quinn::Endpoint,
     id: Identity,
@@ -122,7 +238,7 @@ impl Remote {
             .cloned()
             .map(|n| Node { saved: n, live: Live { conn: None, status: None, rtt_ms: 0, failed_at: None, checked_at: None, last_error: String::new(), refused: false } })
             .collect();
-        let r = Arc::new(Remote { rt, ep, id, path, inner: Mutex::new(Inner { enabled: saved.enabled, nodes, seen: HashMap::new() }) });
+        let r = Arc::new(Remote { inflight: Mutex::new(HashMap::new()), rt, ep, id, path, inner: Mutex::new(Inner { enabled: saved.enabled, nodes, seen: HashMap::new() }) });
         r.save();
         r.rt.spawn(monitor(r.clone()));
         Ok(r)
@@ -342,16 +458,47 @@ impl Remote {
 
     // ------------------------------------------------------------------ doing work
 
-    /// Chat on a computer, or None when the phone should do it.
-    pub fn chat(self: &Arc<Self>, req: &GenRequest) -> Option<Result<GenStats>> {
+    /// Chat on a home computer, or None when the phone should do it from the start.
+    ///
+    /// Computers are tried best first. If one fails before the first word, the next one is tried. If
+    /// one fails halfway through an answer, the next one is asked to carry on from the words already
+    /// sent (they are shown to the person, so they cannot be taken back). When every computer has
+    /// failed, [`ChatOutcome::Continue`] hands the words so far back so the phone can carry on itself.
+    pub fn chat(self: &Arc<Self>, req: &GenRequest) -> Option<ChatOutcome> {
         if !req.images.is_empty() || !self.enabled() {
             return None;
         }
-        let t0 = Instant::now();
-        let conn = self.rt.block_on(self.pick(Kind::Chat))?;
-        let picked = t0.elapsed();
-        let msgs = req
-            .messages
+        let candidates = self.rt.block_on(self.pick_all(Kind::Chat));
+        if candidates.is_empty() {
+            return None;
+        }
+        let mut partial = String::new();
+        for cand in candidates {
+            if req.cancel.load(Ordering::Relaxed) {
+                return Some(ChatOutcome::Done(Ok(GenStats::default())));
+            }
+            let messages = if partial.is_empty() { req.messages.clone() } else { continuation(&req.messages, &partial) };
+            let _out = Out::new(self, &cand.fp);
+            let started = Instant::now();
+            let before = partial.len();
+            match self.rt.block_on(self.chat_on(&cand, req, &messages, &mut partial)) {
+                Ok(stats) => {
+                    tracing::info!("chat done on {}: {:.2}s ({} tokens)", cand.name, started.elapsed().as_secs_f32(), stats.generated_tokens);
+                    return Some(ChatOutcome::Done(Ok(stats)));
+                }
+                Err(e) => {
+                    let kept = partial.len() - before;
+                    tracing::warn!("{} stopped the chat ({e:#}), {kept} bytes had arrived", cand.name);
+                    self.mark_failed(&cand.fp, &e);
+                }
+            }
+        }
+        if partial.is_empty() { None } else { Some(ChatOutcome::Continue { partial }) }
+    }
+
+    /// One attempt on one computer. Every word that arrives is passed on and added to `partial`.
+    async fn chat_on(&self, node: &Picked, req: &GenRequest, messages: &[crate::engine::llm::ChatMessage], partial: &mut String) -> Result<GenStats> {
+        let msgs = messages
             .iter()
             .map(|m| ChatMsg {
                 role: match m.role {
@@ -370,99 +517,165 @@ impl Remote {
             top_k: req.params.top_k,
             priority: if req.priority == crate::engine::llm::Priority::High { Priority::Interactive } else { Priority::Background },
         };
-        let started = Instant::now();
-        let r = self.rt.block_on(async {
-            let (mut send, mut recv) = client::open(&conn.conn, &Request::Chat(creq)).await.map_err(|e| (false, e))?;
-            let _ = send.finish();
-            let mut got_tokens = false;
-            let mut queued = false;
-            let mut tick = tokio::time::interval(Duration::from_millis(100));
-            loop {
-                let wait = if got_tokens { Duration::from_secs(60) } else if queued { Duration::from_secs(180) } else { Duration::from_secs(30) };
-                let ev = tokio::select! {
-                    ev = tokio::time::timeout(wait, wire::read_frame::<ChatEvent>(&mut recv)) => match ev {
-                        Ok(Ok(Some(e))) => e,
-                        Ok(Ok(None)) => return Err((got_tokens, anyhow!("the computer stopped answering"))),
-                        Ok(Err(e)) => return Err((got_tokens, e)),
-                        Err(_) => return Err((got_tokens, anyhow!("the computer took too long"))),
-                    },
-                    _ = async { loop { tick.tick().await; if req.cancel.load(Ordering::Relaxed) { break; } } } => {
-                        let _ = recv.stop(0u32.into());
-                        return Ok(GenStats::default());
-                    }
-                };
-                match ev {
-                    ChatEvent::Queued { .. } => queued = true,
-                    ChatEvent::Token(t) => {
-                        got_tokens = true;
-                        (req.on_event)(GenEvent::Token(t));
-                    }
-                    ChatEvent::Done { prompt_tokens, generated_tokens, elapsed_ms } => {
-                        return Ok(GenStats { prompt_tokens: prompt_tokens as usize, generated_tokens: generated_tokens as usize, served_by: Some(conn.name.clone()), remote_ms: elapsed_ms as u64, ..Default::default() });
-                    }
-                    ChatEvent::Error(e) => return Err((got_tokens, anyhow!(e))),
+        let (mut send, mut recv) = client::open(&node.conn, &Request::Chat(creq)).await?;
+        let _ = send.finish();
+        let mut seam = if partial.is_empty() { None } else { Some(SeamFilter::new(partial)) };
+        let result = self.read_chat(node, req, &mut recv, partial, &mut seam).await;
+        // Whatever the filter was still holding is part of the answer so far.
+        if let Some(f) = seam.as_mut() {
+            f.finish(&mut |t| {
+                partial.push_str(t);
+                (req.on_event)(GenEvent::Token(t.to_string()));
+            });
+        }
+        result
+    }
+
+    async fn read_chat(&self, node: &Picked, req: &GenRequest, recv: &mut quinn::RecvStream, partial: &mut String, seam: &mut Option<SeamFilter>) -> Result<GenStats> {
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let mut last_progress = Instant::now();
+        loop {
+            // While words are flowing a pause of more than a few seconds means the link is gone. Before
+            // the first word the computer may be reading a long prompt, so it gets longer.
+            // The node sends something at least every two seconds while it is alive, so a few seconds of
+            // silence means it is gone. A long wait with a live node is judged by `last_progress` below.
+            let wait = STALL;
+            let ev = tokio::select! {
+                ev = tokio::time::timeout(wait, wire::read_frame::<ChatEvent>(recv)) => match ev {
+                    Ok(Ok(Some(e))) => e,
+                    Ok(Ok(None)) => bail!("the computer stopped answering"),
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => bail!("the computer took too long"),
+                },
+                _ = async { loop { tick.tick().await; if req.cancel.load(Ordering::Relaxed) { break; } } } => {
+                    let _ = recv.stop(0u32.into());
+                    return Ok(GenStats::default());
                 }
-            }
-        });
-        match r {
-            Ok(stats) => {
-                tracing::info!("chat done on {}: picking {:.2}s, then {:.2}s ({} tokens)", conn.name, picked.as_secs_f32(), started.elapsed().as_secs_f32(), stats.generated_tokens);
-                Some(Ok(stats))
-            }
-            Err((true, e)) => {
-                self.mark_failed(&conn.fp, &e);
-                Some(Err(e))
-            }
-            Err((false, e)) => {
-                // Nothing reached the screen yet, so the phone can simply do it itself.
-                tracing::warn!("{} could not do the chat ({e:#}), doing it here", conn.name);
-                self.mark_failed(&conn.fp, &e);
-                None
+            };
+            match ev {
+                ChatEvent::Queued { .. } | ChatEvent::Working => {
+                    // Alive but not producing. A node that has been alive and silent of words for this
+                    // long is stuck, so it is given up on.
+                    if last_progress.elapsed() > NO_PROGRESS {
+                        bail!("the computer is not making progress");
+                    }
+                }
+                ChatEvent::Token(t) => {
+                    last_progress = Instant::now();
+                    match seam.as_mut() {
+                        Some(f) => f.push(&t, &mut |x| {
+                            partial.push_str(x);
+                            (req.on_event)(GenEvent::Token(x.to_string()));
+                        }),
+                        None => {
+                            partial.push_str(&t);
+                            (req.on_event)(GenEvent::Token(t));
+                        }
+                    }
+                }
+                ChatEvent::Done { prompt_tokens, generated_tokens, elapsed_ms } => {
+                    if let Some(f) = seam.as_mut() {
+                        f.finish(&mut |x| {
+                            partial.push_str(x);
+                            (req.on_event)(GenEvent::Token(x.to_string()));
+                        });
+                    }
+                    return Ok(GenStats { prompt_tokens: prompt_tokens as usize, generated_tokens: generated_tokens as usize, served_by: Some(node.name.clone()), remote_ms: elapsed_ms as u64, ..Default::default() });
+                }
+                ChatEvent::Error(e) => bail!(e),
             }
         }
     }
 
-    /// Embeddings on a computer, or None when the phone should do them.
+    /// Embeddings on a home computer, or None when the phone should do them. Computers are tried best
+    /// first. Embedding a batch again is harmless, so a failure simply moves on.
     pub fn embed(self: &Arc<Self>, texts: &[String]) -> Option<Vec<Vec<f32>>> {
         if !self.enabled() || texts.is_empty() {
             return None;
         }
-        let conn = self.rt.block_on(self.pick(Kind::Embed))?;
-        let started = Instant::now();
-        let r: Result<Vec<Vec<f32>>> = self.rt.block_on(async {
-            let mut all = Vec::with_capacity(texts.len());
-            for chunk in texts.chunks(64) {
-                let (mut send, mut recv) = client::open(&conn.conn, &Request::Embed(EmbedRequest { texts: chunk.to_vec(), priority: Priority::Bulk })).await?;
-                let _ = send.finish();
-                loop {
-                    match tokio::time::timeout(Duration::from_secs(120), wire::read_frame::<EmbedReply>(&mut recv)).await {
-                        Err(_) => bail!("the computer took too long"),
-                        Ok(r) => match r?.ok_or_else(|| anyhow!("the computer stopped answering"))? {
-                            EmbedReply::Queued { .. } => {}
-                            EmbedReply::Vectors(v) => {
-                                if v.len() != chunk.len() {
-                                    bail!("wrong number of vectors");
+        for cand in self.rt.block_on(self.pick_all(Kind::Embed)) {
+            let _out = Out::new(self, &cand.fp);
+            let started = Instant::now();
+            let r: Result<Vec<Vec<f32>>> = self.rt.block_on(async {
+                let mut all = Vec::with_capacity(texts.len());
+                for chunk in texts.chunks(64) {
+                    let (mut send, mut recv) = client::open(&cand.conn, &Request::Embed(EmbedRequest { texts: chunk.to_vec(), priority: Priority::Bulk })).await?;
+                    let _ = send.finish();
+                    loop {
+                        match tokio::time::timeout(STALL, wire::read_frame::<EmbedReply>(&mut recv)).await {
+                            Err(_) => bail!("the computer took too long"),
+                            Ok(r) => match r?.ok_or_else(|| anyhow!("the computer stopped answering"))? {
+                                EmbedReply::Queued { .. } => {}
+                                EmbedReply::Vectors(v) => {
+                                    if v.len() != chunk.len() {
+                                        bail!("wrong number of vectors");
+                                    }
+                                    all.extend(v);
+                                    break;
                                 }
-                                all.extend(v);
-                                break;
-                            }
-                            EmbedReply::Error(e) => bail!(e),
-                        },
+                                EmbedReply::Error(e) => bail!(e),
+                            },
+                        }
                     }
                 }
+                Ok(all)
+            });
+            match r {
+                Ok(v) => {
+                    tracing::debug!("{} passages embedded on {} in {:.2}s", v.len(), cand.name, started.elapsed().as_secs_f32());
+                    return Some(v);
+                }
+                Err(e) => {
+                    tracing::warn!("{} could not embed ({e:#}), trying the next one", cand.name);
+                    self.mark_failed(&cand.fp, &e);
+                }
             }
-            Ok(all)
-        });
-        match r {
-            Ok(v) => {
-                tracing::debug!("{} passages embedded on {} in {:.2}s", v.len(), conn.name, started.elapsed().as_secs_f32());
-                Some(v)
+        }
+        None
+    }
+
+    /// How many home computers could take a chat job right now, from what was last seen. The write-up
+    /// uses it to decide how many parts to have written at the same time.
+    pub fn chat_parallelism(&self) -> usize {
+        let g = self.inner.lock();
+        if !g.enabled {
+            return 0;
+        }
+        g.nodes
+            .iter()
+            .filter(|n| n.saved.approved)
+            .filter(|n| n.live.conn.as_ref().map(|c| c.close_reason().is_none()).unwrap_or(false))
+            .filter(|n| n.live.status.as_ref().map(|s| !s.paused && s.caps.chat.is_some() && (s.caps.chat_tok_s == 0.0 || s.caps.chat_tok_s >= MIN_CHAT_TOK_S)).unwrap_or(false))
+            .count()
+    }
+
+    /// The network under the phone changed (Wi-Fi dropped or came back). Every connection is dropped
+    /// at once, so work in flight fails over now instead of after a timeout, and the computers are
+    /// looked for again a moment after the network returns.
+    pub fn network(self: &Arc<Self>, up: bool) {
+        let count = {
+            let mut g = self.inner.lock();
+            for n in g.nodes.iter_mut() {
+                if let Some(c) = n.live.conn.take() {
+                    c.close(0u32.into(), b"network changed");
+                }
+                n.live.status = None;
+                n.live.failed_at = None;
+                n.live.checked_at = None;
+                if !up {
+                    n.live.last_error = "Not reachable on this network".into();
+                }
             }
-            Err(e) => {
-                tracing::warn!("{} could not embed ({e:#}), doing it here", conn.name);
-                self.mark_failed(&conn.fp, &e);
-                None
-            }
+            g.nodes.len()
+        };
+        if up && count > 0 {
+            let r = self.clone();
+            self.rt.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                for i in 0..count {
+                    r.clone().ensure_idx(i, true).await;
+                }
+            });
         }
     }
 
@@ -477,10 +690,10 @@ impl Remote {
     }
 
     /// The best reachable computer for this kind of work.
-    async fn pick(self: &Arc<Self>, kind: Kind) -> Option<Picked> {
+    async fn pick_all(self: &Arc<Self>, kind: Kind) -> Vec<Picked> {
         let count = self.inner.lock().nodes.len();
         if count == 0 {
-            return None;
+            return vec![];
         }
         let mut set = tokio::task::JoinSet::new();
         for i in 0..count {
@@ -489,10 +702,10 @@ impl Remote {
         }
         while set.join_next().await.is_some() {}
         let g = self.inner.lock();
-        let mut best: Option<(u32, u32, Picked)> = None;
+        let mut ranked: Vec<(u32, u32, Picked)> = Vec::new();
         for n in g.nodes.iter().filter(|n| n.saved.approved) {
             let (Some(conn), Some(st)) = (n.live.conn.clone(), n.live.status.as_ref()) else { continue };
-            if conn.close_reason().is_some() {
+            if conn.close_reason().is_some() || st.paused {
                 continue;
             }
             let ok = match kind {
@@ -502,12 +715,20 @@ impl Remote {
             if !ok {
                 continue;
             }
-            let key = (st.running + st.waiting, n.live.rtt_ms);
-            if best.as_ref().map(|b| key < (b.0, b.1)).unwrap_or(true) {
-                best = Some((key.0, key.1, Picked { conn, fp: n.saved.fp.clone(), name: n.saved.name.clone() }));
-            }
+            // Expected wait: the jobs ahead plus this one, divided by how fast the computer works, so a
+            // quick computer with a short queue beats an idle slow one. The round trip breaks ties.
+            let speed = match kind {
+                Kind::Chat => st.caps.chat_tok_s,
+                Kind::Embed => st.caps.embed_per_s,
+            };
+            let speed = if speed > 0.0 { speed } else { 10.0 };
+            let ours = self.inflight.lock().get(&n.saved.fp).copied().unwrap_or(0);
+            let ahead = (st.running + st.waiting).max(ours);
+            let wait = ((ahead + 1) as f32 / speed * 1000.0) as u32;
+            ranked.push((wait, n.live.rtt_ms, Picked { conn, fp: n.saved.fp.clone(), name: n.saved.name.clone() }));
         }
-        best.map(|b| b.2)
+        ranked.sort_by_key(|r| (r.0, r.1));
+        ranked.into_iter().map(|r| r.2).collect()
     }
 }
 
@@ -697,5 +918,44 @@ async fn monitor(r: Arc<Remote>) {
             let rr = r.clone();
             tokio::spawn(async move { rr.ensure_idx(i, true).await });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(shown: &str, pieces: &[&str]) -> String {
+        let mut f = SeamFilter::new(shown);
+        let mut out = String::new();
+        for p in pieces {
+            f.push(p, &mut |t| out.push_str(t));
+        }
+        f.finish(&mut |t| out.push_str(t));
+        out
+    }
+
+    #[test]
+    fn a_repeated_sentence_is_dropped() {
+        let shown = "Notes are shared. Membership within the cluster is handled via gossip";
+        let out = run(shown, &["Membership within the cluster ", "is handled via gossip, with last ", "writer wins."]);
+        assert_eq!(out, ", with last writer wins.");
+    }
+
+    #[test]
+    fn new_text_that_does_not_repeat_is_kept_with_a_space() {
+        let out = run("Everything is shared via gossip", &["Revoking a phone writes a record."]);
+        assert_eq!(out, " Revoking a phone writes a record.");
+    }
+
+    #[test]
+    fn a_word_cut_in_half_is_finished_without_a_space() {
+        let out = run("The notes are handl", &["ed by the node."]);
+        assert_eq!(out, "ed by the node.");
+    }
+
+    #[test]
+    fn short_answers_are_flushed_at_the_end() {
+        assert_eq!(run("one two three four", &["five"]), "five");
     }
 }

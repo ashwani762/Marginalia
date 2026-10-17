@@ -497,7 +497,12 @@ class AppVm(private val app: Application) {
     }
 
     /** The window left the screen: stop listening for home computers. */
-    fun onBackground() { discovery.stop(); nodeWatch?.cancel(); nodeWatch = null }
+    fun onBackground() {
+        // While notes are being written in the background the computers are still looked for, because the
+        // write-up may be running on one of them and one may have moved to a new address.
+        if (!Work.busy) discovery.stop()
+        nodeWatch?.cancel(); nodeWatch = null
+    }
 
     /** Finishes meetings whose notes were never completed (the app was ended mid-way, or a step failed). */
     fun resumeUnfinished() {
@@ -1353,6 +1358,37 @@ class AppVm(private val app: Application) {
             runCatching {
                 backend.call("nodes.seen", JSONObject().put("name", n.name).put("id", n.id).put("port", n.port).put("addrs", JSONArray(n.addrs)))
             }
+        }
+    }
+
+    /**
+     * Tells the core when the network under the phone changes, so work running on a home computer
+     * moves to another computer or back to the phone at once instead of after a timeout.
+     */
+    private val netWatch = object : android.net.ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: android.net.Network) { reportNetwork(true) }
+        override fun onLost(network: android.net.Network) { reportNetwork(false) }
+    }
+
+    private fun reportNetwork(up: Boolean) {
+        viewModelScope.launch(Dispatchers.Default) {
+            var waited = 0
+            while (!nativeReady && waited < 120_000) { delay(250); waited += 250 }
+            if (!nativeReady) return@launch
+            runCatching { backend.call("nodes.network", JSONObject().put("up", up)) }
+        }
+    }
+
+    init {
+        // Background work (notes being written with the app closed) keeps looking for home computers so
+        // it can use them, and the search stops again when the work ends and the app is not on screen.
+        viewModelScope.launch {
+            Work.items.collect { items ->
+                if (items.isNotEmpty()) discovery.start() else if (!AppState.foreground) discovery.stop()
+            }
+        }
+        runCatching {
+            (app.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager).registerDefaultNetworkCallback(netWatch)
         }
     }
 

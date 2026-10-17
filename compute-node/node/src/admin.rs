@@ -1,9 +1,11 @@
-//! The local control channel: `marginalia-node pair`, `status` and `revoke` talk to the running
-//! daemon through a port that only this computer can reach.
+//! The local control channel: `marginalia-node pair`, `status`, `pause`, `stop` and the tray icon talk
+//! to the running daemon through a port that only this computer can reach. Replies hold counts, names
+//! and timings, never any content.
 
 use crate::server::Shared;
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -19,7 +21,9 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                 return;
             }
             let req: Value = serde_json::from_str(&line).unwrap_or(json!({}));
-            let reply = match req["cmd"].as_str().unwrap_or("") {
+            let mut stop = false;
+            let cmd = req["cmd"].as_str().unwrap_or("").to_string();
+            let reply = match cmd.as_str() {
                 "pair" => {
                     let code = sh.open_pairing(5);
                     let addrs: Vec<String> = crate::discovery::lan_addresses().iter().map(|a| format!("{a}:{node_port}")).collect();
@@ -27,13 +31,29 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                 }
                 "status" => {
                     let caps = sh.host.caps.lock().clone();
+                    let in_flight = sh.in_flight();
+                    let addrs: Vec<String> = crate::discovery::lan_addresses().iter().map(|a| format!("{a}:{node_port}")).collect();
                     json!({
-                        "name": sh.name, "fingerprint": sh.identity.fingerprint(), "locked": sh.locked.load(std::sync::atomic::Ordering::Relaxed),
+                        "paused": sh.paused.load(Ordering::Relaxed), "running_jobs": in_flight.min(1), "waiting_jobs": in_flight.saturating_sub(1),
+                        "served": sh.served(), "uptime_s": sh.metrics.uptime_s(), "phones": sh.store.list().len(), "version": env!("CARGO_PKG_VERSION"),
+                        "port": node_port, "addresses": addrs,
+                        "name": sh.name, "fingerprint": sh.identity.fingerprint(), "locked": sh.locked.load(Ordering::Relaxed),
                         "chat": caps.chat, "embed": caps.embed, "chat_tok_s": caps.chat_tok_s, "embed_per_s": caps.embed_per_s,
                         "blocked": sh.store.blocked_list().iter().map(|b| json!({"name": b.name, "id": &b.fp[..16], "at": b.at})).collect::<Vec<_>>(),
                         "waiting": sh.pending_list().iter().map(|p| json!({"id": p.id, "name": p.name, "waited_s": p.waited_s})).collect::<Vec<_>>(),
                         "clients": sh.store.list().iter().map(|c| json!({"name": c.name, "fp": &c.fp[..16], "paired_at": c.paired_at})).collect::<Vec<_>>(),
                     })
+                }
+                "pause" | "resume" => {
+                    let on = cmd == "pause";
+                    sh.paused.store(on, Ordering::Relaxed);
+                    tracing::info!("{}", if on { "paused: new jobs are turned away" } else { "resumed" });
+                    json!({"paused": on})
+                }
+                "shutdown" => {
+                    // The reply goes out first, then main is told to wind down.
+                    stop = true;
+                    json!({"stopping": true})
                 }
                 "approve" | "deny" => {
                     let allow = req["cmd"] == "approve";
@@ -66,7 +86,7 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                 "unblock" => json!({"unblocked": sh.store.unblock(req["who"].as_str().unwrap_or("")).unwrap_or(0)}),
                 "lock" | "unlock" => {
                     let on = req["cmd"] == "lock";
-                    sh.locked.store(on, std::sync::atomic::Ordering::Relaxed);
+                    sh.locked.store(on, Ordering::Relaxed);
                     match sh.store.set_locked(on) {
                         Ok(()) => json!({"locked": on}),
                         Err(e) => json!({"error": e.to_string()}),
@@ -75,6 +95,9 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                 "stats" => {
                     let mut v = sh.metrics.snapshot();
                     v["name"] = json!(sh.name);
+                    v["paused"] = json!(sh.paused.load(Ordering::Relaxed));
+                    v["locked"] = json!(sh.locked.load(Ordering::Relaxed));
+                    v["report"] = json!(crate::metrics::report(&v));
                     v
                 }
                 "revoke" => {
@@ -88,6 +111,10 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                 _ => json!({"error": "unknown command"}),
             };
             let _ = w.write_all(format!("{reply}\n").as_bytes()).await;
+            let _ = w.flush().await;
+            if stop {
+                sh.stop.notify_one();
+            }
         });
     }
 }
