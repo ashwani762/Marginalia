@@ -41,8 +41,8 @@ Tests: `cd core && cargo test --lib`, `./gradlew :app:testDebugUnitTest`. Debug 
 ```bash
 compute-node/build.sh                 # CUDA build (or --cpu-only)
 target/release/marginalia-node run
-cargo test -p marginalia-proto        # 22 tests: pairing, pinning, man in the middle, framing
-cargo test -p marginalia-node-tray    # 25 tests
+cargo test -p marginalia-proto        # pairing, pinning, man in the middle, framing
+cargo test -p marginalia-node-tray    # tray icon logic
 compute-node/packaging/install-linux.sh   # user service and tray autostart
 ```
 
