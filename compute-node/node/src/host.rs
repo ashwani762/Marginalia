@@ -50,6 +50,13 @@ pub struct Host {
 
 pub const SPEECH_FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
 pub const CHAT_FILE: &str = "gemma-4-E2B-it-Q4_0.gguf";
+pub const CHAT_FILE_E4B: &str = "gemma-4-E4B-it-Q4_0.gguf";
+
+/// The chat model `run` loads when `--chat-model` is not given: the E4B file when it was downloaded, else E2B.
+pub fn default_chat_path(models_dir: &std::path::Path) -> PathBuf {
+    let e4b = models_dir.join(CHAT_FILE_E4B);
+    if e4b.is_file() { e4b } else { models_dir.join(CHAT_FILE) }
+}
 pub const EMBED_FILE: &str = "embeddinggemma-2-Q8_0.gguf";
 
 fn tiers(cpu_only: bool) -> Vec<u32> {
@@ -99,7 +106,7 @@ impl Host {
             None
         };
 
-        let chat_path = opts.chat_model.clone().unwrap_or_else(|| opts.models_dir.join(CHAT_FILE));
+        let chat_path = opts.chat_model.clone().unwrap_or_else(|| default_chat_path(&opts.models_dir));
         let llm = if chat_path.is_file() {
             let mut found = None;
             for layers in tiers(opts.cpu_only) {

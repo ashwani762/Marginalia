@@ -146,8 +146,8 @@ enum ModelsCmd {
         /// Only the chat model, only the search model or only the speech model.
         #[arg(long, value_enum)]
         only: Option<models_dl::Only>,
-        /// Which chat model. The node itself loads gemma-4-E2B-it-Q4_0.gguf unless told otherwise with `run --chat-model`.
-        #[arg(long, value_enum, default_value = "e2b")]
+        /// Which chat model. The node loads gemma-4-E4B-it-Q4_0.gguf, or gemma-4-E2B-it-Q4_0.gguf when only that one is present, unless told otherwise with `run --chat-model`.
+        #[arg(long, value_enum, default_value = "e4b")]
         chat_model: models_dl::ChatChoice,
         /// Leave out the speech model (about 570 MB), which is fetched by default.
         #[arg(long)]

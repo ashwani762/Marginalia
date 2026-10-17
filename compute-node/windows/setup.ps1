@@ -129,13 +129,18 @@ function New-Prereq([string]$name, [scriptblock]$check, [string]$file, [string[]
 function Get-Prereqs {
     $list = @()
     $list += New-Prereq 'Git' { Test-Git } 'winget' @('install', '--id', 'Git.Git', '-e', '--source', 'winget') 'winget install --id Git.Git -e --source winget' 'Not needed to build, only to update the code with git pull.' $true
+    if ((Test-Cargo) -and -not (Test-RustNewEnough)) {
+        $list += New-Prereq 'Rust 1.95 or newer' { Test-RustNewEnough } 'rustup' @('update', 'stable') 'rustup update stable' 'The tray libraries need a recent compiler.' $false
+    }
     if (Test-Cargo) {
         $list += New-Prereq 'Rust MSVC toolchain' { Test-RustMsvc } 'rustup' @('default', 'stable-x86_64-pc-windows-msvc') 'rustup default stable-x86_64-pc-windows-msvc' 'The GNU toolchain cannot build llama.cpp here.' $false
     } else {
         $list += New-Prereq 'Rust (rustup)' { Test-Cargo } 'winget' @('install', '--id', 'Rustlang.Rustup', '-e', '--source', 'winget') 'winget install --id Rustlang.Rustup -e --source winget' 'Then open a NEW PowerShell window. If asked, choose the default (MSVC) toolchain.' $false
     }
     $list += New-Prereq 'Visual Studio Build Tools (C++)' { [bool](Get-VsInstall) } 'winget' @('install', '--id', 'Microsoft.VisualStudio.2022.BuildTools', '-e', '--source', 'winget', '--override', '--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended') 'winget install --id Microsoft.VisualStudio.2022.BuildTools -e --source winget --override "--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"' 'About 6 GB and several minutes. Needs the "Desktop development with C++" workload. If you install it by hand, tick that workload.' $false
-    $list += New-Prereq 'CMake' { Test-Cmake } 'winget' @('install', '--id', 'Kitware.CMake', '-e', '--source', 'winget') 'winget install --id Kitware.CMake -e --source winget' 'Open a NEW PowerShell window afterwards if it is still not found.' $false
+    $cmakeVerb = 'install'
+    if (Find-Command 'cmake.exe') { $cmakeVerb = 'upgrade' }
+    $list += New-Prereq 'CMake (4.2 or newer for Visual Studio 2026)' { Test-Cmake } 'winget' @($cmakeVerb, '--id', 'Kitware.CMake', '-e', '--source', 'winget') "winget $cmakeVerb --id Kitware.CMake -e --source winget" 'Open a NEW PowerShell window afterwards if it is still not found.' $false
     $list += New-Prereq 'LLVM (libclang, for bindgen)' { Test-Libclang } 'winget' @('install', '--id', 'LLVM.LLVM', '-e', '--source', 'winget') 'winget install --id LLVM.LLVM -e --source winget' 'This script sets LIBCLANG_PATH to C:\Program Files\LLVM\bin for you.' $false
     if ($needCuda) {
         $list += New-Prereq 'CUDA toolkit (nvcc)' { [bool](Find-Nvcc) } 'winget' @('install', '--id', 'Nvidia.CUDA', '-e', '--source', 'winget') 'winget install --id Nvidia.CUDA -e --source winget' 'Install it AFTER Visual Studio Build Tools. To skip the GPU for now run setup.ps1 -Cpu.' $false
@@ -284,7 +289,7 @@ if ($SkipModels.IsPresent) {
 } elseif ((-not $Force.IsPresent) -and (@(Get-MissingModels $modelsPath $SkipSpeech.IsPresent).Count -eq 0)) {
     Step-Skip ('All model files are complete in ' + $modelsPath)
 } else {
-    $dlArgs = @('models', 'download')
+    $dlArgs = @('models', 'download', '--chat-model', 'e4b')
     if ($ModelsDir) { $dlArgs += @('--dir', $ModelsDir) }
     if ($SkipSpeech.IsPresent) { $dlArgs += '--skip-speech' }
     & $nodeExe @dlArgs

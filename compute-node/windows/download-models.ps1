@@ -1,4 +1,4 @@
-# Downloads the model files the node serves (about 3.7 GB: chat, search and speech to text). Safe to stop and run again, it continues.
+# Downloads the model files the node serves (about 5.5 GB: chat Gemma 4 E4B, search and speech to text). -ChatModel e2b picks the smaller chat model. Safe to stop and run again, it continues.
 #   .\compute-node\windows\download-models.ps1
 #   .\compute-node\windows\download-models.ps1 -Only search      (or chat, or speech)
 #   .\compute-node\windows\download-models.ps1 -SkipSpeech        leave out the speech model (570 MB)
@@ -8,7 +8,7 @@
 param(
     [string]$Dir = '',
     [ValidateSet('', 'chat', 'search', 'speech')][string]$Only = '',
-    [ValidateSet('e2b', 'e4b')][string]$ChatModel = 'e2b',
+    [ValidateSet('e2b', 'e4b')][string]$ChatModel = 'e4b',
     [switch]$SkipSpeech
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -37,7 +37,7 @@ $all = @(
     @{ Role = 'search'; Repo = 'ggml-org/embeddinggemma-2-GGUF'; File = 'embeddinggemma-2-Q8_0.gguf'; Size = 309855456 },
     @{ Role = 'speech'; Repo = 'ggerganov/whisper.cpp';          File = 'ggml-large-v3-turbo-q5_0.bin';  Size = 574041195 }
 )
-if ($ChatModel -eq 'e4b') { $all[0] = @{ Role = 'chat'; Repo = 'ggml-org/gemma-4-E4B-it-GGUF'; File = 'gemma-4-E4B-it-Q4_0.gguf'; Size = 0 } }
+if ($ChatModel -eq 'e4b') { $all[0] = @{ Role = 'chat'; Repo = 'ggml-org/gemma-4-E4B-it-GGUF'; File = 'gemma-4-E4B-it-Q4_0.gguf'; Size = 4590807392 } }
 $wanted = @($all | Where-Object { ($Only -and $_.Role -eq $Only) -or ((-not $Only) -and -not ($SkipSpeech.IsPresent -and $_.Role -eq 'speech')) })
 
 $token = $env:HF_TOKEN

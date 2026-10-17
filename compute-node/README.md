@@ -49,7 +49,7 @@ Put these files in the models folder:
 
 | File | Used for |
 | --- | --- |
-| `gemma-4-E2B-it-Q4_0.gguf` | chat (write-ups, answers) |
+| `gemma-4-E4B-it-Q4_0.gguf` | chat (write-ups, answers), the default. The smaller `gemma-4-E2B-it-Q4_0.gguf` (`--chat-model e2b`) is used when it is the only one present |
 | `embeddinggemma-2-Q8_0.gguf` | search (embeddings) |
 | `ggml-large-v3-turbo-q5_0.bin` | speech to text on recorded audio (about 570 MB, from the `ggerganov/whisper.cpp` repository on Hugging Face) |
 
@@ -61,7 +61,7 @@ At start the node runs a short measurement and reports tokens per second for cha
 
 ```sh
 marginalia-node models list
-marginalia-node models download [--dir DIR] [--only chat|search|speech] [--chat-model e2b|e4b] [--skip-speech]
+marginalia-node models download [--dir DIR] [--only chat|search|speech] [--chat-model e4b|e2b] [--skip-speech]
 marginalia-node run [--port 47615] [--name NAME] [--models DIR] [--cpu] [--speech-model FILE] [--no-speech] [--window-max-seconds 120]
 marginalia-node pair
 marginalia-node status
@@ -71,7 +71,7 @@ marginalia-node revoke <id or name>
 marginalia-node probe <addr:port> [--code CODE] [--transcribe FILE.wav] [--language en] [--window] [--prompt TEXT]
 ```
 
-- `models list` shows each expected model file, whether it is present, its size and the folder. `models download` fetches what is missing from Hugging Face: it continues a stopped download (`.part` file, HTTP Range), shows MB, percent, speed and time left on one updating line, checks the size and only then renames the file, skips files that are complete, and retries with growing pauses when the network drops. If a repository asks for a login (HTTP 401 or 403) set the `HF_TOKEN` environment variable, it is sent only to Hugging Face and never printed. `--chat-model e4b` fetches the larger chat model, which the node only uses when started with `run --chat-model FILE`. `models download` fetches all three files by default, `--skip-speech` leaves out the speech model and `--only speech` fetches just that one. `run` tells you about this command when the models are missing.
+- `models list` shows each expected model file, whether it is present, its size and the folder. `models download` fetches what is missing from Hugging Face: it continues a stopped download (`.part` file, HTTP Range), shows MB, percent, speed and time left on one updating line, checks the size and only then renames the file, skips files that are complete, and retries with growing pauses when the network drops. If a repository asks for a login (HTTP 401 or 403) set the `HF_TOKEN` environment variable, it is sent only to Hugging Face and never printed. `--chat-model e4b` fetches the larger chat model, which the node uses instead of E2B whenever it is in the models folder (or when started with `run --chat-model FILE`). The Windows scripts fetch E4B. `models download` fetches all three files by default, `--skip-speech` leaves out the speech model and `--only speech` fetches just that one. `run` tells you about this command when the models are missing.
 - `run` starts the node in the foreground and stops on Ctrl-C. `--cpu` keeps the models off the graphics card at run time (the build still has to match). `--name` is what phones show; it defaults to the machine's name.
 - `pair` asks the running node for a one-time code and prints it with the addresses the node can be reached at. On the phone: Settings, Compute nodes, Add a compute node.
 - `status` prints what the running node serves, its measured speed and the paired phones with their ids.

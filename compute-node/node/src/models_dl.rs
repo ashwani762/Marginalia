@@ -23,8 +23,8 @@ pub struct ModelFile {
     pub optional: bool,
 }
 
-pub const CHAT_E2B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E2B-it-GGUF", file: crate::host::CHAT_FILE, bytes: 2_841_481_184, optional: false };
-pub const CHAT_E4B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E4B-it-GGUF", file: "gemma-4-E4B-it-Q4_0.gguf", bytes: 0, optional: true };
+pub const CHAT_E2B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E2B-it-GGUF", file: crate::host::CHAT_FILE, bytes: 2_841_481_184, optional: true };
+pub const CHAT_E4B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E4B-it-GGUF", file: crate::host::CHAT_FILE_E4B, bytes: 4_590_807_392, optional: false };
 pub const SEARCH: ModelFile = ModelFile { role: "search", repo: "ggml-org/embeddinggemma-2-GGUF", file: crate::host::EMBED_FILE, bytes: 309_855_456, optional: false };
 
 pub const SPEECH: ModelFile = ModelFile { role: "speech", repo: "ggerganov/whisper.cpp", file: crate::host::SPEECH_FILE, bytes: 574_041_195, optional: false };
@@ -234,8 +234,8 @@ pub fn token_from(v: Option<String>) -> Option<String> {
 /// Which of the files `run` needs are missing, as (role, file name).
 pub fn missing_for_run(dir: &Path, chat_given: bool, embed_given: bool, speech_given_or_off: bool) -> Vec<ModelFile> {
     let mut v = vec![];
-    if !chat_given && !dir.join(CHAT_E2B.file).is_file() {
-        v.push(CHAT_E2B);
+    if !chat_given && !dir.join(CHAT_E2B.file).is_file() && !dir.join(CHAT_E4B.file).is_file() {
+        v.push(CHAT_E4B);
     }
     if !embed_given && !dir.join(SEARCH.file).is_file() {
         v.push(SEARCH);
@@ -267,7 +267,7 @@ pub fn list(dir: Option<PathBuf>) -> Result<()> {
     for m in [CHAT_E2B, SEARCH, SPEECH, CHAT_E4B] {
         let len = std::fs::metadata(dir.join(m.file)).ok().filter(|x| x.is_file()).map(|x| x.len());
         let part = std::fs::metadata(part_path(&dir, &m)).ok().map(|x| x.len()).filter(|l| *l > 0);
-        let role = if m.optional { format!("{} (optional, pass --chat-model)", m.role) } else { m.role.to_string() };
+        let role = if m.optional { format!("{} (optional, smaller)", m.role) } else { m.role.to_string() };
         match len {
             Some(l) => {
                 let note = if m.bytes > 0 && l != m.bytes { "  (size differs from the expected one, download again to repair)" } else { "" };
@@ -502,6 +502,18 @@ fn describe_network_error(e: &ureq::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn e4b_file_is_preferred_when_present() {
+        let dir = std::env::temp_dir().join(format!("mn-chat-pref-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(crate::host::default_chat_path(&dir), dir.join(crate::host::CHAT_FILE));
+        assert!(super::missing_for_run(&dir, false, true, true).iter().any(|m| m.role == "chat"));
+        std::fs::write(dir.join(crate::host::CHAT_FILE_E4B), b"x").unwrap();
+        assert_eq!(crate::host::default_chat_path(&dir), dir.join(crate::host::CHAT_FILE_E4B));
+        assert!(super::missing_for_run(&dir, false, true, true).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
 
     #[test]
@@ -514,7 +526,7 @@ mod tests {
 
     #[test]
     fn speech_is_fetched_unless_skipped() {
-        let files = |only, skip| wanted(only, ChatChoice::E2b, skip).iter().map(|m| m.role).collect::<Vec<_>>();
+        let files = |only, skip| wanted(only, ChatChoice::E4b, skip).iter().map(|m| m.role).collect::<Vec<_>>();
         assert_eq!(files(None, false), vec!["chat", "search", "speech"]);
         assert_eq!(files(None, true), vec!["chat", "search"]);
         assert_eq!(files(Some(Only::Speech), false), vec!["speech"]);

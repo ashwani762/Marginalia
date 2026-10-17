@@ -22,7 +22,7 @@ $MN_Launcher  = Join-Path $MN_InstallDir 'start-node.vbs'
 $MN_LogFile   = Join-Path $MN_InstallDir 'node.log'
 # The model files the node serves and their exact sizes (same as compute-node/node/src/models_dl.rs).
 $MN_Models = @(
-    @{ Role = 'chat';   File = 'gemma-4-E2B-it-Q4_0.gguf';   Size = 2841481184 },
+    @{ Role = 'chat';   File = 'gemma-4-E4B-it-Q4_0.gguf';   Size = 4590807392 },
     @{ Role = 'search'; File = 'embeddinggemma-2-Q8_0.gguf'; Size = 309855456 },
     @{ Role = 'speech'; File = 'ggml-large-v3-turbo-q5_0.bin'; Size = 574041195 }
 )
@@ -183,6 +183,13 @@ function Test-RustMsvc {
     try { $v = (& rustc -vV 2>$null) -join "`n" } catch { }
     return ($v -match 'host:\s*\S*windows-msvc')
 }
+# The tray needs rustc 1.95 or newer (egui 0.37). Older toolchains stop with "requires rustc 1.95".
+function Test-RustNewEnough {
+    $v = $null
+    try { $v = (& rustc --version 2>$null) -join ' ' } catch { }
+    if ($v -notmatch 'rustc (\d+)\.(\d+)') { return $false }
+    return ([int]$Matches[1] -gt 1) -or ([int]$Matches[2] -ge 95)
+}
 function Get-VsInstall {
     $vw = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path $vw)) { return $null }
@@ -190,10 +197,18 @@ function Get-VsInstall {
     if ($p) { return (@($p)[0]) }
     return $null
 }
+function Test-CmakeNewEnough {
+    # Visual Studio 2026 (folder "18") needs CMake 4.2 or newer, older ones fail with "Could not create named generator".
+    $vs = Get-VsInstall
+    if (-not $vs -or $vs -notmatch '\\18\\') { return $true }
+    $out = (& cmake.exe --version 2>$null | Select-Object -First 1)
+    if ($out -notmatch '(\d+)\.(\d+)') { return $true }
+    return ([int]$Matches[1] -gt 4) -or ([int]$Matches[1] -eq 4 -and [int]$Matches[2] -ge 2)
+}
 function Test-Cmake {
-    if (Find-Command 'cmake.exe') { return $true }
+    if (Find-Command 'cmake.exe') { return (Test-CmakeNewEnough) }
     $c = Join-Path $env:ProgramFiles 'CMake\bin'
-    if (Test-Path (Join-Path $c 'cmake.exe')) { $env:Path = $env:Path + ';' + $c; return $true }
+    if (Test-Path (Join-Path $c 'cmake.exe')) { $env:Path = $env:Path + ';' + $c; return (Test-CmakeNewEnough) }
     $vs = Get-VsInstall
     if ($vs) {
         $d = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
