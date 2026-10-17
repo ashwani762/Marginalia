@@ -43,8 +43,12 @@ Optional *compute nodes* on your network make the AI faster while you are near t
 
 <p align="center">
   <img src="docs/images/nodes.png" width="24%" alt="Compute nodes in Settings">
+  &nbsp;
   <img src="docs/images/knowledge.png" width="24%" alt="Knowledge">
-  <img src="docs/images/tray.png" width="24%" alt="Details panel of the compute node tray icon">
+</p>
+
+<p align="center">
+  <img src="docs/images/tray.png" width="200" alt="Details panel of the compute node tray icon">
 </p>
 
 <p align="center">
@@ -54,7 +58,7 @@ Optional *compute nodes* on your network make the AI faster while you are near t
 ## How it fits together
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph Phone
         UI["Kotlin + Compose UI (app/)"]
         Core["Rust core (core/)<br/>SQLite, vector index, write-up pipeline"]
@@ -62,7 +66,7 @@ flowchart LR
         UI -- "JSON over JNI" --> Core
         Core --- AI
     end
-    subgraph "Compute node (optional, a PC)"
+    subgraph NodeBox ["Compute node (optional, a PC)"]
         Node["marginalia-node (compute-node/)<br/>Rust, tokio, llama.cpp, whisper.cpp"]
         Tray["tray icon and details panel"]
         Tray -- "local admin channel" --> Node
