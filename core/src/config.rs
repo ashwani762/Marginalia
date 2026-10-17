@@ -84,7 +84,7 @@ impl Default for Settings {
             appearance: "System".into(),
             improve_transcript: true,
             live_correction: false,
-            live_correction_window_s: 30,
+            live_correction_window_s: 20,
         }
     }
 }

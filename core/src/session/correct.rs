@@ -13,11 +13,11 @@ use std::collections::VecDeque;
 
 /// The window lengths the person can choose, in seconds of new talk per window.
 pub(super) const WINDOW_CHOICES: [u32; 4] = [20, 30, 45, 60];
-pub(super) const DEFAULT_WINDOW_S: u32 = 30;
+pub(super) const DEFAULT_WINDOW_S: u32 = 20;
 /// No window is cut shorter than this.
 const MIN_WINDOW_S: f64 = 15.0;
-/// A window starts this long before the corrected text ends, so a word cut in half at its start is heard whole.
-const LEAD_IN: f64 = 5.0;
+/// Room kept in a window for the stretch that is heard again at its start (the last corrected segment, usually a few seconds).
+const REDO_ROOM: f64 = 10.0;
 /// A window ends this long before now, so words still being said are not cut.
 const END_LAG: f64 = 4.0;
 /// The most a window covers when earlier ones were skipped or failed.
@@ -25,9 +25,11 @@ const MAX_BACKLOG_S: f64 = 180.0;
 /// A segment that ends this close to the end of the window may be cut short, so it is left for the next window.
 const END_MARGIN: f64 = 0.5;
 /// The recent audio kept: a backlog window, its lead-in, and the lag before it.
-pub(super) const RING_SECS: f64 = MAX_BACKLOG_S + LEAD_IN + END_LAG + 11.0;
-/// A segment may start this much before the corrected text ends.
-const ACCEPT_SLACK: f64 = 1.0;
+pub(super) const RING_SECS: f64 = MAX_BACKLOG_S + REDO_ROOM + END_LAG + 11.0;
+/// A segment may start this much before the point the window starts at.
+const ACCEPT_SLACK: f64 = 0.3;
+/// A segment has to reach at least this far past the corrected text to be worth taking.
+const MIN_NEW: f64 = 0.2;
 /// How much of the earlier text goes along as the speech model's prompt.
 pub(super) const PROMPT_CHARS: usize = 200;
 /// After a window failed, the next one waits this long.
@@ -131,7 +133,7 @@ pub(super) struct Plan {
 pub(super) fn plan_for(setting_s: u32, node_max_s: u32) -> Plan {
     let wanted = if WINDOW_CHOICES.contains(&setting_s) { setting_s } else { DEFAULT_WINDOW_S } as f64;
     let max_len = (node_window_s(node_max_s) as f64).clamp(MIN_WINDOW_S, MAX_BACKLOG_S);
-    Plan { every: wanted.min(max_len - LEAD_IN).max(MIN_WINDOW_S), max_len }
+    Plan { every: wanted.min(max_len - REDO_ROOM).max(MIN_WINDOW_S), max_len }
 }
 
 /// One stretch of audio to send.
@@ -141,6 +143,9 @@ pub(super) struct Window {
     pub end: f64,
     /// The window starts where this recording started, so nothing before it was cut.
     pub at_origin: bool,
+    /// The window starts exactly where the last corrected segment started, so it is a clean beginning that the node
+    /// hears whole. False when the window had to start later (a backlog, or audio that is no longer held).
+    pub from_redo: bool,
 }
 
 impl Window {
@@ -149,19 +154,24 @@ impl Window {
         self.end - self.start
     }
 
-    /// Node segments must start here or later: just before the text already corrected, and not at the very first
-    /// moment of a window that cut into the audio.
-    pub fn accept_from(&self, upto: f64) -> f64 {
-        let a = upto - ACCEPT_SLACK;
-        if self.at_origin { a } else { a.max(self.start + 1.0) }
+    /// Node segments must start here or later. A window that begins at a clean point (where the last corrected segment
+    /// started, or the start of the recording) takes everything from its start. One that cut into the audio does not take
+    /// its first second, which may be a word cut in half.
+    pub fn accept_from(&self) -> f64 {
+        if self.at_origin || self.from_redo { self.start - ACCEPT_SLACK } else { self.start + 1.0 }
     }
 }
 
 /// Whether a window should be cut now, and which one. `audio_end` is the meeting time of the newest audio, `upto`
-/// how far the text is corrected, `ring_start` the oldest audio held, `origin` where this recording started and
-/// `busy` whether a window is still out. Only one is ever out: if the last one is still running, the next one simply
-/// covers the gap, up to the longest window the node takes as a quick job.
-pub(super) fn plan_window(audio_end: f64, upto: f64, ring_start: f64, origin: f64, busy: bool, plan: &Plan) -> Option<Window> {
+/// how far the text is corrected, `redo` where the last corrected segment started, `ring_start` the oldest audio held,
+/// `origin` where this recording started and `busy` whether a window is still out. Only one is ever out: if the last
+/// one is still running, the next one simply covers the gap, up to the longest window the node takes as a quick job.
+///
+/// A window starts where the last corrected segment started and replaces it with the longer, better one. Starting a
+/// few seconds before the corrected end instead (the old rule) made the node begin a segment mid speech at the start of
+/// every window, that segment was thrown away, and with it the new words in it: on real speech only a third to a half
+/// of the talk was ever corrected. Starting at a segment's own beginning loses nothing.
+pub(super) fn plan_window(audio_end: f64, upto: f64, redo: f64, ring_start: f64, origin: f64, busy: bool, plan: &Plan) -> Option<Window> {
     if busy {
         return None;
     }
@@ -169,19 +179,20 @@ pub(super) fn plan_window(audio_end: f64, upto: f64, ring_start: f64, origin: f6
     if end - upto < plan.every {
         return None;
     }
-    let start = (upto - LEAD_IN).max(end - plan.max_len).max(ring_start).max(origin);
+    let start = redo.max(end - plan.max_len).max(ring_start).max(origin);
     if end - start < MIN_WINDOW_S.min(plan.every).min(10.0) {
         return None;
     }
-    Some(Window { start, end, at_origin: start <= origin + 1e-6 })
+    Some(Window { start, end, at_origin: start <= origin + 1e-6, from_redo: start <= redo + 1e-6 })
 }
 
 // ------------------------------------------------------------------------------------------------ what comes back
 
-/// The segments of an answer that may be used: they start at or after the corrected text ends (less a second) and end
-/// before the window does, because the last one may be cut short.
-pub(super) fn accept(heard: &[(f64, f64, String)], accept_from: f64, win_end: f64) -> Vec<(f64, f64, String)> {
-    heard.iter().filter(|s| s.0 >= accept_from && s.1 <= win_end - END_MARGIN && !s.2.trim().is_empty()).cloned().collect()
+/// The segments of an answer that may be used: they start where the window may be trusted, reach past the corrected text
+/// (`upto`, so a segment that only repeats what is corrected is not taken again) and end before the window does, because
+/// the last one may be cut short.
+pub(super) fn accept(heard: &[(f64, f64, String)], accept_from: f64, win_end: f64, upto: f64) -> Vec<(f64, f64, String)> {
+    heard.iter().filter(|s| s.0 >= accept_from && s.1 > upto + MIN_NEW && s.1 <= win_end - END_MARGIN && !s.2.trim().is_empty()).cloned().collect()
 }
 
 /// What to do with an answer.
@@ -201,8 +212,8 @@ fn words(segs: impl Iterator<Item = String>) -> usize {
 
 /// `new` is the tidied accepted text, `live` the segments now stored (t0, t1, text) and `complete` says the node
 /// reached the end of the window.
-pub(super) fn decide(win: &Window, upto: f64, new: Vec<(f64, f64, String)>, live: &[(f64, f64, String)], complete: bool) -> Decision {
-    let from = win.accept_from(upto);
+pub(super) fn decide(win: &Window, new: Vec<(f64, f64, String)>, live: &[(f64, f64, String)], complete: bool) -> Decision {
+    let from = win.accept_from();
     if new.is_empty() {
         // A node that listened to everything and heard nothing, where the phone heard nothing either: nothing to fix.
         let quiet = !live.iter().any(|s| s.1 > from && s.0 < win.end - END_MARGIN);
@@ -296,6 +307,8 @@ pub(super) struct Correction {
     pub shown: Option<String>,
     /// Text up to here is corrected (meeting seconds).
     pub upto: f64,
+    /// The last corrected segment started here: the next window starts at this point.
+    pub redo: f64,
     pub in_flight: bool,
     pub cancel: Arc<AtomicBool>,
     pub retry_at: Option<Instant>,
@@ -304,7 +317,7 @@ pub(super) struct Correction {
 impl Correction {
     /// For a recording that starts at `origin` meeting seconds (0 for a new meeting, where it carries on for a resumed one).
     pub fn new(origin: f64) -> Correction {
-        Correction { ring: PcmRing::new(origin, RING_SECS), collecting: false, shown: None, upto: origin, in_flight: false, cancel: Arc::new(AtomicBool::new(false)), retry_at: None }
+        Correction { ring: PcmRing::new(origin, RING_SECS), collecting: false, shown: None, upto: origin, redo: origin, in_flight: false, cancel: Arc::new(AtomicBool::new(false)), retry_at: None }
     }
 
     /// Notes which node (if any) can do the work now. True when what the screen shows changed.
@@ -425,16 +438,17 @@ impl Core {
         };
         let mid = l.meeting_id;
         let upto = l.corr.upto;
-        let accepted = accept(&heard.segments, job.win.accept_from(upto), job.win.end);
+        let accepted = accept(&heard.segments, job.win.accept_from(), job.win.end, upto);
         let new = tidy_segments(accepted, crate::engine::whisper::clean_transcript);
         let live_now: Vec<(f64, f64, String)> = self.kb.store.segments(mid).unwrap_or_default().into_iter().map(|s| (s.t0, s.t1, s.text)).collect();
-        match decide(&job.win, upto, new, &live_now, heard.complete) {
+        match decide(&job.win, new, &live_now, heard.complete) {
             Decision::Nothing => {
                 l.corr.retry_at = Some(Instant::now() + RETRY_AFTER);
                 Some((l.corr.upto, 0))
             }
             Decision::Skip { upto: to } => {
                 l.corr.upto = l.corr.upto.max(to);
+                l.corr.redo = l.corr.redo.max(to);
                 Some((l.corr.upto, 0))
             }
             Decision::Swap { r0, r1, new } => {
@@ -443,8 +457,10 @@ impl Core {
                     // Part of this is already condensed into notes, which are written from the old words. Leave it be and move on.
                     let past = l.sections.last().map(|s| s.t1 + 1.0).unwrap_or(r1);
                     l.corr.upto = l.corr.upto.max(past);
+                    l.corr.redo = l.corr.redo.max(past);
                     return Some((l.corr.upto, 0));
                 }
+                let last_start = new.last().map(|s| s.0).unwrap_or(r1);
                 let (removed, added, payload) = match swap_lines(&self.kb.store, mid, &mut l.lines, r0, r1, &new) {
                     Ok(x) => x,
                     Err(e) => {
@@ -456,6 +472,7 @@ impl Core {
                 l.enhance_lines_seen = shift_index(l.enhance_lines_seen, a, removed, added);
                 l.scanned_upto = shift_index(l.scanned_upto, a, removed, added);
                 l.corr.upto = l.corr.upto.max(r1);
+                l.corr.redo = last_start;
                 l.corr.retry_at = None;
                 let upto_now = l.corr.upto;
                 tracing::info!("live correction on {}: {:.0}-{:.0}s, {removed} lines became {added}", heard.node, r0, r1);
@@ -502,16 +519,20 @@ mod tests {
         plan_for(30, 0)
     }
 
+    fn win(start: f64, end: f64) -> Window {
+        Window { start, end, at_origin: start <= 0.0, from_redo: true }
+    }
+
     #[test]
     fn the_window_follows_the_choice_and_what_the_node_takes() {
         assert_eq!(plan_for(30, 0), Plan { every: 30.0, max_len: 120.0 }, "a node that does not say is taken for 120 seconds");
         assert_eq!(plan_for(20, 120).every, 20.0);
         assert_eq!(plan_for(45, 120).every, 45.0);
         assert_eq!(plan_for(60, 120).every, 60.0);
-        assert_eq!(plan_for(7, 120).every, 30.0, "an odd choice falls back to 30");
-        // A node that treats only up to 40 seconds as quick: a window is the new talk plus 5 seconds of lead-in.
+        assert_eq!(plan_for(7, 120).every, 20.0, "an odd choice falls back to the default of 20");
+        // A node that treats only up to 40 seconds as quick: a window is the new talk plus room to hear the last segment again.
         let p = plan_for(60, 40);
-        assert_eq!((p.every, p.max_len), (35.0, 40.0));
+        assert_eq!((p.every, p.max_len), (30.0, 40.0));
         // Never below 15 seconds, whatever the node says.
         let p = plan_for(20, 10);
         assert_eq!((p.every, p.max_len), (15.0, 15.0));
@@ -522,15 +543,15 @@ mod tests {
     fn a_window_is_cut_every_so_often_and_only_one_at_a_time() {
         let p = plan30();
         // 20 seconds in: the first window ends 4 seconds before now and 30 seconds of talk have not piled up yet.
-        assert_eq!(plan_window(20.0, 0.0, 0.0, 0.0, false, &p), None);
-        assert_eq!(plan_window(33.9, 0.0, 0.0, 0.0, false, &p), None);
-        let w = plan_window(34.0, 0.0, 0.0, 0.0, false, &p).unwrap();
-        assert_eq!((w.start, w.end, w.at_origin), (0.0, 30.0, true));
+        assert_eq!(plan_window(20.0, 0.0, 0.0, 0.0, 0.0, false, &p), None);
+        assert_eq!(plan_window(33.9, 0.0, 0.0, 0.0, 0.0, false, &p), None);
+        let w = plan_window(34.0, 0.0, 0.0, 0.0, 0.0, false, &p).unwrap();
+        assert_eq!((w.start, w.end, w.at_origin, w.from_redo), (0.0, 30.0, true, true));
         // Still out: nothing is cut however long it takes.
-        assert_eq!(plan_window(100.0, 0.0, 0.0, 0.0, true, &p), None);
-        // The next one starts 5 seconds before the corrected text ends.
-        let w = plan_window(64.0, 29.0, 0.0, 0.0, false, &p).unwrap();
-        assert_eq!((w.start, w.end, w.at_origin), (24.0, 60.0, false));
+        assert_eq!(plan_window(100.0, 0.0, 0.0, 0.0, 0.0, true, &p), None);
+        // The next one starts where the last corrected segment started (24 s), which ended at 29 s.
+        let w = plan_window(64.0, 29.0, 24.0, 0.0, 0.0, false, &p).unwrap();
+        assert_eq!((w.start, w.end, w.at_origin, w.from_redo), (24.0, 60.0, false, true));
         assert!((w.secs() - 36.0).abs() < 1e-9);
     }
 
@@ -538,27 +559,27 @@ mod tests {
     fn a_skipped_window_is_covered_by_the_next_up_to_the_limit() {
         let p = plan30();
         // The window due at 34 s never went out; at 94 s the next one reaches back to 25 s.
-        let w = plan_window(94.0, 30.0, 0.0, 0.0, false, &p).unwrap();
-        assert_eq!((w.start, w.end), (25.0, 90.0));
-        // A node that takes 120 seconds as a quick job: a backlog of 5 minutes is cut to 120.
-        let w = plan_window(304.0, 30.0, 0.0, 0.0, false, &p).unwrap();
-        assert_eq!((w.start, w.end), (180.0, 300.0));
+        let w = plan_window(94.0, 30.0, 25.0, 0.0, 0.0, false, &p).unwrap();
+        assert_eq!((w.start, w.end, w.from_redo), (25.0, 90.0, true));
+        // A node that takes 120 seconds as a quick job: a backlog of 5 minutes is cut to 120, and it no longer starts at a clean point.
+        let w = plan_window(304.0, 30.0, 25.0, 0.0, 0.0, false, &p).unwrap();
+        assert_eq!((w.start, w.end, w.from_redo), (180.0, 300.0, false));
         assert!(w.secs() <= p.max_len);
         // A node with a short limit gets shorter windows.
         let short = plan_for(60, 45);
-        let w = plan_window(304.0, 30.0, 0.0, 0.0, false, &short).unwrap();
+        let w = plan_window(304.0, 30.0, 25.0, 0.0, 0.0, false, &short).unwrap();
         assert_eq!(w.secs(), 45.0);
-        assert_eq!(plan_window(300.0 + 4.0, 270.0, 0.0, 0.0, false, &short), None, "30 seconds is less than a 40 second step");
+        assert_eq!(plan_window(300.0 + 4.0, 270.0, 265.0, 0.0, 0.0, false, &short), None, "30 seconds is less than a 35 second step");
     }
 
     #[test]
     fn windows_of_different_lengths_come_at_their_own_pace() {
         for (choice, every) in [(20u32, 20.0), (30, 30.0), (45, 45.0), (60, 60.0)] {
             let p = plan_for(choice, 120);
-            assert!(plan_window(every + 3.9, 0.0, 0.0, 0.0, false, &p).is_none(), "{choice}: too early");
-            let w = plan_window(every + 4.0, 0.0, 0.0, 0.0, false, &p).unwrap();
+            assert!(plan_window(every + 3.9, 0.0, 0.0, 0.0, 0.0, false, &p).is_none(), "{choice}: too early");
+            let w = plan_window(every + 4.0, 0.0, 0.0, 0.0, 0.0, false, &p).unwrap();
             assert_eq!(w.secs(), every);
-            let next = plan_window(2.0 * every + 4.0, every, 0.0, 0.0, false, &p).unwrap();
+            let next = plan_window(2.0 * every + 4.0, every, every - 5.0, 0.0, 0.0, false, &p).unwrap();
             assert_eq!(next.start, every - 5.0);
             assert_eq!(next.secs(), every + 5.0);
         }
@@ -568,62 +589,107 @@ mod tests {
     fn a_window_never_reaches_before_the_audio_that_is_held() {
         let p = plan30();
         // The node came back late: only the last 40 seconds were kept.
-        let w = plan_window(200.0, 20.0, 160.0, 0.0, false, &p).unwrap();
-        assert_eq!((w.start, w.end, w.at_origin), (160.0, 196.0, false));
+        let w = plan_window(200.0, 20.0, 15.0, 160.0, 0.0, false, &p).unwrap();
+        assert_eq!((w.start, w.end, w.at_origin, w.from_redo), (160.0, 196.0, false, false));
         // A resumed meeting does not reach into the earlier recording.
-        let w = plan_window(1000.0 + 34.0, 1000.0, 1000.0, 1000.0, false, &p).unwrap();
+        let w = plan_window(1000.0 + 34.0, 1000.0, 1000.0, 1000.0, 1000.0, false, &p).unwrap();
         assert_eq!(w.start, 1000.0);
         assert!(w.at_origin);
         // Hardly any audio held: wait.
-        assert_eq!(plan_window(200.0, 20.0, 192.0, 0.0, false, &p), None);
+        assert_eq!(plan_window(200.0, 20.0, 15.0, 192.0, 0.0, false, &p), None);
     }
 
     #[test]
     fn only_what_is_safely_inside_the_window_is_accepted() {
-        let win = Window { start: 25.0, end: 60.0, at_origin: false };
+        // The window starts where the last corrected segment started (25 s), and the corrected text ends at 30 s.
+        let w = win(25.0, 60.0);
         let upto = 30.0;
-        let from = win.accept_from(upto);
-        assert_eq!(from, 29.0);
+        let from = w.accept_from();
+        assert!((from - 24.7).abs() < 1e-9);
         let heard = vec![
-            seg(25.0, 28.0, "heard again from the lead-in"),
-            seg(28.5, 33.0, "starts too early"),
-            seg(29.0, 33.0, "starts exactly at the line"),
+            seg(25.0, 29.9, "the same segment again, nothing new in it"),
+            seg(25.0, 33.0, "the same segment, now longer"),
             seg(34.0, 45.0, "in the middle"),
             seg(46.0, 59.6, "ends too close to the end"),
             seg(50.0, 55.0, "   "),
             seg(55.0, 59.5, "ends half a second before"),
         ];
-        let got = accept(&heard, from, win.end);
-        assert_eq!(got.iter().map(|s| s.2.as_str()).collect::<Vec<_>>(), vec!["starts exactly at the line", "in the middle", "ends half a second before"]);
-        // A window that begins after the corrected text (a gap) does not take its first second, which may be cut.
-        let gap = Window { start: 100.0, end: 130.0, at_origin: false };
-        assert_eq!(gap.accept_from(30.0), 101.0);
+        let got = accept(&heard, from, w.end, upto);
+        assert_eq!(got.iter().map(|s| s.2.as_str()).collect::<Vec<_>>(), vec!["the same segment, now longer", "in the middle", "ends half a second before"]);
+        // A window that had to start later (a gap) does not take its first second, which may be cut.
+        let gap = Window { start: 100.0, end: 130.0, at_origin: false, from_redo: false };
+        assert_eq!(gap.accept_from(), 101.0);
         // At the very start of the recording nothing was cut.
-        let first = Window { start: 0.0, end: 30.0, at_origin: true };
-        assert_eq!(first.accept_from(0.0), -1.0);
+        let first = Window { start: 0.0, end: 30.0, at_origin: true, from_redo: true };
+        assert!((first.accept_from() + 0.3).abs() < 1e-9);
+    }
+
+    // The real trouble the old rule had: talk without pauses. A window starting a few seconds before the corrected end
+    // got a first segment that began mid speech and straddled the corrected end, it was thrown away and its new words
+    // with it, again and again. Whisper cuts its segments where the audio starts, so this is what a node answers.
+    #[test]
+    fn continuous_talk_is_corrected_without_gaps() {
+        // Ten seconds of talk per segment, no pauses: 0-10 one two, 10-20 and so on.
+        let truth = |a: f64, b: f64| -> Vec<(f64, f64, String)> {
+            // A node hears the talk from the start of the window, in pieces that begin where the window begins.
+            let mut out = Vec::new();
+            let mut t = a;
+            while t < b - 1.0 {
+                let end = (t + 10.0).min(b);
+                out.push((t, end, format!("s{}-{}", t as u32, end as u32)));
+                t = end;
+            }
+            out
+        };
+        let p = plan_for(20, 120);
+        let (mut upto, mut redo) = (0.0f64, 0.0f64);
+        let mut covered: Vec<(f64, f64, String)> = Vec::new();
+        let mut now = 0.0;
+        while now < 200.0 {
+            now += 1.0;
+            let Some(w) = plan_window(now, upto, redo, 0.0, 0.0, false, &p) else { continue };
+            let heard = truth(w.start, w.end);
+            let got = accept(&heard, w.accept_from(), w.end, upto);
+            if got.is_empty() {
+                continue;
+            }
+            let r0 = got.iter().map(|s| s.0).fold(f64::MAX, f64::min);
+            covered.retain(|c| c.1 <= r0 + 0.05);
+            covered.extend(got.iter().cloned());
+            upto = got.iter().map(|s| s.1).fold(f64::MIN, f64::max);
+            redo = got.last().unwrap().0;
+        }
+        // Everything up to the last window is corrected, with no hole between two pieces.
+        assert!(upto >= 150.0, "reached {upto}");
+        let mut at = 0.0;
+        for c in &covered {
+            assert!(c.0 <= at + 0.05, "a hole before {} (covered up to {at})", c.0);
+            at = at.max(c.1);
+        }
     }
 
     #[test]
     fn a_good_answer_swaps_a_failed_or_empty_one_does_not() {
-        let win = Window { start: 0.0, end: 30.0, at_origin: true };
+        let w = win(0.0, 30.0);
         let live = vec![seg(0.0, 10.0, "one two three four five six seven eight nine ten"), seg(10.0, 20.0, "eleven twelve thirteen fourteen fifteen sixteen seventeen")];
         let new = vec![seg(0.5, 9.5, "One two three four five six seven eight nine ten."), seg(10.5, 19.5, "Eleven twelve thirteen fourteen fifteen sixteen seventeen.")];
-        match decide(&win, 0.0, new.clone(), &live, true) {
+        match decide(&w, new.clone(), &live, true) {
             Decision::Swap { r0, r1, new: n } => {
-                assert_eq!((r0, r1), (-1.0, 19.5));
+                assert!((r0 + 0.3).abs() < 1e-9, "{r0}");
+                assert_eq!(r1, 19.5);
                 assert_eq!(n, new);
             }
             other => panic!("{other:?}"),
         }
         // Nothing heard where the phone heard words: keep what is there and ask again with the next window.
-        assert_eq!(decide(&win, 0.0, vec![], &live, true), Decision::Nothing);
-        assert_eq!(decide(&win, 0.0, vec![], &live, false), Decision::Nothing);
+        assert_eq!(decide(&w, vec![], &live, true), Decision::Nothing);
+        assert_eq!(decide(&w, vec![], &live, false), Decision::Nothing);
         // Nothing heard by anyone: just move on.
-        assert_eq!(decide(&win, 0.0, vec![], &[], true), Decision::Skip { upto: 30.0 });
-        assert_eq!(decide(&win, 0.0, vec![], &[], false), Decision::Nothing, "an answer that stopped early says nothing about the rest");
+        assert_eq!(decide(&w, vec![], &[], true), Decision::Skip { upto: 30.0 });
+        assert_eq!(decide(&w, vec![], &[], false), Decision::Nothing, "an answer that stopped early says nothing about the rest");
         // Far fewer words than the phone heard: the phone's text stays and the stretch is not asked about again.
         let thin = vec![seg(0.5, 9.5, "One two"), seg(10.5, 19.5, "Eleven")];
-        assert_eq!(decide(&win, 0.0, thin, &live, true), Decision::Skip { upto: 19.5 });
+        assert_eq!(decide(&w, thin, &live, true), Decision::Skip { upto: 19.5 });
     }
 
     #[test]
@@ -744,6 +810,7 @@ mod tests {
         assert_eq!(c.ring.held_secs(), 0.0, "audio is let go when no node can use it");
         assert_eq!(c.ring.end_secs(), 1.0, "but time moved on");
         assert_eq!(Correction::new(500.0).upto, 500.0, "a resumed meeting starts where it left off");
+        assert_eq!(Correction::new(500.0).redo, 500.0);
     }
 
     // The whole trip of one window through a node that speaks the protocol (the fake of the remote tests).
@@ -756,7 +823,7 @@ mod tests {
         r.refresh();
         assert_eq!(r.transcribe_node_window(), Some(("a".to_string(), 90)));
         // 12 seconds of audio that start 100 seconds into the meeting.
-        let win = Window { start: 100.0, end: 112.0, at_origin: false };
+        let win = Window { start: 100.0, end: 112.0, at_origin: false, from_redo: true };
         let job = CorrectionJob {
             meeting_id: 1,
             win,
@@ -774,9 +841,10 @@ mod tests {
         assert_eq!(heard.segments[11], (111.0, 112.0, "w11".to_string()));
         assert_eq!(a.jobs.lock().unwrap().as_slice(), &[(12_000, 12 * 32_000)], "total_ms is the real length of the window");
         assert_eq!(a.metas.lock().unwrap().as_slice(), &[(marginalia_proto::Priority::Interactive, Some("Priya owns the migration.".to_string()))]);
-        // Accepting: the corrected text ends at 102, so from 101 on, and not the last piece before the end.
-        let got = accept(&heard.segments, win.accept_from(102.0), win.end);
-        assert_eq!(got.first().map(|s| s.2.as_str()), Some("w1"));
+        // Accepting: the corrected text ends at 102, the window starts at 100, so w1 (ends 102.0) adds nothing and w2 is the first
+        // new piece. The last piece before the end is not taken.
+        let got = accept(&heard.segments, win.accept_from(), win.end, 102.0);
+        assert_eq!(got.first().map(|s| s.2.as_str()), Some("w2"));
         assert_eq!(got.last().map(|s| s.2.as_str()), Some("w10"), "w11 ends at the window end and may be cut short");
         let tidy = tidy_segments(got, |t| t.to_string());
         assert!(!tidy.is_empty() && tidy.iter().all(|s| s.1 <= 111.5));
@@ -790,7 +858,7 @@ mod tests {
     fn no_node_means_no_window() {
         use crate::remote::tests::remote_with;
         let r = remote_with(&[], "nowindow");
-        let job = CorrectionJob { meeting_id: 1, win: Window { start: 0.0, end: 5.0, at_origin: true }, pcm: vec![0u8; 5 * 32_000], language: None, prompt: None, cancel: Arc::new(AtomicBool::new(false)) };
+        let job = CorrectionJob { meeting_id: 1, win: Window { start: 0.0, end: 5.0, at_origin: true, from_redo: true }, pcm: vec![0u8; 5 * 32_000], language: None, prompt: None, cancel: Arc::new(AtomicBool::new(false)) };
         assert!(fetch_window(&r, &job).is_err());
         assert_eq!(r.transcribe_node_window(), None);
     }

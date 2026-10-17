@@ -239,7 +239,7 @@ data class Prefs(
     val improveTranscript: Boolean = true,
     /** While recording, a compute node listens again in short windows and fixes the captions. */
     val liveCorrection: Boolean = false,
-    /** Seconds of talk per correction window: 20, 30, 45 or 60. */
+    /** Seconds of talk per correction window: 20, 30, 45 or 60 (20 by default). */
     val liveCorrectionWindowS: Int = DEFAULT_CORRECTION_WINDOW_S,
 ) {
     companion object {
@@ -256,7 +256,7 @@ data class Prefs(
     }
 }
 
-const val DEFAULT_CORRECTION_WINDOW_S = 30
+const val DEFAULT_CORRECTION_WINDOW_S = 20
 val CORRECTION_WINDOWS_S = listOf(20, 30, 45, 60)
 
 /** Where the engine is, from first launch to ready. */

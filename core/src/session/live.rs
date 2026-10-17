@@ -399,7 +399,7 @@ impl Core {
                 if let Some((_, node_max)) = node.as_ref() {
                     let ready = l.corr.retry_at.map(|t| Instant::now() >= t).unwrap_or(true);
                     let plan = plan_for(window_s, *node_max);
-                    let win = if ready { plan_window(l.corr.ring.end_secs(), l.corr.upto, l.corr.ring.start_secs(), l.time_offset, l.corr.in_flight, &plan) } else { None };
+                    let win = if ready { plan_window(l.corr.ring.end_secs(), l.corr.upto, l.corr.redo, l.corr.ring.start_secs(), l.time_offset, l.corr.in_flight, &plan) } else { None };
                     if let Some((win, pcm)) = win.and_then(|w| l.corr.ring.slice_bytes(w.start, w.end).map(|(start, pcm)| (Window { start, ..w }, pcm))) {
                         l.corr.in_flight = true;
                         l.corr.cancel = Arc::new(AtomicBool::new(false));
