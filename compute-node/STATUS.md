@@ -1,4 +1,4 @@
-# Status and how to carry on (written before moving development to Windows)
+# Status and how to carry on
 
 ## What works (checked on Linux with a real phone)
 
@@ -70,7 +70,7 @@ sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
 
 ## Not verified yet
 
-- On Windows, still to try by hand: the tray clicks (left click panel, right click menu, pause, resume, stop, start), a reboot
+- Windows is beta and will be finished later. Still to try by hand: the tray clicks (left click panel, right click menu, pause, resume, stop, start), a reboot
   bringing the node and the tray back, mDNS announcements seen from a real phone, and a real phone getting an answer.
 - Nodes finding and sharing work with each other (cluster) is designed in `DESIGN.md`, not built.
 - Live (streaming) speech to text on nodes is not built as one open stream. The node side of "live correction" exists (short windows with a prompt, own lane, see below) but no phone sends them yet.
@@ -116,7 +116,7 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
 
 ## Next steps (in order)
 
-1. Run `scripts\windows\setup.ps1` on Windows, run the node and the tray there and fix what breaks.
+1. Later: take Windows out of beta (tray clicks, a reboot, a real phone). The core features work today on Linux.
 2. Cluster: peers pair and gossip, entry node forwards jobs, block records spread, hot-hot and standby (`DESIGN.md`).
 3. Speech on nodes: the phone uses the `Transcribe` request to replace its live transcript after a meeting (the node side is done and checked), and sends short windows with a prompt during the meeting (the node side is done and checked, see above), then live streaming with failover.
 4. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).

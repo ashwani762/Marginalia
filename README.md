@@ -124,9 +124,9 @@ marginalia-node status     # what the node serves and which phones are paired
 marginalia-node stats      # jobs, speed, errors (counts only, never content)
 ```
 
-### A compute node on Windows
+### A compute node on Windows (beta)
 
-Run `scripts\windows\setup.ps1 -Auto` in PowerShell. It needs no bash. It installs missing tools, builds, downloads the models, installs the node and the tray icon, starts them at login and checks everything. Run `scripts\windows\verify.ps1` any time to check again. See [docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md).
+Windows support is in beta. It builds and runs, but it is not as well tested as Linux and some parts still need work. Run `scripts\windows\setup.ps1 -Auto` in PowerShell. It needs no bash. It installs missing tools, builds, downloads the models, installs the node and the tray icon, starts them at login and checks everything. Run `scripts\windows\verify.ps1` any time to check again. See [docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md).
 
 ### Connect the phone
 
@@ -206,8 +206,7 @@ cargo test -p marginalia-node-tray      # tray icon logic
 
 ## Status
 
-Working and tested on an Android phone and Ubuntu: everything above. The compute node and the tray icon on Windows 11 build, run and pass the
-script checks. A real phone on the same Wi-Fi, the tray clicks and a reboot are still to be tried by hand (see [compute-node/STATUS.md](compute-node/STATUS.md)). Planned: nodes that find and share work with each other,
+Working and tested on an Android phone and Ubuntu: everything above. The compute node on Windows is **beta**. It builds, runs and passes its script checks on Windows 11, and the rest of the Windows testing comes later (see [compute-node/STATUS.md](compute-node/STATUS.md)). Planned: nodes that find and share work with each other,
 speech to text on nodes as one open stream.
 
 ## License

@@ -1,4 +1,6 @@
-# Marginalia compute node on Windows
+# Marginalia compute node on Windows (beta)
+
+Windows support is in beta. Linux is the supported path for now.
 
 One command sets up the node and its tray icon: it checks the tools, builds, installs to `%LOCALAPPDATA%\MarginaliaNode`, downloads the models, starts both at logon, opens the firewall for phones and checks the result. These scripts were written without a Windows machine to test on, so expect to report small fixes. Everything is safe to run again, and a second run only does what is not done yet (it prints the skipped steps first).
 

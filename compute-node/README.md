@@ -144,7 +144,9 @@ marginalia-node-tray --print                    # prints the menu as text and ex
 - **Guest Wi-Fi, client isolation and some mesh systems** stop devices from seeing each other, which breaks mDNS discovery and sometimes direct connections. If the phone cannot find the node, check that both are on the same ordinary network, then add the compute node by address (`marginalia-node pair` prints it, for example `192.168.1.20:47615`). If isolation is on, the address will not work either; turn it off or put both on the same network.
 - The node does not open any port to the internet and does not need a router rule. Do not forward the port.
 
-## Windows
+## Windows (beta)
+
+Windows support is in beta. The core features work on Linux and are the supported path for now. Windows will be finished later.
 
 `scripts/windows/` has PowerShell scripts for a one command setup (`.\scripts\windows\setup.ps1`): prerequisites check with the exact winget commands, GPU backend detection (CUDA, Vulkan or CPU), build, install to `%LOCALAPPDATA%\MarginaliaNode`, model download (`marginalia-node.exe models download`), Task Scheduler entries for the node and the tray at logon, and Windows Firewall rules. See `scripts/windows/README.md` for the quick start and a troubleshooting table, and `packaging/windows.md` for the manual steps. The scripts and the node were run on Windows 11 with an NVIDIA RTX 4060 (CUDA). `verify.ps1` passes all 19 checks there, including the self tests for search, chat and speech. Still to try by hand are the tray clicks, a reboot and a real phone on the same Wi-Fi.
 
