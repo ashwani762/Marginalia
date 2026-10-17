@@ -12,7 +12,7 @@ One command sets up the node and its tray icon: it checks the tools, builds, ins
 6. `.\compute-node\windows\setup.ps1` (add `-Auto` to let it run the winget installs for missing tools).
 7. If it lists missing tools, install them (it prints the exact `winget install` lines), open a NEW PowerShell window and run step 6 again.
 8. Allow the one Windows permission prompt for the firewall rules.
-9. Look for the tray icon by the clock (maybe behind the `^` arrow). On the phone: Settings, Compute nodes. The phone finds this machine by itself, tap Trust.
+9. Look for the tray icon by the clock (maybe behind the `^` arrow). On the phone: Settings, Compute nodes. The phone finds this machine by itself, tap Connect.
 10. `marginalia-node.exe stats` (in a new window) shows what the node has done.
 
 To double click instead: right click `setup.ps1` and choose Run with PowerShell. If the window closes too fast to read, use the steps above.
@@ -23,7 +23,7 @@ To double click instead: right click `setup.ps1` and choose Run with PowerShell.
 | --- | --- |
 | `setup.ps1` | Everything above. Options: `-Auto`, `-Cpu`, `-Cuda`, `-Vulkan`, `-SkipBuild`, `-SkipModels`, `-ModelsDir D:\models` |
 | `build.ps1` | Only the release build, with the same backend detection (`-Cpu`, `-Cuda`, `-Vulkan`) |
-| `download-models.ps1` | The two model files (about 3 GB). Uses `marginalia-node.exe models download`, or downloads by itself before the first build. `-Dir`, `-Only chat\|search`, `-ChatModel e2b\|e4b` |
+| `download-models.ps1` | The three model files (about 3.7 GB: chat, search and speech to text). Uses `marginalia-node.exe models download`, or downloads by itself before the first build. `-Dir`, `-Only chat\|search\|speech`, `-ChatModel e2b\|e4b`, `-SkipSpeech` |
 | `status.ps1` | Is the node running, task state, firewall rules, model files, `stats`, addresses, end of the log |
 | `uninstall.ps1` | Stops and removes the tasks, firewall rules and installed files. Keeps models and state unless `-Purge` |
 | `firewall.ps1` | The administrator part, started by the others with one prompt. You can run it yourself: `-Action Add -Exe <path>` or `-Action Remove` |

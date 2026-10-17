@@ -312,6 +312,10 @@ impl Store {
                 name TEXT NOT NULL,
                 PRIMARY KEY (meeting_id, idx)
              );
+             CREATE TABLE IF NOT EXISTS meeting_language (
+                meeting_id INTEGER PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+                lang TEXT NOT NULL
+             );
              CREATE INDEX IF NOT EXISTS documents_folder ON documents(folder_id);
              CREATE INDEX IF NOT EXISTS meetings_folder ON meetings(folder_id);",
         )?;
@@ -797,6 +801,52 @@ impl Store {
         Ok(rows)
     }
 
+    /// Swaps the whole transcript of a meeting for `new` = (t0, t1, text), in one step, so a failure leaves the old
+    /// transcript as it was. Each new segment takes the speaker who talked most during its time in the old
+    /// transcript. Notes that were condensed from the old lines (`meeting_sections`) no longer match and are
+    /// dropped. The search passages of the meeting are built from the segments by the caller afterwards
+    /// (`Kb::ingest_meeting_with`). Returns how many segments were stored.
+    pub fn replace_segments(&self, meeting_id: i64, new: &[(f64, f64, String)]) -> Result<usize> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let old: Vec<(f64, f64, Option<i64>)> = {
+            let mut st = tx.prepare("SELECT t0,t1,speaker FROM segments WHERE meeting_id=?1 ORDER BY t0")?;
+            let rows = st.query_map(params![meeting_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut rows: Vec<&(f64, f64, String)> = new.iter().filter(|(_, _, t)| !t.trim().is_empty()).collect();
+        rows.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let spans: Vec<(f64, f64)> = rows.iter().map(|r| (r.0, r.1)).collect();
+        let speakers = carry_speakers(&old, &spans);
+        tx.execute("DELETE FROM segments WHERE meeting_id=?1", params![meeting_id])?;
+        tx.execute("DELETE FROM meeting_sections WHERE meeting_id=?1", params![meeting_id])?;
+        {
+            let mut ins = tx.prepare("INSERT INTO segments(meeting_id,source,t0,t1,text,speaker) VALUES(?1,'mic',?2,?3,?4,?5)")?;
+            for (r, spk) in rows.iter().zip(speakers) {
+                ins.execute(params![meeting_id, r.0, r.1.max(r.0), r.2.trim(), spk])?;
+            }
+        }
+        tx.commit()?;
+        Ok(rows.len())
+    }
+
+    /// The language the speech model settled on for this meeting (an ISO code), if it was noted.
+    pub fn meeting_language(&self, meeting_id: i64) -> Option<String> {
+        self.conn
+            .lock()
+            .query_row("SELECT lang FROM meeting_language WHERE meeting_id=?1", params![meeting_id], |r| r.get::<_, String>(0))
+            .ok()
+            .filter(|l| !l.trim().is_empty())
+    }
+
+    pub fn set_meeting_language(&self, meeting_id: i64, lang: &str) -> Result<()> {
+        self.conn.lock().execute(
+            "INSERT INTO meeting_language(meeting_id,lang) VALUES(?1,?2) ON CONFLICT(meeting_id) DO UPDATE SET lang=?2",
+            params![meeting_id, lang],
+        )?;
+        Ok(())
+    }
+
     /// Tell which speaker said each segment: (segment id, speaker). Replaces earlier labels.
     pub fn set_segment_speakers(&self, meeting_id: i64, labels: &[(i64, i64)]) -> Result<()> {
         let mut conn = self.conn.lock();
@@ -855,6 +905,11 @@ impl Store {
             params![meeting_id, question, answer, citations_json, now()],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    pub fn delete_card(&self, id: i64) -> Result<()> {
+        self.conn.lock().execute("DELETE FROM cards WHERE id=?1", params![id])?;
+        Ok(())
     }
 
     /// Saved Live Assistance cards for a meeting, oldest first: (id, question, answer, citations json).
@@ -1030,6 +1085,53 @@ impl Store {
     }
 }
 
+/// For each new span (t0, t1), the speaker who talked most during it in the old transcript. A span nobody
+/// overlaps takes the nearest old segment's speaker within 1.5 s, else the speaker before it. When the old
+/// transcript has no speakers at all, every span stays unlabelled.
+pub fn carry_speakers(old: &[(f64, f64, Option<i64>)], new: &[(f64, f64)]) -> Vec<Option<i64>> {
+    if !old.iter().any(|o| o.2.is_some()) {
+        return vec![None; new.len()];
+    }
+    let mut out = Vec::with_capacity(new.len());
+    let mut previous: Option<i64> = None;
+    for &(t0, t1) in new {
+        let mut totals: Vec<(i64, f64)> = Vec::new();
+        for &(a, b, spk) in old {
+            let Some(spk) = spk else { continue };
+            let overlap = (t1.min(b) - t0.max(a)).max(0.0);
+            if overlap > 0.0 {
+                match totals.iter_mut().find(|x| x.0 == spk) {
+                    Some(x) => x.1 += overlap,
+                    None => totals.push((spk, overlap)),
+                }
+            }
+        }
+        let mut best: Option<(i64, f64)> = None;
+        for (spk, total) in totals {
+            if best.map(|(_, t)| total > t).unwrap_or(true) {
+                best = Some((spk, total));
+            }
+        }
+        let who = match best {
+            Some((spk, _)) => Some(spk),
+            None => {
+                let mid = (t0 + t1) / 2.0;
+                old.iter()
+                    .filter_map(|&(a, b, spk)| spk.map(|s| (if mid < a { a - mid } else if mid > b { mid - b } else { 0.0 }, s)))
+                    .filter(|(d, _)| *d <= 1.5)
+                    .min_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(_, s)| s)
+                    .or(previous)
+            }
+        };
+        if who.is_some() {
+            previous = who;
+        }
+        out.push(who);
+    }
+    out
+}
+
 fn row_to_doc(r: &rusqlite::Row<'_>) -> rusqlite::Result<Document> {
     Ok(Document {
         id: r.get(0)?,
@@ -1082,4 +1184,64 @@ pub fn build_fts_query(q: &str) -> String {
         }
     }
     terms.iter().map(|t| format!("\"{}\"", t.replace('"', ""))).collect::<Vec<_>>().join(" OR ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_store(name: &str) -> (Store, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("marginalia-store-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (Store::open(&dir.join("t.sqlite3")).unwrap(), dir)
+    }
+
+    #[test]
+    fn the_speaker_with_the_most_overlap_is_carried_over() {
+        let old = vec![(0.0, 5.0, Some(0)), (5.0, 12.0, Some(1))];
+        // 4 s with speaker 0 and 2 s with speaker 1, then a span fully inside speaker 1, then one in no one's time.
+        let got = carry_speakers(&old, &[(1.0, 7.0), (8.0, 11.0), (12.5, 14.0), (40.0, 41.0)]);
+        assert_eq!(got, vec![Some(0), Some(1), Some(1), Some(1)]);
+    }
+
+    #[test]
+    fn an_old_transcript_without_speakers_leaves_none() {
+        let old = vec![(0.0, 5.0, None), (5.0, 9.0, None)];
+        assert_eq!(carry_speakers(&old, &[(0.0, 4.0), (5.0, 8.0)]), vec![None, None]);
+        assert_eq!(carry_speakers(&[], &[(0.0, 4.0)]), vec![None]);
+    }
+
+    #[test]
+    fn replacing_segments_swaps_the_transcript_and_keeps_speakers() {
+        let (st, dir) = temp_store("replace");
+        let id = st.create_meeting("Test").unwrap();
+        let other = st.create_meeting("Other").unwrap();
+        let a = st.add_segment(id, "mic", 0.0, 4.0, "the gamers are coming").unwrap();
+        let b = st.add_segment(id, "mic", 4.5, 9.0, "yes they are").unwrap();
+        st.add_segment(other, "mic", 0.0, 3.0, "untouched").unwrap();
+        st.set_segment_speakers(id, &[(a, 0), (b, 1)]).unwrap();
+        st.save_section(id, 0, 2, 0.0, 9.0, "old notes").unwrap();
+        let n = st.replace_segments(id, &[(4.4, 9.1, "Yes, they are.".into()), (0.1, 4.2, "The gamers are coming.".into()), (9.5, 10.0, "   ".into())]).unwrap();
+        assert_eq!(n, 2, "blank text is not stored");
+        let segs = st.segments(id).unwrap();
+        assert_eq!(segs.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(), vec!["The gamers are coming.", "Yes, they are."]);
+        assert_eq!(segs.iter().map(|s| s.speaker).collect::<Vec<_>>(), vec![Some(0), Some(1)]);
+        assert!(st.sections(id).unwrap().is_empty(), "notes condensed from the old lines are dropped");
+        assert_eq!(st.segments(other).unwrap().len(), 1, "other meetings are not touched");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_meeting_remembers_its_language() {
+        let (st, dir) = temp_store("lang");
+        let id = st.create_meeting("Test").unwrap();
+        assert_eq!(st.meeting_language(id), None);
+        st.set_meeting_language(id, "hi").unwrap();
+        st.set_meeting_language(id, "en").unwrap();
+        assert_eq!(st.meeting_language(id).as_deref(), Some("en"));
+        st.delete_meeting(id).unwrap();
+        assert_eq!(st.meeting_language(id), None, "it goes with the meeting");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Wire protocol, identity and pairing shared by the Marginalia phone app and its helper compute nodes"
-license = "Apache-2.0"
+license = "MIT"
 publish = false
 
 [dependencies]

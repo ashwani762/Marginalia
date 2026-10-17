@@ -5,9 +5,9 @@ The easy way is the setup script in `../windows/`: `.\compute-node\windows\setup
 ## Once
 
 1. Build the node and copy `marginalia-node.exe` somewhere permanent. The script uses `%LOCALAPPDATA%\MarginaliaNode\`.
-2. Get the two model files into `%APPDATA%\marginalia\models` with `marginalia-node.exe models download` (or choose another folder with `--dir` there and `--models` below). `marginalia-node.exe models list` shows what is present.
+2. Get the model files (chat, search and the speech model for transcribing recordings, add `--skip-speech` to leave that one out) into `%APPDATA%\marginalia\models` with `marginalia-node.exe models download` (or choose another folder with `--dir` there and `--models` below). `marginalia-node.exe models list` shows what is present.
 3. Run `marginalia-node.exe run` once from a terminal. Windows asks about the firewall. Allow it on **private networks**. If you missed the prompt, add inbound rules in Windows Defender Firewall for UDP port 47615 (the node) and UDP 5353 (discovery), or run `..\windows\firewall.ps1 -Action Add -Exe <path>` in an administrator window.
-4. In another terminal run `marginalia-node.exe pair` and type the code on the phone, or just tap Trust in the app under Settings, Compute nodes.
+4. In another terminal run `marginalia-node.exe pair` and type the code on the phone, or just tap Connect in the app under Settings, Compute nodes.
 
 ## Start at login
 

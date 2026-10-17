@@ -51,10 +51,17 @@ fun scopeLabel(scope: String, folder: Folder?): String {
 /** The pill under the title that says where answers come from, and a button for starting over. */
 @Composable
 fun AskScopeBar(label: String, onScope: () -> Unit, showClear: Boolean, onClear: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+    // The scope pill takes whatever room "New chat" leaves, so a label like "Everything" is never cut short.
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+    ) {
         Pill(Icons.Rounded.Search, label, trailing = Icons.Rounded.ExpandMore, onClick = onScope, modifier = Modifier.weight(1f, fill = false))
-        Spacer(Modifier.weight(1f))
-        if (showClear) Pill(Icons.Rounded.DeleteSweep, "New chat", onClick = onClear)
+        if (showClear) {
+            Spacer(Modifier.width(10.dp))
+            Pill(Icons.Rounded.DeleteSweep, "New chat", onClick = onClear)
+        }
     }
 }
 

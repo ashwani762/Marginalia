@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 /// One model file the node can use.
 #[derive(Clone, Copy, Debug)]
 pub struct ModelFile {
-    /// `chat` or `search`, as shown by `models list`.
+    /// `chat`, `search` or `speech`, as shown by `models list`.
     pub role: &'static str,
     pub repo: &'static str,
     pub file: &'static str,
@@ -27,10 +27,13 @@ pub const CHAT_E2B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-
 pub const CHAT_E4B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E4B-it-GGUF", file: "gemma-4-E4B-it-Q4_0.gguf", bytes: 0, optional: true };
 pub const SEARCH: ModelFile = ModelFile { role: "search", repo: "ggml-org/embeddinggemma-2-GGUF", file: crate::host::EMBED_FILE, bytes: 309_855_456, optional: false };
 
+pub const SPEECH: ModelFile = ModelFile { role: "speech", repo: "ggerganov/whisper.cpp", file: crate::host::SPEECH_FILE, bytes: 574_041_195, optional: false };
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Only {
     Chat,
     Search,
+    Speech,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -45,7 +48,7 @@ pub fn default_dir() -> PathBuf {
 }
 
 /// The files `download` fetches for the given options.
-pub fn wanted(only: Option<Only>, chat: ChatChoice) -> Vec<ModelFile> {
+pub fn wanted(only: Option<Only>, chat: ChatChoice, skip_speech: bool) -> Vec<ModelFile> {
     let chat_file = match chat {
         ChatChoice::E2b => CHAT_E2B,
         ChatChoice::E4b => CHAT_E4B,
@@ -53,7 +56,9 @@ pub fn wanted(only: Option<Only>, chat: ChatChoice) -> Vec<ModelFile> {
     match only {
         Some(Only::Chat) => vec![chat_file],
         Some(Only::Search) => vec![SEARCH],
-        None => vec![chat_file, SEARCH],
+        Some(Only::Speech) => vec![SPEECH],
+        None if skip_speech => vec![chat_file, SEARCH],
+        None => vec![chat_file, SEARCH, SPEECH],
     }
 }
 
@@ -227,13 +232,16 @@ pub fn token_from(v: Option<String>) -> Option<String> {
 }
 
 /// Which of the files `run` needs are missing, as (role, file name).
-pub fn missing_for_run(dir: &Path, chat_given: bool, embed_given: bool) -> Vec<ModelFile> {
+pub fn missing_for_run(dir: &Path, chat_given: bool, embed_given: bool, speech_given_or_off: bool) -> Vec<ModelFile> {
     let mut v = vec![];
     if !chat_given && !dir.join(CHAT_E2B.file).is_file() {
         v.push(CHAT_E2B);
     }
     if !embed_given && !dir.join(SEARCH.file).is_file() {
         v.push(SEARCH);
+    }
+    if !speech_given_or_off && !dir.join(SPEECH.file).is_file() {
+        v.push(SPEECH);
     }
     v
 }
@@ -243,7 +251,7 @@ pub fn missing_message(dir: &Path) -> String {
     let custom = dir != default_dir();
     let dl = if custom { format!("marginalia-node models download --dir \"{}\"", dir.display()) } else { "marginalia-node models download".to_string() };
     format!(
-        "No models found in {}.\n\nDownload them (about 3 GB, it can be stopped and continued) with:\n\n    {dl}\n\nTo see what is missing: marginalia-node models list\nTo use another folder: marginalia-node run --models DIR (or --chat-model FILE and --embed-model FILE)",
+        "No models found in {}.\n\nDownload them (about 3.7 GB, it can be stopped and continued) with:\n\n    {dl}\n\nTo see what is missing: marginalia-node models list\nTo use another folder: marginalia-node run --models DIR (or --chat-model FILE, --embed-model FILE and --speech-model FILE)",
         dir.display()
     )
 }
@@ -256,7 +264,7 @@ pub fn list(dir: Option<PathBuf>) -> Result<()> {
     let dir = dir.unwrap_or_else(default_dir);
     println!("Models folder: {}\n", dir.display());
     let mut missing_needed = false;
-    for m in [CHAT_E2B, SEARCH, CHAT_E4B] {
+    for m in [CHAT_E2B, SEARCH, SPEECH, CHAT_E4B] {
         let len = std::fs::metadata(dir.join(m.file)).ok().filter(|x| x.is_file()).map(|x| x.len());
         let part = std::fs::metadata(part_path(&dir, &m)).ok().map(|x| x.len()).filter(|l| *l > 0);
         let role = if m.optional { format!("{} (optional, pass --chat-model)", m.role) } else { m.role.to_string() };
@@ -297,7 +305,7 @@ enum Fail {
 
 const MAX_RETRIES: u32 = 8;
 
-pub fn download(dir: Option<PathBuf>, only: Option<Only>, chat: ChatChoice) -> Result<()> {
+pub fn download(dir: Option<PathBuf>, only: Option<Only>, chat: ChatChoice, skip_speech: bool) -> Result<()> {
     let dir = dir.unwrap_or_else(default_dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create the models folder {}", dir.display()))?;
     let token = token_from(std::env::var("HF_TOKEN").ok());
@@ -312,7 +320,7 @@ pub fn download(dir: Option<PathBuf>, only: Option<Only>, chat: ChatChoice) -> R
         .build()
         .new_agent();
     let mut failed: Vec<String> = vec![];
-    for m in wanted(only, chat) {
+    for m in wanted(only, chat, skip_speech) {
         match fetch(&agent, &m, &dir, token.as_deref()) {
             Ok(()) => {}
             Err(e) => {
@@ -500,7 +508,16 @@ mod tests {
     fn urls() {
         assert_eq!(url_for(&CHAT_E2B), "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf");
         assert_eq!(url_for(&SEARCH), "https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/embeddinggemma-2-Q8_0.gguf");
+        assert_eq!(url_for(&SPEECH), "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin");
         assert_eq!(part_path(Path::new("m"), &SEARCH), Path::new("m").join("embeddinggemma-2-Q8_0.gguf.part"));
+    }
+
+    #[test]
+    fn speech_is_fetched_unless_skipped() {
+        let files = |only, skip| wanted(only, ChatChoice::E2b, skip).iter().map(|m| m.role).collect::<Vec<_>>();
+        assert_eq!(files(None, false), vec!["chat", "search", "speech"]);
+        assert_eq!(files(None, true), vec!["chat", "search"]);
+        assert_eq!(files(Some(Only::Speech), false), vec!["speech"]);
     }
 
     #[test]

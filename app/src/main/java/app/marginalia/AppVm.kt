@@ -297,6 +297,24 @@ class AppVm(private val app: Application) {
         }
     }
 
+    /**
+     * Asks a compute node with a larger speech model to listen to the kept recording again, then has the notes and
+     * the summary written again from what it heard. Progress arrives as the same wrap events as the first write-up,
+     * and the end as a wrap_done event (see the handler), which reloads the meeting and says it is done.
+     */
+    fun improveTranscript(meetingId: Long) {
+        if (_finishing.value.containsKey(meetingId)) return
+        viewModelScope.launch {
+            _finishing.update { it + (meetingId to WrapState("improving", "Improving the transcript", 2f)) }
+            try {
+                backend.call("meeting.improve_transcript", JSONObject().put("id", meetingId))
+            } catch (e: Exception) {
+                _finishing.update { it - meetingId }
+                toast("info", e.message ?: "Could not improve the transcript.")
+            }
+        }
+    }
+
     fun renameSpeaker(meetingId: Long, speaker: Int, name: String) {
         viewModelScope.launch {
             runCatching { backend.call("meeting.speaker_rename", JSONObject().put("id", meetingId).put("speaker", speaker).put("name", name)) }
@@ -623,6 +641,11 @@ class AppVm(private val app: Application) {
                 viewModelScope.launch {
                     refreshMeetings(); refreshStats(); refreshSuggestions(); refreshFolders()
                     if (_review.value?.meeting?.id == id) openReview(id)
+                }
+                // The person asked for a better transcript from the Review screen.
+                if (e.optBoolean("improve")) {
+                    if (e.optBoolean("improved")) toast("success", "Transcript improved")
+                    else toast("info", e.optString("note").ifBlank { "The transcript was left as it was." })
                 }
                 if (e.optBoolean("notify", true)) {
                     if (AppState.foreground) toast("success", "Notes ready: ${title.ifBlank { "your meeting" }}", "Open") { openReview(id) }
@@ -1214,6 +1237,19 @@ class AppVm(private val app: Application) {
         _live.update { s -> s?.copy(photos = s.photos.filter { it.id != p.id }) }
         _review.update { d -> d?.copy(photos = d.photos.filter { it.id != p.id }) }
         viewModelScope.launch { runCatching { backend.call("meeting.photo_delete", JSONObject().put("id", p.id)) } }
+    }
+
+    /** Remove an assistance card. [live] is true for a card on the live timeline, false for a saved card in the review. */
+    fun deleteCard(card: Card, live: Boolean) {
+        if (live) _live.update { s -> s?.copy(cards = s.cards.filter { it.id != card.id }) }
+        viewModelScope.launch {
+            runCatching { backend.call("meeting.card_delete", JSONObject().put("id", card.id).put("db", !live)) }
+                .onSuccess {
+                    if (!live) _review.update { d -> d?.copy(cards = d.cards.filter { it.id != card.id }) }
+                    toast("success", "Card removed")
+                }
+                .onFailure { toast("error", it.message ?: "Could not remove the card.") }
+        }
     }
 
     // ------------------------------------------------------------------ adding to the library

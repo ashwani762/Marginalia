@@ -18,7 +18,7 @@ Optional *compute nodes* on your network make the AI faster while you are near t
 - **Ask** your meetings and documents. Answers carry their sources. Add PDFs, pictures, web pages, text.
 - **Photos** of a whiteboard are read and added to the meeting.
 - **Speaker separation** after the meeting, with rename and merge. Tap a transcript line to hear it.
-- **Compute nodes** (optional): a small daemon on a PC does the heavy AI work for the phone, found automatically on the Wi-Fi, trusted with one tap.
+- **Compute nodes** (optional): a small daemon on a PC does the heavy AI work for the phone, found automatically on the Wi-Fi, connected with one tap.
   Notes, answers and search run about six times faster. If a node is lost mid-answer, another node or the phone finishes it.
 - **Private by design**: no accounts, no cloud, no analytics. Nodes keep nothing and show only counts.
 
@@ -82,4 +82,4 @@ speech to text on nodes.
 
 ## License
 
-Apache-2.0. Third-party code under `vendor/` and `compute-node/vendor/` keeps its own licenses.
+MIT, see [LICENSE](LICENSE). Third-party code under `vendor/` and `compute-node/vendor/` keeps its own licenses (llama.cpp, whisper.cpp and ggml are MIT, sherpa-onnx is Apache-2.0).

@@ -3,7 +3,7 @@ name = "marginalia-node-tray"
 version = "0.1.0"
 edition = "2021"
 description = "A small tray icon (Ubuntu top bar, Windows system tray) that shows and controls a running marginalia-node"
-license = "Apache-2.0"
+license = "MIT"
 publish = false
 
 [[bin]]

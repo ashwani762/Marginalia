@@ -13,6 +13,7 @@ struct PerClient {
     name: String,
     chat_jobs: u64,
     embed_jobs: u64,
+    speech_jobs: u64,
     last_seen: u64,
 }
 
@@ -21,7 +22,7 @@ struct Recent {
     kind: &'static str,
     ok: bool,
     ms: u64,
-    /// Tokens generated, or texts embedded.
+    /// Tokens generated, texts embedded, or seconds of audio.
     size: u64,
 }
 
@@ -36,10 +37,21 @@ pub struct Metrics {
     pub embed_errors: AtomicU64,
     pub embed_texts: AtomicU64,
     pub embed_busy_ms: AtomicU64,
+    pub speech_jobs: AtomicU64,
+    pub speech_errors: AtomicU64,
+    pub speech_audio_ms: AtomicU64,
+    pub speech_busy_ms: AtomicU64,
     pub pairings: AtomicU64,
     pub rejected: AtomicU64,
     clients: Mutex<HashMap<String, PerClient>>,
     recent: Mutex<VecDeque<Recent>>,
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Chat,
+    Search,
+    Speech,
 }
 
 fn now() -> u64 {
@@ -59,6 +71,10 @@ impl Metrics {
             embed_errors: 0.into(),
             embed_texts: 0.into(),
             embed_busy_ms: 0.into(),
+            speech_jobs: 0.into(),
+            speech_errors: 0.into(),
+            speech_audio_ms: 0.into(),
+            speech_busy_ms: 0.into(),
             pairings: 0.into(),
             rejected: 0.into(),
             clients: Mutex::new(HashMap::new()),
@@ -70,15 +86,15 @@ impl Metrics {
         self.started.elapsed().as_secs()
     }
 
-    fn touch(&self, fp: &str, name: &str, chat: bool) {
+    fn touch(&self, fp: &str, name: &str, kind: Kind) {
         let mut g = self.clients.lock();
         let c = g.entry(fp.to_string()).or_default();
         c.name = name.to_string();
         c.last_seen = now();
-        if chat {
-            c.chat_jobs += 1;
-        } else {
-            c.embed_jobs += 1;
+        match kind {
+            Kind::Chat => c.chat_jobs += 1,
+            Kind::Search => c.embed_jobs += 1,
+            Kind::Speech => c.speech_jobs += 1,
         }
     }
 
@@ -95,13 +111,13 @@ impl Metrics {
         self.chat_prompt_tokens.fetch_add(prompt_tokens, Relaxed);
         self.chat_tokens.fetch_add(tokens, Relaxed);
         self.chat_busy_ms.fetch_add(ms, Relaxed);
-        self.touch(fp, name, true);
+        self.touch(fp, name, Kind::Chat);
         self.remember("chat", true, ms, tokens);
     }
 
     pub fn chat_failed(&self, fp: &str, name: &str) {
         self.chat_errors.fetch_add(1, Relaxed);
-        self.touch(fp, name, true);
+        self.touch(fp, name, Kind::Chat);
         self.remember("chat", false, 0, 0);
     }
 
@@ -113,13 +129,27 @@ impl Metrics {
         } else {
             self.embed_errors.fetch_add(1, Relaxed);
         }
-        self.touch(fp, name, false);
+        self.touch(fp, name, Kind::Search);
         self.remember("search", ok, ms, texts);
+    }
+
+    /// A transcription job ended. Only the length of the audio and the time it took are kept.
+    pub fn speech_done(&self, fp: &str, name: &str, audio_ms: u64, ms: u64, ok: bool) {
+        if ok {
+            self.speech_jobs.fetch_add(1, Relaxed);
+            self.speech_audio_ms.fetch_add(audio_ms, Relaxed);
+            self.speech_busy_ms.fetch_add(ms, Relaxed);
+        } else {
+            self.speech_errors.fetch_add(1, Relaxed);
+        }
+        self.touch(fp, name, Kind::Speech);
+        self.remember("speech", ok, ms, audio_ms / 1000);
     }
 
     pub fn snapshot(&self) -> Value {
         let (chat_ms, chat_tokens) = (self.chat_busy_ms.load(Relaxed), self.chat_tokens.load(Relaxed));
         let (emb_ms, emb_texts) = (self.embed_busy_ms.load(Relaxed), self.embed_texts.load(Relaxed));
+        let (sp_ms, sp_audio) = (self.speech_busy_ms.load(Relaxed), self.speech_audio_ms.load(Relaxed));
         let rate = |n: u64, ms: u64| if ms == 0 { 0.0 } else { n as f64 * 1000.0 / ms as f64 };
         json!({
             "uptime_s": self.uptime_s(),
@@ -132,10 +162,14 @@ impl Metrics {
                 "jobs": self.embed_jobs.load(Relaxed), "errors": self.embed_errors.load(Relaxed),
                 "passages": emb_texts, "passages_per_s": rate(emb_texts, emb_ms), "busy_s": emb_ms / 1000,
             },
+            "speech": {
+                "jobs": self.speech_jobs.load(Relaxed), "errors": self.speech_errors.load(Relaxed),
+                "audio_s": sp_audio / 1000, "times_real_time": if sp_ms == 0 { 0.0 } else { sp_audio as f64 / sp_ms as f64 }, "busy_s": sp_ms / 1000,
+            },
             "pairings": self.pairings.load(Relaxed),
             "refused": self.rejected.load(Relaxed),
             "phones": self.clients.lock().iter().map(|(fp, c)| json!({
-                "name": c.name, "id": &fp[..16], "chat_jobs": c.chat_jobs, "search_jobs": c.embed_jobs, "last_seen": c.last_seen,
+                "name": c.name, "id": &fp[..16], "chat_jobs": c.chat_jobs, "search_jobs": c.embed_jobs, "speech_jobs": c.speech_jobs, "last_seen": c.last_seen,
             })).collect::<Vec<_>>(),
             "recent": self.recent.lock().iter().rev().map(|r| json!({"at": r.at, "kind": r.kind, "ok": r.ok, "ms": r.ms, "size": r.size})).collect::<Vec<_>>(),
         })
@@ -154,12 +188,13 @@ pub fn ago(secs: u64) -> String {
 pub fn report(v: &Value) -> String {
     let n = |x: &Value| x.as_u64().unwrap_or(0);
     let f = |x: &Value| x.as_f64().unwrap_or(0.0);
-    let (c, s) = (&v["chat"], &v["search"]);
+    let (c, s, sp) = (&v["chat"], &v["search"], &v["speech"]);
     let mut out = format!(
-        "{} up for {}\n\nChat    {} jobs, {} failed, {} tokens written, {:.0} tokens a second while working\nSearch  {} jobs, {} failed, {} passages, {:.0} passages a second while working\nPaired {} times, {} unknown phones turned away\n",
+        "{} up for {}\n\nChat    {} jobs, {} failed, {} tokens written, {:.0} tokens a second while working\nSearch  {} jobs, {} failed, {} passages, {:.0} passages a second while working\nSpeech  {} jobs, {} failed, {} s of audio, {:.1} s of audio per second of work\nPaired {} times, {} unknown phones turned away\n",
         v["name"].as_str().unwrap_or("node"), ago(n(&v["uptime_s"])),
         n(&c["jobs"]), n(&c["errors"]), n(&c["generated_tokens"]), f(&c["tokens_per_s"]),
         n(&s["jobs"]), n(&s["errors"]), n(&s["passages"]), f(&s["passages_per_s"]),
+        n(&sp["jobs"]), n(&sp["errors"]), n(&sp["audio_s"]), f(&sp["times_real_time"]),
         n(&v["pairings"]), n(&v["refused"]),
     );
     let state = match (v["paused"].as_bool().unwrap_or(false), v["locked"].as_bool().unwrap_or(false)) {
@@ -171,11 +206,11 @@ pub fn report(v: &Value) -> String {
     out.push_str(&format!("{state}\n"));
     out.push_str("\nPhones\n");
     for p in v["phones"].as_array().into_iter().flatten() {
-        out.push_str(&format!("  {} ({}): {} chat, {} search\n", p["name"].as_str().unwrap_or(""), p["id"].as_str().unwrap_or(""), n(&p["chat_jobs"]), n(&p["search_jobs"])));
+        out.push_str(&format!("  {} ({}): {} chat, {} search, {} speech\n", p["name"].as_str().unwrap_or(""), p["id"].as_str().unwrap_or(""), n(&p["chat_jobs"]), n(&p["search_jobs"]), n(&p["speech_jobs"])));
     }
     out.push_str("\nLatest jobs (newest first, sizes only)\n");
     for r in v["recent"].as_array().into_iter().flatten().take(10) {
-        out.push_str(&format!("  {} {} {} ms, {}{}\n", r["kind"].as_str().unwrap_or(""), if r["ok"].as_bool().unwrap_or(false) { "ok    " } else { "failed" }, n(&r["ms"]), n(&r["size"]), if r["kind"] == "chat" { " tokens" } else { " passages" }));
+        out.push_str(&format!("  {} {} {} ms, {}{}\n", r["kind"].as_str().unwrap_or(""), if r["ok"].as_bool().unwrap_or(false) { "ok    " } else { "failed" }, n(&r["ms"]), n(&r["size"]), match r["kind"].as_str() { Some("chat") => " tokens", Some("speech") => " s of audio", _ => " passages" }));
     }
     out
 }

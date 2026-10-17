@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "A stateless compute node: serves the phone app's AI work from a machine on your local network"
-license = "Apache-2.0"
+license = "MIT"
 publish = false
 
 [[bin]]
@@ -36,3 +36,8 @@ hostname = "0.4"
 # Model downloads (`marginalia-node models download`). Same version and TLS backend as the phone core.
 ureq = { version = "3", features = ["rustls"] }
 if-addrs = "0.13"
+
+[build-dependencies]
+# Builds whisper.cpp (speech to text) against the ggml that llama-cpp-sys-2 already compiles.
+cc = { version = "1", features = ["parallel"] }
+bindgen = "0.72"

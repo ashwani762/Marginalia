@@ -14,6 +14,7 @@
 //! - `nodes`: the home computers calls.
 //! - `debug`: timing helpers behind the `debug.*` calls.
 //! - `transcript`: plain helpers for transcript lines and prompt windows.
+//! - `improve`: plain helpers for listening to a kept recording again on a compute node.
 
 use crate::config::{NoteStyle, Paths, Settings};
 use crate::engine::llm::{ChatMessage, GenEvent, GenParams, GenRequest, GenStats, Priority};
@@ -38,6 +39,7 @@ use std::time::{Duration, Instant};
 mod assist;
 mod chat;
 mod debug;
+mod improve;
 mod jots;
 mod live;
 mod nodes;
@@ -46,6 +48,7 @@ mod transcript;
 mod wrapup;
 
 use chat::*;
+use improve::*;
 use jots::*;
 use photos::*;
 use transcript::*;
@@ -175,6 +178,8 @@ struct Live {
     /// Photos saved during the meeting that Gemma reads afterwards, so it never competes with
     /// the live transcript: (photo id, file path).
     queued_photos: Vec<(i64, String)>,
+    /// The language already noted for this meeting (see `Store::set_meeting_language`).
+    language: Option<String>,
 }
 
 #[derive(Clone)]
@@ -655,6 +660,7 @@ impl Core {
             "meeting.suggest" => self.meeting_suggest(),
             "meeting.stop" => self.meeting_stop(),
             "meeting.resume" => self.meeting_resume(i("id")),
+            "meeting.improve_transcript" => self.meeting_improve(i("id")),
             "meeting.recover" => {
                 let core = self.clone();
                 let grace = args.get("grace").and_then(Value::as_u64).unwrap_or(0);
@@ -671,6 +677,24 @@ impl Core {
             }
             "meeting.delete" => {
                 self.delete_meeting(i("id"));
+                Ok(json!({}))
+            }
+            "meeting.card_delete" => {
+                // `db: true` is a saved card from the review screen (its id is the database id). Otherwise it is a card on the live timeline.
+                if args.get("db").and_then(Value::as_bool).unwrap_or(false) {
+                    self.kb.store.delete_card(i("id"))?;
+                } else {
+                    let mut db_id = None;
+                    if let Some(l) = self.live.lock().as_mut() {
+                        if let Some(pos) = l.cards.iter().position(|c| c.id == i("id") as u64) {
+                            db_id = l.cards.remove(pos).db_id;
+                        }
+                    }
+                    if let Some(db) = db_id {
+                        let _ = self.kb.store.delete_card(db);
+                    }
+                    self.emit(json!({"type": "card_remove", "id": i("id")}));
+                }
                 Ok(json!({}))
             }
             "meeting.photo" => self.meeting_photo(args),
@@ -813,6 +837,9 @@ impl Core {
         }
         if let Some(v) = args.get("appearance").and_then(Value::as_str) {
             s.appearance = v.to_string();
+        }
+        if let Some(v) = args.get("improve_transcript").and_then(Value::as_bool) {
+            s.improve_transcript = v;
         }
         if let Some(v) = args.get("chunk_tokens").and_then(Value::as_u64) {
             s.chunk_tokens = v as usize;

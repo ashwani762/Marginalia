@@ -91,6 +91,7 @@ impl Core {
             jot_busy: false,
             folder,
             queued_photos: Vec::new(),
+            language: None,
         }
     }
 
@@ -106,8 +107,11 @@ impl Core {
         if self.engine.whisper().is_none() {
             return Err(anyhow!("The speech model is still loading."));
         }
+        // Carrying on a meeting whose language is known: start from it instead of working it out again.
+        let remembered = self.kb.store.meeting_language(id);
         if let Some(w) = self.engine.whisper() {
-            w.set_language(self.settings().language.clone());
+            let setting = self.settings().language.clone();
+            w.set_language(if setting == "auto" { remembered.clone().unwrap_or(setting) } else { setting });
         }
         let m = self.kb.store.list_meetings()?.into_iter().find(|m| m.id == id).ok_or_else(|| anyhow!("meeting not found"))?;
         let names: HashMap<i64, String> = self.kb.store.speaker_names(id).unwrap_or_default().into_iter().collect();
@@ -120,6 +124,7 @@ impl Core {
         let offset = last.max(m.duration_secs.max(0) as f64) + 1.0;
         let folder = self.kb.store.meeting_folder(id);
         let mut live = Self::blank_live(id, folder);
+        live.language = remembered;
         live.started = Instant::now() - Duration::from_secs_f64(offset);
         live.time_offset = offset;
         live.last_final = offset - 1.0;
@@ -145,6 +150,8 @@ impl Core {
         // The meeting is open again until it is stopped, and its notes are no longer final.
         self.kb.store.reopen_meeting(id)?;
         self.kb.store.unmark_wrapped(id)?;
+        // More audio is coming, so the transcript can be improved again when the meeting ends.
+        let _ = self.kb.store.set_flag(&format!("improved_{id}"), false);
         *self.live.lock() = Some(live);
         tracing::info!("meeting {id} continued from {offset:.0}s");
         let core = self.clone();
@@ -257,6 +264,14 @@ impl Core {
         }
         tracing::info!("final t={:.1}-{:.1}s lag={:.1}s queue={} words={}", t.t0, t.t1, l.started.elapsed().as_secs_f64() - t.t1, self.engine.whisper().map(|w| w.queue_len()).unwrap_or(0), t.text.split_whitespace().count());
         let _ = self.kb.store.add_segment(l.meeting_id, "mic", t.t0, t.t1, &t.text);
+        // Once the speech model has settled on a language, the meeting remembers it: a compute node that listens
+        // again later, and a recording that is carried on, need to know which one it was.
+        if let Some(lang) = self.engine.whisper().and_then(|w| w.language_lock()) {
+            if l.language.as_deref() != Some(lang.as_str()) {
+                let _ = self.kb.store.set_meeting_language(l.meeting_id, &lang);
+                l.language = Some(lang);
+            }
+        }
         if is_question(&t.text) {
             l.pending_questions.push(t.text.clone());
         }

@@ -93,6 +93,8 @@ internal fun statusOf(c: HomeComputer): Pair<String, String?> {
     return status to detail
 }
 
+internal const val IMPROVE_HELP = "After a meeting, a compute node re-transcribes the recording with a larger model. Nothing is kept there."
+
 internal const val WAITING_HELP = "Waiting for approval. Open the app on a phone that already uses these compute nodes, or run marginalia-node approve on the compute node."
 
 /** "falcon", "falcon and hawk", "a, b and c". */
@@ -136,6 +138,8 @@ fun HomeComputersSection(vm: AppVm, modifier: Modifier = Modifier) {
         Text("Use a compute node on your network to make the AI faster. The phone keeps working on its own when none is around.", style = type.caption)
         Spacer(Modifier.height(4.dp))
         SettingRow("Use compute nodes when available") { NodeSwitch(nodes.enabled) { vm.setNodesEnabled(it) } }
+        val prefs by vm.prefs.collectAsState()
+        SettingRow("Improve transcripts on a compute node", IMPROVE_HELP) { NodeSwitch(prefs.improveTranscript) { vm.setPref("improve_transcript", it) } }
 
         nodes.paired.forEach { c ->
             Spacer(Modifier.height(8.dp))
@@ -253,11 +257,11 @@ fun AddComputerSheet(vm: AppVm, onDismiss: () -> Unit) {
         Column(Modifier.imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).navigationBarsPadding().padding(bottom = 20.dp)) {
             Text("Add a compute node", style = type.title)
             Spacer(Modifier.height(6.dp))
-            Text("Tap a compute node on your network to use it. You will be asked if you trust it.", style = type.callout)
+            Text("Tap a compute node on your network to connect to it.", style = type.callout)
 
             if (found.size > 1) {
                 Spacer(Modifier.height(14.dp))
-                PrimaryButton("Trust all ${found.size} compute nodes", Modifier.fillMaxWidth(), enabled = !pairing) { askingAll = true }
+                PrimaryButton("Connect to all ${found.size} compute nodes", Modifier.fillMaxWidth(), enabled = !pairing) { askingAll = true }
             }
 
             SectionLabel(if (found.size > 1) "Or choose one" else "Found on this network", Modifier.padding(top = 14.dp), flush = true)
@@ -367,14 +371,14 @@ internal fun TrustTheseDialog(found: List<FoundComputer>, onCancel: () -> Unit, 
     AlertDialog(
         onDismissRequest = onCancel,
         containerColor = p.surface2,
-        title = { Text("Trust these compute nodes?", style = type.title) },
+        title = { Text("Connect to these compute nodes?", style = type.title) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 names.forEach { Text(it, style = type.headline) }
-                Text("They will be able to read the text the phone sends them, such as your notes and questions, and they keep none of it.", style = type.callout)
+                Text("They will help the AI work faster while you are on this network. Your notes and questions are used for the job and are not kept.", style = type.callout)
             }
         },
-        confirmButton = { TextButton(onClick = onTrust) { Text("Trust all", color = p.accentInk) } },
+        confirmButton = { TextButton(onClick = onTrust) { Text("Connect all", color = p.accentInk) } },
         dismissButton = { TextButton(onClick = onCancel) { Text("Not now", color = p.textDim) } },
     )
 }
@@ -386,16 +390,16 @@ internal fun TrustThisDialog(t: TrustTarget, onCancel: () -> Unit, onTrust: () -
     AlertDialog(
         onDismissRequest = onCancel,
         containerColor = p.surface2,
-        title = { Text("Trust this compute node?", style = type.title) },
+        title = { Text("Connect to this compute node?", style = type.title) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(t.name.ifBlank { "Compute node" }, style = type.headline)
                 val where = listOf(t.addr, shortId(t.id).takeIf { it.isNotBlank() }?.let { "ID $it" }).filterNotNull().filter { it.isNotBlank() }.joinToString("  ")
                 if (where.isNotBlank()) Text(where, style = type.caption)
-                Text("It will be able to read the text the phone sends it, such as your notes and questions, and it keeps none of it.", style = type.callout)
+                Text("It will help the AI work faster while you are on this network. Your notes and questions are used for the job and are not kept.", style = type.callout)
             }
         },
-        confirmButton = { TextButton(onClick = onTrust) { Text("Trust", color = p.accentInk) } },
+        confirmButton = { TextButton(onClick = onTrust) { Text("Connect", color = p.accentInk) } },
         dismissButton = { TextButton(onClick = onCancel) { Text("Not now", color = p.textDim) } },
     )
 }
@@ -491,7 +495,7 @@ fun ApprovalPrompt(vm: AppVm) {
             onDismissRequest = { vm.decideNode(a, false) },
             containerColor = p.surface2,
             title = { Text("Let ${plain(phone)} use $names?", style = type.title) },
-            text = { Text("It will be able to send text to ${if (a.computers.size == 1) "this compute node" else "these compute nodes"} for the AI to read, such as notes and questions.", style = type.callout) },
+            text = { Text("It will send notes and questions to ${if (a.computers.size == 1) "this compute node" else "these compute nodes"} so the AI can work faster. Nothing is kept there.", style = type.callout) },
             confirmButton = { TextButton(onClick = { vm.decideNode(a, true) }) { Text("Allow", color = p.accentInk) } },
             dismissButton = { TextButton(onClick = { vm.decideNode(a, false) }) { Text("Not now", color = p.textDim) } },
         )

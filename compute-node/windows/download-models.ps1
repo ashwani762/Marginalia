@@ -1,13 +1,15 @@
-# Downloads the model files the node serves (about 3 GB). Safe to stop and run again, it continues.
+# Downloads the model files the node serves (about 3.7 GB: chat, search and speech to text). Safe to stop and run again, it continues.
 #   .\compute-node\windows\download-models.ps1
-#   .\compute-node\windows\download-models.ps1 -Only search
+#   .\compute-node\windows\download-models.ps1 -Only search      (or chat, or speech)
+#   .\compute-node\windows\download-models.ps1 -SkipSpeech        leave out the speech model (570 MB)
 #   .\compute-node\windows\download-models.ps1 -Dir D:\models
 # With a built node it simply runs  marginalia-node.exe models download.  Without one (before the first
-# build) it downloads the same two files itself. If Hugging Face asks for a login, set $env:HF_TOKEN first.
+# build) it downloads the same files itself. If Hugging Face asks for a login, set $env:HF_TOKEN first.
 param(
     [string]$Dir = '',
-    [ValidateSet('', 'chat', 'search')][string]$Only = '',
-    [ValidateSet('e2b', 'e4b')][string]$ChatModel = 'e2b'
+    [ValidateSet('', 'chat', 'search', 'speech')][string]$Only = '',
+    [ValidateSet('e2b', 'e4b')][string]$ChatModel = 'e2b',
+    [switch]$SkipSpeech
 )
 . (Join-Path $PSScriptRoot 'common.ps1')
 Update-SessionPath
@@ -18,6 +20,7 @@ if ($exe) {
     if ($Dir) { $a += @('--dir', $Dir) }
     if ($Only) { $a += @('--only', $Only) }
     $a += @('--chat-model', $ChatModel)
+    if ($SkipSpeech.IsPresent) { $a += '--skip-speech' }
     Step-Info ('Using ' + $exe)
     & $exe @a
     exit $LASTEXITCODE
@@ -31,10 +34,11 @@ New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 # Same files and repositories as compute-node/node/src/models_dl.rs
 $all = @(
     @{ Role = 'chat';   Repo = 'ggml-org/gemma-4-E2B-it-GGUF';   File = 'gemma-4-E2B-it-Q4_0.gguf';   Size = 2841481184 },
-    @{ Role = 'search'; Repo = 'ggml-org/embeddinggemma-2-GGUF'; File = 'embeddinggemma-2-Q8_0.gguf'; Size = 309855456 }
+    @{ Role = 'search'; Repo = 'ggml-org/embeddinggemma-2-GGUF'; File = 'embeddinggemma-2-Q8_0.gguf'; Size = 309855456 },
+    @{ Role = 'speech'; Repo = 'ggerganov/whisper.cpp';          File = 'ggml-large-v3-turbo-q5_0.bin';  Size = 574041195 }
 )
 if ($ChatModel -eq 'e4b') { $all[0] = @{ Role = 'chat'; Repo = 'ggml-org/gemma-4-E4B-it-GGUF'; File = 'gemma-4-E4B-it-Q4_0.gguf'; Size = 0 } }
-$wanted = @($all | Where-Object { (-not $Only) -or $_.Role -eq $Only })
+$wanted = @($all | Where-Object { ($Only -and $_.Role -eq $Only) -or ((-not $Only) -and -not ($SkipSpeech.IsPresent -and $_.Role -eq 'speech')) })
 
 $token = $env:HF_TOKEN
 if ($token) { $token = $token.Trim() }

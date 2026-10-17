@@ -290,6 +290,7 @@ fun LiveScreen(vm: AppVm, onMinimize: () -> Unit, onCite: (Source) -> Unit) {
                     onKeep = { vm.addJot(it.text, "keep", it.t0) },
                     onEdit = { j -> editing = j; draft = j.raw; kind = j.kind; composing = true },
                     onDeleteJot = { vm.deleteJot(it) },
+                    onRemoveCard = { vm.deleteCard(it, live = true) },
                     onPickIdea = { q -> vm.addJot(q, "question"); vm.toast("success", "Kept in your notes as a question.") },
                     modifier = m,
                 )
@@ -372,6 +373,7 @@ private fun Timeline(
     onEdit: (Jot) -> Unit,
     onDeleteJot: (Jot) -> Unit,
     onPickIdea: (String) -> Unit,
+    onRemoveCard: (Card) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val p = pal
@@ -411,7 +413,7 @@ private fun Timeline(
                     is Moment.Asked -> Column(Modifier.animateItem().padding(horizontal = 16.dp, vertical = 6.dp)) {
                         val label = when (m.card.kind) { "ask" -> "YOU ASKED"; "ideas" -> null; else -> "FROM YOUR KNOWLEDGE" }
                         if (label != null) Text(label, style = type.micro.copy(color = p.accentInk), modifier = Modifier.padding(start = 4.dp, bottom = 6.dp))
-                        AssistCard(m.card, onCite = onCite, onPick = onPickIdea)
+                        AssistCard(m.card, onCite = onCite, onPick = onPickIdea, onRemove = { onRemoveCard(m.card) })
                     }
                 }
             }
@@ -624,6 +626,7 @@ private fun HoldToStop(enabled: Boolean, onStop: () -> Unit) {
 
 private val steps = listOf(
     "finalizing" to "Finalizing the transcript",
+    "improving" to "Improving the transcript",
     "jots" to "Polishing your notes",
     "photos" to "Reading your photos",
     "summarizing" to "Writing the summary",
@@ -637,6 +640,9 @@ private fun WrapUp(s: LiveState, modifier: Modifier = Modifier) {
     val w = s.wrap ?: return
     val current = steps.indexOfFirst { it.first == w.step }.coerceAtLeast(0)
     val prog by animateFloatAsState(w.progress / 100f, Motion.soft(), label = "wrap")
+    // The step with a compute node only shows when it ran, and stays once it has.
+    var improved by remember(s.meetingId) { mutableStateOf(false) }
+    if (w.step == "improving") improved = true
     // Centred when it fits, and it scrolls when the window is too short for all the steps.
     BoxWithConstraints(modifier, contentAlignment = Alignment.TopCenter) {
     val minH = maxHeight
@@ -654,6 +660,7 @@ private fun WrapUp(s: LiveState, modifier: Modifier = Modifier) {
         Spacer(Modifier.height(26.dp))
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             steps.forEachIndexed { i, (k, label) ->
+                if (k == "improving" && !improved) return@forEachIndexed
                 if (k == "photos" && s.photos.isEmpty()) return@forEachIndexed
                 if (k == "jots" && s.jots.isEmpty()) return@forEachIndexed
                 val done = i < current

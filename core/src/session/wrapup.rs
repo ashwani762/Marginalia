@@ -16,6 +16,19 @@ pub(super) struct FinishJob {
     notify: bool,
     /// Photos taken during the meeting that still need reading: (id, path, seconds in).
     unread_photos: Vec<(i64, String, Option<f64>)>,
+    /// First let a compute node listen to the kept recording again and put its transcript in place of the live one.
+    improve: bool,
+    /// The person asked for the notes to be written again from a better transcript: the meeting keeps its
+    /// finishing time and the app says the transcript was improved.
+    manual: bool,
+}
+
+/// What listening to the recording again came to.
+pub(super) enum Improved {
+    /// The transcript was replaced (in part when the node stopped early).
+    Done { segments: usize, node: String, partial: bool },
+    /// Nothing was changed, and why.
+    Skipped(String),
 }
 
 #[derive(Clone)]
@@ -89,6 +102,8 @@ impl Core {
             lines: l.lines.clone(), jots, sections: l.sections.clone(), covered: l.sec_upto,
             notify: true,
             unread_photos: l.queued_photos.iter().map(|(id, path)| (*id, path.clone(), l.photos.iter().find(|p| p.0 == *id).map(|p| p.1))).collect(),
+            improve: true,
+            manual: false,
         };
         self.run_finish(job);
     }
@@ -103,10 +118,14 @@ impl Core {
         }
         self.finishing_jobs.fetch_add(1, Ordering::Relaxed);
         let result = (|| -> Result<(String, String)> {
+            // 0. a compute node listens to the kept recording again, so the notes are written from the better transcript
+            let improved = job.improve && self.improve_in_finish(&mut job);
+            // The bar has already come this far when the transcript was improved.
+            let floor = if improved { 30.0f32 } else { 0.0 };
             // 1. jots that were still waiting for their polish
             let waiting: Vec<usize> = job.jots.iter().enumerate().filter(|(_, j)| j.polished.trim().is_empty() && j.kind != "keep").map(|(i, _)| i).collect();
             for (n, i) in waiting.iter().enumerate() {
-                self.wrap(id, "jots", &format!("Polishing note {} of {}", n + 1, waiting.len()), 12.0 + 12.0 * n as f32 / waiting.len().max(1) as f32);
+                self.wrap(id, "jots", &format!("Polishing note {} of {}", n + 1, waiting.len()), (12.0 + 12.0 * n as f32 / waiting.len().max(1) as f32).max(floor));
                 let j = job.jots[*i].clone();
                 let ctx = jot_context(&job.lines, &job.sections, j.t.unwrap_or(0.0), &j.raw);
                 if let Ok((t, _)) = self.gen_job(Self::polish_prompt(&j.kind, &j.raw, &ctx), GenParams { max_tokens: 110, temperature: 0.2, ..Default::default() }, |_| {}) {
@@ -121,7 +140,7 @@ impl Core {
             // 2. photos taken during the meeting, read now that the model is free
             let unread = std::mem::take(&mut job.unread_photos);
             for (n, (pid, path, pt)) in unread.iter().enumerate() {
-                self.wrap(id, "photos", &format!("Reading photo {} of {}", n + 1, unread.len()), 24.0 + 4.0 * n as f32 / unread.len().max(1) as f32);
+                self.wrap(id, "photos", &format!("Reading photo {} of {}", n + 1, unread.len()), (24.0 + 4.0 * n as f32 / unread.len().max(1) as f32).max(floor));
                 let caption = {
                     let _turn = self.finish_gate.lock();
                     self.describe_photo(path)
@@ -132,7 +151,7 @@ impl Core {
             // and any that were already being read
             let t1 = Instant::now();
             while self.describing_by.lock().get(&id).copied().unwrap_or(0) > 0 && t1.elapsed() < Duration::from_secs(180) {
-                self.wrap(id, "photos", "Reading your photos", 26.0);
+                self.wrap(id, "photos", "Reading your photos", 26.0f32.max(floor));
                 std::thread::sleep(Duration::from_millis(400));
             }
             let photos_db = self.kb.store.attachments(id).unwrap_or_default();
@@ -148,7 +167,9 @@ impl Core {
                 job.enhanced = if job.enhanced.trim().is_empty() { e } else { format!("{}\n\n{e}", job.enhanced) };
             }
             let _ = self.kb.store.update_meeting_notes(id, &job.raw, &job.enhanced);
-            let _ = self.kb.store.finish_meeting(id, job.secs as i64);
+            if !job.manual {
+                let _ = self.kb.store.finish_meeting(id, job.secs as i64);
+            }
             self.emit(json!({"type": "meetings_changed"}));
 
             // 4. summary
@@ -217,7 +238,7 @@ impl Core {
         match result {
             Ok((title, summary)) => {
                 let _ = self.kb.store.mark_wrapped(id);
-                self.emit(json!({"type": "wrap_done", "meeting_id": id, "title": title, "preview": snippet_of(&summary.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#')).unwrap_or(""), 140), "notify": job.notify}));
+                self.emit(json!({"type": "wrap_done", "meeting_id": id, "title": title, "preview": snippet_of(&summary.lines().find(|l| !l.trim().is_empty() && !l.starts_with('#')).unwrap_or(""), 140), "notify": job.notify, "improve": job.manual, "improved": job.manual}));
                 self.emit(json!({"type": "meetings_changed"}));
             }
             Err(e) => {
@@ -492,29 +513,222 @@ impl Core {
     }
 
     pub(super) fn recover_one(self: &Arc<Self>, m: &Meeting) -> Result<()> {
+        let Some(job) = self.finish_job_for(m)? else { return Ok(()) };
+        self.toast("info", format!("Finishing the notes for “{}”", snippet_of(&m.title, 40)));
+        self.run_finish(job);
+        Ok(())
+    }
+
+    /// Everything the write-up needs for a meeting that is already saved. `None` when nothing was captured.
+    fn finish_job_for(&self, m: &Meeting) -> Result<Option<FinishJob>> {
         let id = m.id;
         let segs = self.kb.store.segments(id)?;
         let jots = self.kb.store.jots(id)?;
         let photos = self.kb.store.attachments(id)?;
         if segs.is_empty() && jots.is_empty() && photos.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
-        let names: HashMap<i64, String> = self.kb.store.speaker_names(id).unwrap_or_default().into_iter().collect();
-        let mut lines: Vec<Line> = Vec::new();
-        for s in &segs {
-            push_merged_as(&mut lines, s.t0, s.t1, &s.text, s.speaker, &who_is(&names, s.speaker));
-        }
+        let lines = self.lines_of(id)?;
         let (secs_saved, covered) = valid_sections(self.kb.store.sections(id).unwrap_or_default(), &lines);
         let secs = if m.ended_at.is_none() { segs.last().map(|s| s.t1).unwrap_or(0.0) as u64 } else { m.duration_secs.max(0) as u64 };
-        self.toast("info", format!("Finishing the notes for “{}”", snippet_of(&m.title, 40)));
-        let job = FinishJob {
+        Ok(Some(FinishJob {
             id, secs, raw: m.notes_raw.clone(), enhanced: m.notes_enhanced.clone(), lines,
             jots: jots.into_iter().map(|j| JobJot { id: j.id, t: j.t, kind: j.kind, raw: j.raw, polished: j.polished }).collect(),
             sections: secs_saved, covered, notify: true,
             unread_photos: photos.iter().filter(|a| a.caption.trim().is_empty()).map(|a| (a.id, a.path.clone(), a.t)).collect(),
+            improve: true,
+            manual: false,
+        }))
+    }
+
+    /// The transcript of a saved meeting as readable lines.
+    fn lines_of(&self, id: i64) -> Result<Vec<Line>> {
+        let names: HashMap<i64, String> = self.kb.store.speaker_names(id).unwrap_or_default().into_iter().collect();
+        let mut lines: Vec<Line> = Vec::new();
+        for s in self.kb.store.segments(id)? {
+            push_merged_as(&mut lines, s.t0, s.t1, &s.text, s.speaker, &who_is(&names, s.speaker));
+        }
+        Ok(lines)
+    }
+
+    // ---------------------------------------------------------------- a better transcript from a compute node
+
+    /// Part of the finishing flow: when a compute node can listen again and the recording was kept, its transcript
+    /// replaces the live one before the notes are written. Anything that goes wrong is only logged, and the write-up
+    /// then uses the live transcript. Returns true when the transcript was replaced.
+    fn improve_in_finish(&self, job: &mut FinishJob) -> bool {
+        let id = job.id;
+        let flag = format!("improved_{id}");
+        if !self.settings().improve_transcript || self.kb.store.flag(&flag) {
+            return false;
+        }
+        let Some(node) = crate::remote::get().and_then(|r| r.transcribe_node_available()) else { return false };
+        if !self.kb.store.audios(id).map(|a| a.iter().any(|(p, _)| Path::new(p).is_file())).unwrap_or(false) {
+            return false;
+        }
+        self.wrap(id, "improving", &format!("Improving the transcript on {node}"), 9.0);
+        match self.improve_transcript(id, &|node, frac| self.wrap(id, "improving", &improving_label(node, frac), 9.0 + 21.0 * frac)) {
+            Ok(Improved::Done { segments, node, partial }) => {
+                tracing::info!("meeting {id}: transcript improved on {node} ({segments} segments, partial={partial})");
+                match self.lines_of(id) {
+                    Ok(lines) if !lines.is_empty() => {
+                        job.lines = lines;
+                        // Notes condensed from the old lines no longer match.
+                        job.sections.clear();
+                        job.covered = 0;
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            Ok(Improved::Skipped(why)) => {
+                tracing::info!("meeting {id}: transcript kept as it was: {why}");
+                false
+            }
+            Err(e) => {
+                tracing::warn!("meeting {id}: could not improve the transcript: {e:#}");
+                false
+            }
+        }
+    }
+
+    /// Sends the kept recording of a meeting to a compute node with a large speech model and puts what comes back in
+    /// place of the live transcript. Only done when what comes back is plausible (see `judge`): a failed or empty job
+    /// never touches the live transcript. When the node stops early, the part it did cover is swapped and the live text
+    /// is kept for the rest. `progress(node, 0..1)` reports how far it is.
+    pub(super) fn improve_transcript(&self, mid: i64, progress: &dyn Fn(&str, f32)) -> Result<Improved> {
+        let skip = |why: &str| Ok(Improved::Skipped(why.to_string()));
+        let Some(remote) = crate::remote::get() else { return skip("no compute node") };
+        if remote.transcribe_node_available().is_none() {
+            return skip("no compute node can listen to the recording right now");
+        }
+        let meeting = self.kb.store.list_meetings()?.into_iter().find(|m| m.id == mid).ok_or_else(|| anyhow!("meeting not found"))?;
+        let old: Vec<(f64, f64, String)> = self.kb.store.segments(mid)?.into_iter().map(|s| (s.t0, s.t1, s.text)).collect();
+        let last_spoken = old.iter().map(|s| s.1).fold(0.0f64, f64::max);
+        // The kept files, with their lengths: from the file itself, else up to where the next one starts, else up to the end of the meeting.
+        let kept: Vec<(String, f64)> = self.kb.store.audios(mid)?.into_iter().filter(|(p, _)| Path::new(p).is_file()).collect();
+        if kept.is_empty() {
+            return skip("the recording was not kept");
+        }
+        let meeting_end = (meeting.duration_secs.max(0) as f64).max(last_spoken);
+        let files: Vec<(String, f64, f64)> = kept
+            .iter()
+            .enumerate()
+            .map(|(i, (path, offset))| {
+                let secs = crate::audio::decode::probe_duration_secs(Path::new(path))
+                    .or_else(|| kept.get(i + 1).map(|n| n.1 - offset))
+                    .unwrap_or(meeting_end - offset)
+                    .max(1.0);
+                (path.clone(), *offset, secs)
+            })
+            .collect();
+        let plan = AudioPlan::new(&files);
+        if plan.is_empty() {
+            return skip("the recording is empty");
+        }
+        // A recording being made has the phone to itself.
+        let mut told = false;
+        while self.live.lock().as_ref().map(|l| l.recording).unwrap_or(false) {
+            if !told {
+                told = true;
+                self.emit(json!({"type": "wrap_hold", "waiting": true}));
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        if told {
+            self.emit(json!({"type": "wrap_hold", "waiting": false}));
+        }
+        let language = language_for_node(self.kb.store.meeting_language(mid), &self.settings().language);
+        let cancel = AtomicBool::new(false);
+        let job = crate::remote::TranscribeJob { total_ms: plan.total_ms(), language, cancel: &cancel };
+        let started = Instant::now();
+        let outcome = remote.transcribe(
+            &job,
+            |start_ms| Ok(open_frames(&plan, start_ms)),
+            |done, total, node| progress(node, (done as f32 / total.max(1) as f32).clamp(0.0, 1.0)),
+            |_, _, _| {},
+        );
+        let outcome = match outcome {
+            None => return skip("no compute node can listen to the recording right now"),
+            Some(r) => r?,
         };
-        self.run_finish(job);
-        Ok(())
+        let heard: Vec<(f64, f64, String)> = outcome
+            .segments
+            .iter()
+            .map(|(a, b, t)| (plan.to_meeting(*a as f64 / 1000.0), plan.to_meeting(*b as f64 / 1000.0), t.clone()))
+            .collect();
+        let new = tidy_segments(heard, crate::engine::whisper::clean_transcript);
+        let (from, to) = match judge(&new, &old, plan.meeting_span(), outcome.complete) {
+            Verdict::Replace { from, to } => (from, to),
+            Verdict::Reject(why) => return skip(why),
+        };
+        let composed = compose(&old, &new, from, to);
+        let stored = self.kb.store.replace_segments(mid, &composed)?;
+        let _ = self.kb.store.set_flag(&format!("improved_{mid}"), true);
+        if self.kb.store.meeting_language(mid).is_none() {
+            if let Some(l) = language_for_node(outcome.language.clone(), "auto") {
+                let _ = self.kb.store.set_meeting_language(mid, &l);
+            }
+        }
+        tracing::info!("transcript of meeting {mid}: {} new segments from {} in {:.0}s, {} stored", new.len(), outcome.node, started.elapsed().as_secs_f32(), stored);
+        Ok(Improved::Done { segments: new.len(), node: outcome.node.clone(), partial: !outcome.complete })
+    }
+
+    /// The Review screen's "Improve transcript": listens again on a compute node, then writes the notes and the summary
+    /// again from the new transcript. Returns at once. The rest runs in the background and ends with a `wrap_done` event
+    /// (with `improve: true`, and `improved` telling whether the transcript changed).
+    pub(super) fn meeting_improve(self: &Arc<Self>, id: i64) -> Result<Value> {
+        if self.live.lock().as_ref().map(|l| l.meeting_id == id).unwrap_or(false) {
+            return Err(anyhow!("This meeting is still being recorded."));
+        }
+        let meeting = self.kb.store.list_meetings()?.into_iter().find(|m| m.id == id).ok_or_else(|| anyhow!("meeting not found"))?;
+        if meeting.ended_at.is_none() {
+            return Err(anyhow!("The notes for this meeting are still being written. Try again in a moment."));
+        }
+        if !self.kb.store.audios(id)?.iter().any(|(p, _)| Path::new(p).is_file()) {
+            return Err(anyhow!("This meeting has no kept recording."));
+        }
+        let Some(node) = crate::remote::get().and_then(|r| r.transcribe_node_available()) else {
+            return Err(anyhow!("No compute node that can listen to a recording is available right now."));
+        };
+        if !self.finishing_ids.lock().insert(id) {
+            return Err(anyhow!("The notes for this meeting are still being written. Try again in a moment."));
+        }
+        self.wrap(id, "improving", &format!("Improving the transcript on {node}"), 2.0);
+        let core = self.clone();
+        std::thread::Builder::new()
+            .name("improve".into())
+            .spawn(move || {
+                let r = core.improve_transcript(id, &|node, frac| core.wrap(id, "improving", &improving_label(node, frac), 3.0 + 27.0 * frac));
+                core.finishing_ids.lock().remove(&id);
+                let note = match r {
+                    Ok(Improved::Done { .. }) => {
+                        // Write the notes and the summary again from the new transcript.
+                        let job = core.kb.store.list_meetings().ok().and_then(|ms| ms.into_iter().find(|m| m.id == id)).and_then(|m| core.finish_job_for(&m).ok().flatten());
+                        match job {
+                            Some(mut job) => {
+                                job.improve = false;
+                                job.manual = true;
+                                job.notify = false;
+                                job.sections.clear();
+                                job.covered = 0;
+                                core.run_finish(job);
+                                return;
+                            }
+                            None => "The transcript changed, but the notes could not be written again.".to_string(),
+                        }
+                    }
+                    Ok(Improved::Skipped(why)) => format!("The transcript was left as it was, because {}.", why.trim_end_matches('.')),
+                    Err(e) => {
+                        tracing::warn!("improving the transcript of meeting {id} failed: {e:#}");
+                        "The transcript was left as it was, because the compute node could not finish.".to_string()
+                    }
+                };
+                core.emit(json!({"type": "wrap_done", "meeting_id": id, "title": "", "preview": "", "notify": false, "improve": true, "improved": false, "note": note}));
+                core.emit(json!({"type": "meetings_changed"}));
+            })
+            .expect("spawn improve");
+        Ok(json!({}))
     }
 
     pub(super) fn meeting_get(&self, id: i64) -> Result<Value> {
@@ -583,4 +797,9 @@ impl Core {
             let _ = self.kb.remove_document(doc.id);
         }
     }
+}
+
+/// "Improving the transcript on Desk PC (63%)".
+fn improving_label(node: &str, frac: f32) -> String {
+    format!("Improving the transcript on {node} ({}%)", (frac * 100.0).floor().clamp(0.0, 100.0) as u32)
 }

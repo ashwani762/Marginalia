@@ -281,10 +281,14 @@ impl Panel {
     fn speed(&self, ui: &mut Ui, i: &Info) {
         card(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 3.0;
-            for (label, fraction, text, colour, model) in [
+            let mut rows = vec![
                 ("Chat", model::gauge(i.chat_tok_s, model::CHAT_TOK_S_MAX), model::chat_speed_text(i.chat_tok_s), BLUE, &i.chat_model),
                 ("Search", model::gauge(i.search_per_s, model::SEARCH_PER_S_MAX), model::search_speed_text(i.search_per_s), GREEN, &i.search_model),
-            ] {
+            ];
+            if i.speech_model.is_some() {
+                rows.push(("Speech", model::gauge(i.speech_x, model::SPEECH_X_MAX), model::speech_speed_text(i.speech_x), AMBER, &i.speech_model));
+            }
+            for (label, fraction, text, colour, model) in rows {
                 speed_row(ui, label, fraction, &text, colour);
                 ui.horizontal(|ui| {
                     ui.add_space(58.0);

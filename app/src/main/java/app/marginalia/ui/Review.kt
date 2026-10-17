@@ -83,6 +83,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import app.marginalia.Card
+import app.marginalia.canImproveTranscript
+import app.marginalia.transcribeNode
 import app.marginalia.AppVm
 import app.marginalia.Jot
 import app.marginalia.MeetingDetail
@@ -217,7 +220,7 @@ fun ReviewScreen(
                     0 -> SummaryPage(vm, d, onPhoto = { viewing = it }, onCamera = { camera() }, onGallery = { gallery() }, onAsk = onAsk)
                     1 -> NotesTab(d, onEdit = { jotSheet = it }, onAdd = { addingJot = true }, onDelete = vm::deleteJot)
                     2 -> TranscriptTab(vm, d, onPhoto = { viewing = it })
-                    else -> AssistTab(d, onCite)
+                    else -> AssistTab(d, onCite, onRemove = { vm.deleteCard(it, live = false) })
                 }
             }
         }
@@ -407,13 +410,15 @@ private fun TranscriptTab(vm: AppVm, d: MeetingDetail, onPhoto: (Photo) -> Unit)
         (d.lines.map { Triple(it.t0, "l${it.i}", it as Any) } + d.photos.map { Triple(it.t ?: Double.MAX_VALUE, "p${it.id}", it as Any) }).sortedBy { it.first }
     }
     if (items.isEmpty()) {
-        Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+        Column(Modifier.fillMaxSize().padding(32.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
             Text("Nothing was transcribed.", style = type.callout.copy(color = p.textFaint))
+            ImproveTranscript(vm, d)
         }
         return
     }
     Box(Modifier.fillMaxSize()) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 10.dp, bottom = 120.dp)) {
+        item(key = "improve") { ImproveTranscript(vm, d) }
         item(key = "speakers") { SpeakerHeader(vm, d) }
         if (hasAudio) item(key = "hint") {
             Text("Tap a line to hear it.", style = type.caption.copy(color = p.textFaint), modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp))
@@ -446,8 +451,39 @@ private fun TranscriptTab(vm: AppVm, d: MeetingDetail, onPhoto: (Photo) -> Unit)
     }
 }
 
+/**
+ * "Improve transcript": a compute node with a larger speech model listens to the kept recording again and fixes mistakes.
+ * Shown only for a meeting with a kept recording while such a compute node is online. While it works, the progress is in
+ * the header like any other write-up, and a line here says so.
+ */
 @Composable
-private fun AssistTab(d: MeetingDetail, onCite: (Source) -> Unit) {
+private fun ImproveTranscript(vm: AppVm, d: MeetingDetail) {
+    val p = pal
+    val nodes by vm.nodes.collectAsState()
+    val finishing by vm.finishing.collectAsState()
+    val working = finishing[d.meeting.id]
+    val node = transcribeNode(nodes)
+    val show = canImproveTranscript(nodes, hasAudio = d.audio.any { it.exists }, busy = working != null)
+    if (working?.step == "improving") {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            ThinkingDots(color = p.accentInk)
+            Spacer(Modifier.width(10.dp))
+            Text(working.label, style = type.caption.copy(color = p.accentInk))
+        }
+    } else if (show && node != null) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)) {
+            TonalButton("Improve transcript", icon = Icons.Rounded.AutoAwesome) { vm.improveTranscript(d.meeting.id) }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "${node.name.ifBlank { "A compute node" }} re-transcribes the recording with a larger model, then the notes are rewritten.",
+                style = type.caption.copy(color = p.textFaint),
+            )
+        }
+    }
+}
+
+@Composable
+private fun AssistTab(d: MeetingDetail, onCite: (Source) -> Unit, onRemove: (Card) -> Unit) {
     val p = pal
     if (d.cards.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
@@ -456,7 +492,7 @@ private fun AssistTab(d: MeetingDetail, onCite: (Source) -> Unit) {
         return
     }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 120.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        items(d.cards, key = { it.id }) { c -> AssistCard(c, onCite = onCite) }
+        items(d.cards, key = { it.id }) { c -> AssistCard(c, onCite = onCite, onRemove = { onRemove(c) }) }
     }
 }
 

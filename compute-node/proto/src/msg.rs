@@ -32,6 +32,9 @@ pub enum Request {
     Pair { name: String, proof: [u8; 32] },
     Chat(ChatRequest),
     Embed(EmbedRequest),
+    /// Speech to text on recorded audio. After this frame the phone keeps sending [`AudioFrame`]s on the same
+    /// stream until [`AudioFrame::End`], and the node answers with [`TranscribeEvent`]s.
+    Transcribe(TranscribeRequest),
     /// A phone that is not paired yet asks to be let in. The person has already said on the phone
     /// that they trust this compute node.
     Knock { name: String },
@@ -61,6 +64,35 @@ pub enum ChatEvent {
     Token(String),
     /// `elapsed_ms` is how long the node spent generating, so the phone can show the node's own speed.
     Done { prompt_tokens: u32, generated_tokens: u32, elapsed_ms: u32 },
+    Error(String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TranscribeRequest {
+    /// ISO code such as "en" or "hi", or None to detect it.
+    pub language: Option<String>,
+    /// Length of the audio that will follow, in milliseconds (for progress).
+    pub total_ms: u64,
+    pub priority: Priority,
+}
+
+/// Audio sent by the phone after a [`TranscribeRequest`]: raw PCM, 16 bit little endian, mono, 16 kHz.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AudioFrame {
+    Pcm(Vec<u8>),
+    End,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TranscribeEvent {
+    Queued { ahead: u32 },
+    /// Heartbeat while the node is busy with the job.
+    Working,
+    /// How much of the audio has been transcribed so far.
+    Progress { done_ms: u64, total_ms: u64 },
+    /// One finished stretch of speech. Times are from the start of the audio.
+    Segment { t0_ms: u64, t1_ms: u64, text: String },
+    Done { language: String, segments: u32, elapsed_ms: u32 },
     Error(String),
 }
 
@@ -118,6 +150,10 @@ pub struct Capabilities {
     /// Measured at start. Zero means not measured.
     pub chat_tok_s: f32,
     pub embed_per_s: f32,
+    /// Name of the speech model, if this node transcribes audio.
+    pub transcribe: Option<String>,
+    /// How many times faster than real time it transcribes (0 means not measured).
+    pub transcribe_x: f32,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

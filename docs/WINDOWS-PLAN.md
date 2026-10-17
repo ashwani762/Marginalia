@@ -39,7 +39,7 @@ certificates, and has a tray icon that shows status and opens a small details pa
    click toggles the panel (`marginalia-node-tray.exe --panel` is the egui window), right click menu, "Start node" spawns the node without a console window.
 8. **Start at logon:** scheduled tasks for the node and the tray (done by `setup.ps1`), verify after a reboot.
 9. **Phone test:** with a real Android phone on the same Wi-Fi the Marginalia app (release build) shows a banner "1 compute node found on your network",
-   tap Connect, Trust. Then Ask something and look for "on <node name>" in the answer footer, and `marginalia-node.exe stats` counting the job.
+   tap Connect. Then Ask something and look for "on <node name>" in the answer footer, and `marginalia-node.exe stats` counting the job.
    Kill the node mid-answer: the phone must finish the answer by itself.
 10. **Package:** produce a zip with the two exes and the `windows/` scripts if useful. Update `compute-node/STATUS.md` and `README.md` with what is now verified.
 

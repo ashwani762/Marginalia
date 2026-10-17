@@ -159,4 +159,37 @@ class ModelParsingTest {
         assertEquals("Compute nodes: 2", onlineChipText(listOf(c("falcon", true), c("hawk", true), c("owl", false))))
         assertEquals("Compute node", onlineChipText(listOf(c("", true))))
     }
+
+    @Test fun computerReadsWhatItCanTranscribe() {
+        val with = HomeComputer.from(JSONObject("""{"fp":"a","name":"Desk","online":true,"transcribe":"large-v3-turbo"}"""))
+        assertEquals("large-v3-turbo", with.transcribe)
+        assertNull(HomeComputer.from(JSONObject("""{"fp":"a","name":"Desk","online":true,"transcribe":null}""")).transcribe)
+        assertNull(HomeComputer.from(JSONObject("""{"fp":"a","name":"Desk","online":true}""")).transcribe)
+        assertNull(HomeComputer.from(JSONObject("""{"fp":"a","name":"Desk","online":true,"transcribe":""}""")).transcribe)
+    }
+
+    @Test fun improvingNeedsAnOnlineComputerThatCanListen() {
+        fun c(online: Boolean, transcribe: String?, state: String = "approved") =
+            HomeComputer.from(JSONObject().put("fp", "x").put("name", "Desk").put("online", online).put("state", state).put("transcribe", transcribe ?: JSONObject.NULL))
+        fun n(enabled: Boolean, vararg list: HomeComputer) = HomeComputers(enabled = enabled, paired = list.toList())
+        assertEquals("Desk", transcribeNode(n(true, c(true, "large")))!!.name)
+        assertNull(transcribeNode(n(true, c(false, "large"))))
+        assertNull(transcribeNode(n(true, c(true, null))))
+        assertNull(transcribeNode(n(true, c(true, "large", "waiting"))))
+        assertNull(transcribeNode(n(false, c(true, "large"))))
+        assertNull(transcribeNode(n(true)))
+        // The second one can listen even if the first cannot.
+        assertEquals("large", transcribeNode(n(true, c(true, null), c(true, "large")))!!.transcribe)
+
+        val ok = n(true, c(true, "large"))
+        assertTrue(canImproveTranscript(ok, hasAudio = true, busy = false))
+        assertFalse(canImproveTranscript(ok, hasAudio = false, busy = false))
+        assertFalse(canImproveTranscript(ok, hasAudio = true, busy = true))
+        assertFalse(canImproveTranscript(n(true, c(false, "large")), hasAudio = true, busy = false))
+    }
+
+    @Test fun improvingTranscriptsIsOnByDefault() {
+        assertTrue(Prefs.from(JSONObject("""{}""")).improveTranscript)
+        assertFalse(Prefs.from(JSONObject("""{"improve_transcript":false}""")).improveTranscript)
+    }
 }

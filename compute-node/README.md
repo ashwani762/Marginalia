@@ -21,17 +21,17 @@ One caveat to be straight about: the process necessarily sees the text while it 
 - **Identity.** Every device, node and phone, makes itself a self-signed certificate once. There are no certificate authorities and no names to check. Each side knows the other by the fingerprint (BLAKE3 hash) of its certificate.
 - **Mutual pinning.** After pairing, the phone only talks to a node whose fingerprint it saved, and the node only does work for phones whose fingerprint it saved. A phone that is not on the list gets as far as asking to pair and nothing else.
 - **Discovery.** The node announces itself with mDNS as `_marginalia._udp` so phones on the same network find it without typing an address. The announcement carries the protocol version, the first 16 characters of the node fingerprint and the node name. Nothing in it grants access.
-- **Connecting (the normal way).** The phone finds the node by itself. In the app, Settings, Compute nodes, it lists the compute nodes it found and asks "Trust this compute node?". When the person taps Trust, the phone saves the node's fingerprint and the node lets the phone in, with no code and nothing to do at the node. If several compute nodes are found the phone asks once for all of them. The node keeps nothing about jobs, so a phone that gets in can only borrow the node's speed, and the question that matters, whether to send your text to this compute node, is answered on the phone.
+- **Connecting (the normal way).** The phone finds the node by itself. In the app, Settings, Compute nodes, it lists the compute nodes it found and asks "Connect to this compute node?". When the person taps Trust, the phone saves the node's fingerprint and the node lets the phone in, with no code and nothing to do at the node. If several compute nodes are found the phone asks once for all of them. The node keeps nothing about jobs, so a phone that gets in can only borrow the node's speed, and the question that matters, whether to send your text to this compute node, is answered on the phone.
 - **Locking.** `marginalia-node lock` (or `run --lock`) makes new phones wait instead. A waiting phone is allowed by a phone that is already trusted (the app shows "Let X use this compute node?") or with `marginalia-node approve`. `unlock` goes back to the default.
 - **Pairing with a code (strict).** Run `marginalia-node pair`. It prints a one-time code such as `K7QM-4TDX`, valid for 5 minutes and for five wrong guesses. On the phone you type the code under "Pair with a code instead". The phone connects without trusting anything yet and sends a proof that it knows the code. The proof is a keyed hash of the code (stretched with scrypt), the secret of that exact TLS session and both certificate fingerprints. The code itself is never sent. The node checks the proof and replies with its own proof. Only when the phone has checked the node's proof does it save the node's fingerprint. Because the proof is tied to the TLS session, a device sitting in the middle and relaying messages cannot make pairing succeed: its two sessions have different secrets. This is covered by the tests in `proto/tests/handshake.rs`. Use this route if you do not want to trust whatever answers on the network the first time.
-- **Jobs.** Chat (streamed tokens), embeddings (search vectors) and a status request. Jobs have a priority: interactive (someone is waiting), background (notes, write-ups) and bulk (indexing). The node serves them in that order and tells the phone how many jobs are ahead of it.
+- **Jobs.** Chat (streamed tokens), embeddings (search vectors), transcription of recorded audio (see below) and a status request. Jobs have a priority: interactive (someone is waiting), background (notes, write-ups) and bulk (indexing). The node serves them in that order and tells the phone how many jobs are ahead of it.
 
 ## Requirements
 
 - A machine on the same network as the phones. Linux x86_64 and ARM64 are the tested targets. Windows is expected to work, macOS is untested.
 - Rust 1.85 or newer, CMake and a C++ compiler (the llama.cpp engine is built from source).
 - For the GPU build: an NVIDIA card and the CUDA toolkit. Without them use the CPU-only build.
-- The two model files (see below). Enough disk and memory for both models (a few GB; check the file sizes).
+- The model files (see below). Enough disk and memory for the models (about 3.7 GB on disk; chat and search need a few GB of memory, the speech model about 0.8 GB more while it is loaded and 1 GB extra for a 75 minute recording).
 
 ## Build
 
@@ -45,14 +45,15 @@ The binary ends up at `target/release/marginalia-node` in the repository root. T
 
 ## Models
 
-Put these two files in the models folder:
+Put these files in the models folder:
 
 | File | Used for |
 | --- | --- |
 | `gemma-4-E2B-it-Q4_0.gguf` | chat (write-ups, answers) |
 | `embeddinggemma-2-Q8_0.gguf` | search (embeddings) |
+| `ggml-large-v3-turbo-q5_0.bin` | speech to text on recorded audio (about 570 MB, from the `ggerganov/whisper.cpp` repository on Hugging Face) |
 
-Get them with `marginalia-node models download` (works the same on Linux and Windows, see below). The default folder is `~/.local/share/marginalia/models/` on Linux (`%APPDATA%\marginalia\models` on Windows). Use another folder with `--models DIR`, or point at single files with `--chat-model FILE` and `--embed-model FILE`. If only one of the two files is present the node serves only that job type and says so in its status. If neither is found it refuses to start.
+Get them with `marginalia-node models download` (works the same on Linux and Windows, see below). The default folder is `~/.local/share/marginalia/models/` on Linux (`%APPDATA%\marginalia\models` on Windows). Use another folder with `--models DIR`, or point at single files with `--chat-model FILE`, `--embed-model FILE` and `--speech-model FILE`. Each job type is served only when its file is present, and the status says which. A node with no speech model works as before and does not offer transcription. `run --no-speech` leaves the speech model out even when the file is there. If none of the three is found the node refuses to start.
 
 At start the node runs a short measurement and reports tokens per second for chat and passages per second for search. Phones use those numbers to decide whether this node is worth using for a given job.
 
@@ -60,32 +61,45 @@ At start the node runs a short measurement and reports tokens per second for cha
 
 ```sh
 marginalia-node models list
-marginalia-node models download [--dir DIR] [--only chat|search] [--chat-model e2b|e4b]
-marginalia-node run [--port 47615] [--name NAME] [--models DIR] [--cpu]
+marginalia-node models download [--dir DIR] [--only chat|search|speech] [--chat-model e2b|e4b] [--skip-speech]
+marginalia-node run [--port 47615] [--name NAME] [--models DIR] [--cpu] [--speech-model FILE] [--no-speech]
 marginalia-node pair
 marginalia-node status
 marginalia-node pause | resume
 marginalia-node stop
 marginalia-node revoke <id or name>
-marginalia-node probe <addr:port> [--code CODE]
+marginalia-node probe <addr:port> [--code CODE] [--transcribe FILE.wav] [--language en]
 ```
 
-- `models list` shows each expected model file, whether it is present, its size and the folder. `models download` fetches what is missing from Hugging Face: it continues a stopped download (`.part` file, HTTP Range), shows MB, percent, speed and time left on one updating line, checks the size and only then renames the file, skips files that are complete, and retries with growing pauses when the network drops. If a repository asks for a login (HTTP 401 or 403) set the `HF_TOKEN` environment variable, it is sent only to Hugging Face and never printed. `--chat-model e4b` fetches the larger chat model, which the node only uses when started with `run --chat-model FILE`. `run` tells you about this command when the models are missing.
+- `models list` shows each expected model file, whether it is present, its size and the folder. `models download` fetches what is missing from Hugging Face: it continues a stopped download (`.part` file, HTTP Range), shows MB, percent, speed and time left on one updating line, checks the size and only then renames the file, skips files that are complete, and retries with growing pauses when the network drops. If a repository asks for a login (HTTP 401 or 403) set the `HF_TOKEN` environment variable, it is sent only to Hugging Face and never printed. `--chat-model e4b` fetches the larger chat model, which the node only uses when started with `run --chat-model FILE`. `models download` fetches all three files by default, `--skip-speech` leaves out the speech model and `--only speech` fetches just that one. `run` tells you about this command when the models are missing.
 - `run` starts the node in the foreground and stops on Ctrl-C. `--cpu` keeps the models off the graphics card at run time (the build still has to match). `--name` is what phones show; it defaults to the machine's name.
 - `pair` asks the running node for a one-time code and prints it with the addresses the node can be reached at. On the phone: Settings, Compute nodes, Add a compute node.
 - `status` prints what the running node serves, its measured speed and the paired phones with their ids.
-- `stats` prints how much work the node has done: jobs, failures, tokens and passages, speed, per phone totals and the size and duration of recent jobs. Numbers only, never any content. The counters live in memory and restart from zero with the node.
+- `stats` prints how much work the node has done: jobs, failures, tokens, passages and seconds of audio transcribed, speed, per phone totals and the size and duration of recent jobs. Numbers only, never any content. The counters live in memory and restart from zero with the node.
 - `approve` / `deny` answer a phone that is waiting (when locked). `lock` / `unlock` switch between the two modes.
-- `pause` makes the node turn new chat and search jobs away (the phone gets "paused" and uses its own speed instead). The models stay loaded, jobs that are already running finish, and `status` shows `"paused": true`. `resume` takes jobs again. A pause lives in memory only, so a restarted node is never paused.
+- `pause` makes the node turn new jobs (chat, search and transcription) away (the phone gets "paused" and uses its own speed instead). The models stay loaded, jobs that are already running finish, and `status` shows `"paused": true`. `resume` takes jobs again. A pause lives in memory only, so a restarted node is never paused.
 - `stop` stops the running node cleanly: it stops accepting phones and new jobs, lets running jobs finish for up to 10 seconds, leaves the network (mDNS) and exits with status 0. Ctrl-C and a system stop request (SIGTERM) do the same. With the systemd unit a clean exit is not restarted, use `systemctl --user start marginalia-node` to bring it back.
 - `revoke` forgets a phone. Use the id from `status` or the phone's name. That phone is a stranger again and has to pair anew.
-- `probe` behaves like a phone: connects to an address, optionally pairs with `--code`, and tries each job type. It is for checking that a node works, for example from another machine.
+- `probe` behaves like a phone: connects to an address, optionally pairs with `--code`, and tries each job type. It is for checking that a node works, for example from another machine. `probe ADDR --transcribe FILE.wav` instead sends a recording (16 kHz, mono, 16 bit `.wav`, or a raw `.pcm`) like the phone does, and prints the progress, each segment with its times, and the speed in times faster than real time. `--language` sets the language, otherwise it is detected.
 
 `pair`, `status`, `pause`, `stop`, `revoke` and the tray icon talk to the running node through a control channel on `127.0.0.1:47616` (change with `--admin-port`). It only listens on this machine, so these commands must be run on the same machine as `run`.
 
 `status` prints one JSON object with the node name, whether it is paused or locked, `running_jobs`, `waiting_jobs`, `served` (chat and search jobs since start), `uptime_s`, the number of `phones`, the models and measured speed, the paired phones and the addresses the node can be reached at. `stats` adds failures and per phone totals. Both hold counts, names and timings only.
 
 State (identity and paired list) lives in `~/.config/marginalia-node` on Linux. Change with `--state-dir`. Delete that folder to make the node a new device that no phone knows.
+
+## Transcribing recordings
+
+A node with the speech model can write out a recording with a large Whisper model (`large-v3-turbo`, 5 bit), so the phone can replace the transcript its small live model made with a better one after the meeting.
+
+- **Protocol.** The phone sends a `Transcribe` request (language or none to detect it, length, priority), then the audio as raw PCM (16 bit little endian, mono, 16 kHz) in frames of up to about 1 MB on the same stream, then an end marker. The node answers with `Queued`, `Working` (a heartbeat every 2 seconds), `Progress`, `Segment` (start and end in milliseconds from the start of the audio, sent as soon as it is final), `Done` and `Error`.
+- **Limits.** Up to 3 hours of audio per job (about 350 MB in memory), longer is refused with a clear message. One recording is transcribed at a time. Others wait their turn (the phone is told how many are ahead), and a node with more than 3 waiting turns further ones away as busy.
+- **How it works.** Whisper's own 30 second windows run over the whole recording, so any length works, each window knowing what came before. It decodes with a beam of 5 on the graphics card (greedy on the processor), turns on flash attention on the graphics card, falls back to a higher temperature when a stretch looks like a loop or has low confidence, and drops text that is made up over silence (sound tags, one character repeated, a stuck repeated line). When the language is left open on a long recording it is chosen from the three loudest stretches, so a quiet start does not decide it.
+- **Processor only.** With `run --cpu`, or a node without a usable graphics card, the large model is slow: about half of real time was measured on a busy 12 thread machine (an 11 second clip took 20 seconds), so an hour of meeting would take hours. Use a graphics card for this job. The node does not measure the speed at start, so `transcribe_x` stays 0 until the first recording.
+- **Memory.** The speech model takes about 0.8 GB of graphics memory while the node runs. A job adds a decoder state (about 0.3 GB on the card) that is freed when the job ends. In memory a recording takes 2 bytes per sample while it arrives and 4 bytes per sample (about 230 MB per hour) while it is transcribed, and the node hands the memory back when the job is over.
+- **Stopping.** If the phone closes the connection (or a heartbeat cannot be sent) the node stops whisper at once and frees the audio.
+- **Privacy.** The audio and the text exist only in memory while the job runs. Nothing is written to disk or to the log. `stats` shows the number of jobs, seconds of audio and speed only.
+- **Speed.** `status` and the phone see `transcribe_x`, how many times faster than real time the node is. It is 0 until the first recording of 20 seconds or more has been done, after which it follows a moving average of real jobs. See `STATUS.md` for the measured figures.
 
 ## Tray icon
 
@@ -102,7 +116,7 @@ marginalia-node-tray --print                    # prints the menu as text and ex
   - the node name with a state pill (Running, Paused, Not running) and a line saying what pause and lock mean right now
   - phones that are asking to join, with Allow and Deny, when there are any
   - big numbers: jobs served, phones, uptime
-  - speed bars for chat (tokens a second) and search (passages a second), each with its model name
+  - speed bars for chat (tokens a second), search (passages a second) and, when the node has the speech model, speech (times faster than real time), each with its model name
   - live activity: one pulsing dot per running or waiting job, a strip of the last 2 minutes (kept in memory in the panel only), and the failure count
   - the paired phones with their job counts and when they were last seen, each with Block and Remove (both ask first)
   - the addresses the node can be reached at
@@ -143,7 +157,7 @@ A Pi 4 or 5 (64-bit OS) can run the node, CPU only (`compute-node/build.sh --cpu
 These are plans, not features:
 
 - Nodes that find, join and share work with each other (hot-hot, primary and standby, load balancing). The plan is in `DESIGN.md`.
-- Live speech (streaming transcription) on the node.
+- Live speech (streaming transcription) on the node. Only transcription of finished recordings exists.
 - Fan-out of one write-up across several nodes.
 - Per-client priority and fairness (today the order is by job priority, not by who asked).
 - A true Windows service wrapper (for now `windows/setup.ps1` makes login tasks).

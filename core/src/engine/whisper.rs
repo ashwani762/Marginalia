@@ -70,6 +70,9 @@ enum Job {
 pub struct WhisperHandle {
     tx: Sender<Job>,
     pub seconds_transcribed: Arc<AtomicU64>,
+    /// The language the live transcript is being decoded in: a fixed choice, or what the first sentences voted
+    /// for once the language settled. `None` while it is still being worked out.
+    locked: Arc<parking_lot::Mutex<Option<String>>>,
     join: Arc<parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
@@ -85,6 +88,10 @@ impl WhisperHandle {
     }
     pub fn set_language(&self, lang: String) {
         let _ = self.tx.send(Job::SetLanguage(lang));
+    }
+    /// The language the live transcript settled on (an ISO code), if it has.
+    pub fn language_lock(&self) -> Option<String> {
+        self.locked.lock().clone()
     }
     pub fn shutdown(&self) {
         let _ = self.tx.send(Job::Shutdown);
@@ -165,6 +172,8 @@ pub fn spawn(cfg: WhisperConfig, out: Sender<Transcript>) -> Result<WhisperHandl
     let (ready_tx, ready_rx) = bounded::<Result<()>>(1);
     let seconds = Arc::new(AtomicU64::new(0));
     let seconds2 = seconds.clone();
+    let locked: Arc<parking_lot::Mutex<Option<String>>> = Arc::new(parking_lot::Mutex::new(None));
+    let locked2 = locked.clone();
     let join = std::thread::Builder::new()
         .name("whisper-worker".into())
         .spawn(move || {
@@ -178,13 +187,20 @@ pub fn spawn(cfg: WhisperConfig, out: Sender<Transcript>) -> Result<WhisperHandl
             let _ = ready_tx.send(Ok(()));
             tracing::info!("whisper ready (gpu={}, multilingual={})", cfg.use_gpu, ctx.multilingual);
             let mut language = cfg.language.clone();
-            run_loop(ctx, rx, out, &mut language, cfg.threads, seconds2);
+            *locked2.lock() = fixed_language(&language);
+            run_loop(ctx, rx, out, &mut language, cfg.threads, seconds2, locked2);
         })?;
     ready_rx.recv().map_err(|_| anyhow!("whisper worker died during load"))??;
-    Ok(WhisperHandle { tx, seconds_transcribed: seconds, join: Arc::new(parking_lot::Mutex::new(Some(join))) })
+    Ok(WhisperHandle { tx, seconds_transcribed: seconds, locked, join: Arc::new(parking_lot::Mutex::new(Some(join))) })
 }
 
-fn run_loop(ctx: Ctx, rx: Receiver<Job>, out: Sender<Transcript>, language: &mut String, threads: i32, seconds: Arc<AtomicU64>) {
+/// A language setting that names a language (not "auto" or empty) as a code to remember.
+fn fixed_language(setting: &str) -> Option<String> {
+    let s = setting.trim().to_ascii_lowercase();
+    (!s.is_empty() && s != "auto").then_some(s)
+}
+
+fn run_loop(ctx: Ctx, rx: Receiver<Job>, out: Sender<Transcript>, language: &mut String, threads: i32, seconds: Arc<AtomicU64>, locked: Arc<parking_lot::Mutex<Option<String>>>) {
     // With the language left on auto, the first few finished sentences vote and the winner is kept for the
     // rest of the recording. Whisper deciding again for every snippet flips between close languages (Hindi
     // and Urdu, say) in the middle of a meeting.
@@ -213,6 +229,7 @@ fn run_loop(ctx: Ctx, rx: Receiver<Job>, out: Sender<Transcript>, language: &mut
         match job {
             Job::Shutdown => return,
             Job::SetLanguage(l) => {
+                *locked.lock() = fixed_language(&l);
                 *language = l;
                 votes.clear();
             }
@@ -243,6 +260,7 @@ fn run_loop(ctx: Ctx, rx: Receiver<Job>, out: Sender<Transcript>, language: &mut
                                     if best.1 * 3 >= votes.len() * 2 {
                                         tracing::info!("language settled on {} ({} of {} sentences)", best.0, best.1, votes.len());
                                         *language = best.0.to_string();
+                                        *locked.lock() = fixed_language(best.0);
                                         votes.clear();
                                     } else if votes.len() >= 6 {
                                         votes.remove(0);
@@ -399,4 +417,16 @@ pub fn clean_transcript(text: &str) -> String {
         }
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_named_language_is_remembered() {
+        assert_eq!(fixed_language("auto"), None);
+        assert_eq!(fixed_language(""), None);
+        assert_eq!(fixed_language(" HI "), Some("hi".to_string()));
+    }
 }

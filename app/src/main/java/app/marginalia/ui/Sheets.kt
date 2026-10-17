@@ -250,7 +250,7 @@ fun YouSheet(vm: AppVm, onDismiss: () -> Unit, scrollToHome: Boolean = false) {
                     Text("Private by design", style = type.headline)
                 }
                 Spacer(Modifier.height(6.dp))
-                Text("Transcription, notes, search and answers run on this phone. Your audio and documents never leave it. If you trust a compute node on your network, the text for notes and answers goes to it while it is in reach, and it keeps none of it. Nothing goes to the internet.", style = type.callout)
+                Text("Transcription, notes, search and answers run on this phone. Your audio and documents never leave it. If you connect a compute node on your network, the text for notes and answers goes to it while it is in reach, and it keeps none of it. Nothing goes to the internet.", style = type.callout)
                 if (info.isNotBlank()) {
                     Spacer(Modifier.height(10.dp))
                     Text(info, style = type.time)

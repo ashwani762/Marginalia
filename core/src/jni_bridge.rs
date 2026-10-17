@@ -284,72 +284,130 @@ fn lock_local_llm(req: &GenRequest) -> LocalSlot {
 /// priority queues.
 fn external_llm() -> LlmHandle {
     LlmHandle::external(Arc::new(|req: &GenRequest| -> anyhow::Result<GenStats> {
-        // A home computer takes the job when one is paired, on, and reachable. If it cannot start
-        // the job, the phone does it itself, as it always did.
-        let mut messages = req.messages.clone();
-        let mut seam: Option<crate::remote::SeamFilter> = None;
-        if let Some(outcome) = crate::remote::get().and_then(|r| r.chat(req)) {
-            match outcome {
-                crate::remote::ChatOutcome::Done(done) => return done,
-                // Every computer dropped out partway: the phone finishes the answer from the words already sent.
-                crate::remote::ChatOutcome::Continue { partial } => {
-                    seam = Some(crate::remote::SeamFilter::new(&partial));
-                    messages = crate::remote::continuation(&messages, &partial);
+        // A compute node takes the job when one is paired, on, and reachable. If it cannot start it, or drops
+        // out partway, the phone does the job (or finishes it from the words already shown). And while the
+        // phone is working on a long job, a node that comes online takes over from where the phone got to.
+        let mut partial = String::new();
+        let mut handovers = 0;
+        loop {
+            if let Some(outcome) = crate::remote::get().and_then(|r| r.chat_from(req, &partial)) {
+                match outcome {
+                    crate::remote::ChatOutcome::Done(done) => return done,
+                    crate::remote::ChatOutcome::Continue { partial: p } => partial = p,
+                }
+            }
+            match run_local_generation(req, &partial, handovers < 2)? {
+                LocalEnd::Finished(stats) => return Ok(stats),
+                LocalEnd::HandOver(p) => {
+                    partial = p;
+                    handovers += 1;
                 }
             }
         }
-        // The phone's own model runs one job at a time. Jobs that went to home computers never get here,
-        // so they run side by side. An urgent job asks a background one on the phone to give way.
-        let _local = lock_local_llm(req);
-        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = crossbeam_channel::unbounded::<(i32, String)>();
-        REQUESTS.lock().get_or_insert_with(HashMap::new).insert(id, tx);
-        let role = |r: Role| match r { Role::System => "system", Role::User => "user", Role::Assistant => "assistant" };
-        let body = json!({
-            "messages": messages.iter().map(|m: &ChatMessage| json!({"role": role(m.role), "text": m.content})).collect::<Vec<_>>(),
-            "images": req.images.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-            "max_tokens": req.params.max_tokens, "temperature": req.params.temperature,
-            "top_p": req.params.top_p, "top_k": req.params.top_k,
-        });
-        let result = (|| {
-            let vm = VM.get().ok_or_else(|| anyhow::anyhow!("no JVM"))?;
-            let env = vm.attach_current_thread()?;
-            let s = env.new_string(body.to_string())?;
-            call_generator("start", "(JLjava/lang/String;)V", &[JValue::Long(id as i64), JValue::Object(&s)])?;
-            let mut cancelled = false;
-            let mut stats = GenStats::default();
-            loop {
-                match rx.recv_timeout(std::time::Duration::from_millis(30)) {
-                    Ok((0, t)) => match seam.as_mut() {
-                        Some(f) => f.push(&t, &mut |x| (req.on_event)(GenEvent::Token(x.to_string()))),
-                        None => (req.on_event)(GenEvent::Token(t)),
-                    },
-                    Ok((1, s)) => {
+    }))
+}
+
+enum LocalEnd {
+    Finished(GenStats),
+    /// A compute node came online: these are the words written so far, the node carries on from them.
+    HandOver(String),
+}
+
+/// Runs the job on the phone's own model, one job at a time. With `watch` on, a compute node that becomes
+/// available while the phone is still reading the prompt or has written less than most of the answer takes
+/// the job over (the phone's model is stopped and the node carries on from the words so far).
+fn run_local_generation(req: &GenRequest, partial: &str, watch: bool) -> anyhow::Result<LocalEnd> {
+    let mut messages = req.messages.clone();
+    let mut seam: Option<crate::remote::SeamFilter> = None;
+    if !partial.is_empty() {
+        seam = Some(crate::remote::SeamFilter::new(partial));
+        messages = crate::remote::continuation(&messages, partial);
+    }
+    // The phone's own model runs one job at a time. Jobs that went to compute nodes never get here, so they run
+    // side by side. An urgent job asks a background one on the phone to give way.
+    let _local = lock_local_llm(req);
+    let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = crossbeam_channel::unbounded::<(i32, String)>();
+    REQUESTS.lock().get_or_insert_with(HashMap::new).insert(id, tx);
+    let role = |r: Role| match r { Role::System => "system", Role::User => "user", Role::Assistant => "assistant" };
+    let body = json!({
+        "messages": messages.iter().map(|m: &ChatMessage| json!({"role": role(m.role), "text": m.content})).collect::<Vec<_>>(),
+        "images": req.images.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "max_tokens": req.params.max_tokens, "temperature": req.params.temperature,
+        "top_p": req.params.top_p, "top_k": req.params.top_k,
+    });
+    let result = (|| {
+        let vm = VM.get().ok_or_else(|| anyhow::anyhow!("no JVM"))?;
+        let env = vm.attach_current_thread()?;
+        let s = env.new_string(body.to_string())?;
+        call_generator("start", "(JLjava/lang/String;)V", &[JValue::Long(id as i64), JValue::Object(&s)])?;
+        let mut cancelled = false;
+        let mut handing_over = false;
+        let mut written = partial.to_string();
+        let mut produced = 0usize;
+        let mut last_look = std::time::Instant::now();
+        let mut stats = GenStats::default();
+        let emit = |x: &str, written: &mut String| {
+            written.push_str(x);
+            (req.on_event)(GenEvent::Token(x.to_string()));
+        };
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(30)) {
+                Ok((0, t)) => {
+                    produced += 1;
+                    match seam.as_mut() {
+                        Some(f) => f.push(&t, &mut |x| emit(x, &mut written)),
+                        None => emit(&t, &mut written),
+                    }
+                }
+                Ok((1, s)) => {
+                    if let Some(f) = seam.as_mut() {
+                        f.finish(&mut |x| emit(x, &mut written));
+                    }
+                    let v: Value = serde_json::from_str(&s).unwrap_or(json!({}));
+                    stats.prompt_tokens = v["prompt_tokens"].as_u64().unwrap_or(0) as usize;
+                    stats.generated_tokens = v["generated_tokens"].as_u64().unwrap_or(0) as usize;
+                    break;
+                }
+                Ok((_, e)) => {
+                    if handing_over {
                         if let Some(f) = seam.as_mut() {
-                            f.finish(&mut |x| (req.on_event)(GenEvent::Token(x.to_string())));
+                            f.finish(&mut |x| emit(x, &mut written));
                         }
-                        let v: Value = serde_json::from_str(&s).unwrap_or(json!({}));
-                        stats.prompt_tokens = v["prompt_tokens"].as_u64().unwrap_or(0) as usize;
-                        stats.generated_tokens = v["generated_tokens"].as_u64().unwrap_or(0) as usize;
                         break;
                     }
-                    Ok((_, e)) => anyhow::bail!(e),
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                        if req.cancel.load(Ordering::Relaxed) && !cancelled {
+                    anyhow::bail!(e)
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    if req.cancel.load(Ordering::Relaxed) && !cancelled {
+                        cancelled = true;
+                        let _ = call_generator("cancel", "(J)V", &[JValue::Long(id as i64)]);
+                    }
+                    // A node that has come back takes the job over while there is still plenty left to do.
+                    if watch && !cancelled && last_look.elapsed() >= std::time::Duration::from_secs(2) {
+                        last_look = std::time::Instant::now();
+                        let early = produced * 10 < req.params.max_tokens * 7;
+                        if early && crate::remote::get().map(|r| r.chat_ready()).unwrap_or(false) {
+                            tracing::info!("a compute node is back, handing the job over after {produced} words");
+                            handing_over = true;
                             cancelled = true;
                             let _ = call_generator("cancel", "(J)V", &[JValue::Long(id as i64)]);
                         }
                     }
-                    Err(_) => break,
                 }
+                Err(_) => break,
             }
-            Ok(stats)
-        })();
-        if let Some(m) = REQUESTS.lock().as_mut() {
-            m.remove(&id);
         }
-        result
-    }))
+        if handing_over {
+            Ok(LocalEnd::HandOver(written))
+        } else {
+            Ok(LocalEnd::Finished(stats))
+        }
+    })();
+    if let Some(m) = REQUESTS.lock().as_mut() {
+        m.remove(&id);
+    }
+    result
 }
 
 #[no_mangle]

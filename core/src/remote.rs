@@ -8,7 +8,7 @@
 use crate::engine::llm::{GenEvent, GenRequest, GenStats, Role};
 use anyhow::{anyhow, bail, Result};
 use marginalia_proto::tls::Identity;
-use marginalia_proto::{client, wire, ChatEvent, ChatMsg, ChatRequest, EmbedReply, EmbedRequest, KnockReply, Priority, Request, StatusReply};
+use marginalia_proto::{client, wire, AudioFrame, ChatEvent, ChatMsg, ChatRequest, EmbedReply, EmbedRequest, KnockReply, Priority, Request, StatusReply, TranscribeEvent, TranscribeRequest};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -129,6 +129,13 @@ impl SeamFilter {
 /// The node sends something every two seconds while it works. Silence for this long means the link is gone.
 const STALL: Duration = Duration::from_secs(6);
 
+/// A node that gives fewer words a second than this over a 5 second stretch is replaced mid-answer.
+/// The phone's own model does about 10 to 15, so below this a switch is a gain.
+const SLOW_TOK_S: f32 = 4.0;
+const SPEED_WINDOW: Duration = Duration::from_secs(5);
+/// How long a slow node is left alone.
+const SLOW_PAUSE: Duration = Duration::from_secs(120);
+
 /// A live node that produces no words for this long is stuck.
 const NO_PROGRESS: Duration = Duration::from_secs(120);
 
@@ -136,9 +143,88 @@ const NO_PROGRESS: Duration = Duration::from_secs(120);
 const MIN_CHAT_TOK_S: f32 = 15.0;
 /// And for search when it beats the phone's one passage a second by a wide margin.
 const MIN_EMBED_PER_S: f32 = 4.0;
+/// A node is only given recorded audio when it listens at least this many times faster than real time.
+/// (0 means it has not measured itself yet, which is let through.)
+const MIN_TRANSCRIBE_X: f32 = 1.0;
+/// Used to rank a node that has not measured how fast it listens.
+const UNMEASURED_TRANSCRIBE_X: f32 = 2.0;
+/// A live node that sends only heartbeats for this long, with no new text, is stuck.
+const TRANSCRIBE_NO_PROGRESS: Duration = Duration::from_secs(600);
+/// When a node drops out and less than this much audio is left, the rest is not worth another upload.
+const TRANSCRIBE_TAIL_MS: u64 = 4000;
+/// Biggest piece of audio put in one frame (the node accepts about 1 MB).
+const AUDIO_FRAME_MAX: usize = 1 << 20;
 const DIAL: Duration = Duration::from_millis(2500);
 /// After a failed attempt a computer is left alone for this long.
 const RETRY_AFTER: Duration = Duration::from_secs(20);
+
+/// Audio for a node: 16 kHz mono 16 bit little endian, in pieces.
+pub type PcmFrames = Box<dyn Iterator<Item = Vec<u8>> + Send>;
+
+pub struct TranscribeJob<'a> {
+    /// Length of all the audio.
+    pub total_ms: u64,
+    /// ISO code if known, else the node decides.
+    pub language: Option<String>,
+    pub cancel: &'a std::sync::atomic::AtomicBool,
+}
+
+/// What came back from the compute nodes. Times are milliseconds from the start of the audio.
+#[derive(Debug, Default)]
+pub struct TranscribeOutcome {
+    pub segments: Vec<(u64, u64, String)>,
+    pub language: Option<String>,
+    /// A node told us it had listened to everything. When false, `segments` stop early.
+    pub complete: bool,
+    /// The node that did the last part.
+    pub node: String,
+}
+
+impl TranscribeOutcome {
+    /// Where the text stops, in milliseconds.
+    pub fn covered_ms(&self) -> u64 {
+        resume_point_ms(&self.segments)
+    }
+}
+
+enum Attempt {
+    Finished,
+    Cancelled,
+}
+
+/// Where the next node has to pick up: right after the last finished stretch of speech.
+pub fn resume_point_ms(segments: &[(u64, u64, String)]) -> u64 {
+    segments.iter().map(|s| s.1).max().unwrap_or(0)
+}
+
+/// Not worth another upload: only a few seconds of audio are left.
+pub fn tail_is_negligible(total_ms: u64, from_ms: u64) -> bool {
+    total_ms.saturating_sub(from_ms) < TRANSCRIBE_TAIL_MS
+}
+
+/// A segment the node timed from the start of the audio it was sent, moved onto the time line of the whole recording.
+pub fn shift_segment(start_ms: u64, t0_ms: u64, t1_ms: u64) -> (u64, u64) {
+    let t0 = start_ms + t0_ms;
+    (t0, (start_ms + t1_ms).max(t0))
+}
+
+/// The node sends something every two seconds while it works. Nothing from it for the STALL time, while nothing is
+/// going up to it either, means the link is gone.
+pub fn link_is_lost(since_event: Duration, since_upload: Duration) -> bool {
+    since_event > STALL && since_upload > STALL
+}
+
+/// Whether a node's last status says it can take recorded audio.
+pub fn can_transcribe(st: &StatusReply) -> bool {
+    !st.paused && st.caps.transcribe.is_some() && (st.caps.transcribe_x == 0.0 || st.caps.transcribe_x >= MIN_TRANSCRIBE_X)
+}
+
+/// How long a new listening job would wait on a node, in milliseconds: the jobs ahead plus this one,
+/// divided by how many times faster than real time it listens (per unit of audio length).
+pub fn transcribe_wait(transcribe_x: f32, ahead: u32) -> u32 {
+    let x = if transcribe_x > 0.0 { transcribe_x } else { UNMEASURED_TRANSCRIBE_X };
+    ((ahead + 1) as f32 / x * 1000.0) as u32
+}
 
 static REMOTE: OnceLock<Arc<Remote>> = OnceLock::new();
 
@@ -183,8 +269,12 @@ struct Live {
     failed_at: Option<Instant>,
     checked_at: Option<Instant>,
     last_error: String,
-    /// The computer turned this phone down.
+    /// The compute node turned this phone down.
     refused: bool,
+    /// Tokens a second this phone actually got from the node on recent answers (0 when not known yet).
+    observed_chat: f32,
+    /// A node that turned slow is left alone until then.
+    slow_until: Option<Instant>,
 }
 
 struct Node {
@@ -206,6 +296,8 @@ struct Inner {
 }
 
 pub struct Remote {
+    started: Instant,
+    last_kick: std::sync::atomic::AtomicU64,
     /// Jobs this phone has out on each computer right now, by fingerprint. A computer's own status can
     /// be a few seconds old, so the phone counts its own jobs too when it chooses where to send the next.
     inflight: Mutex<HashMap<String, u32>>,
@@ -236,9 +328,9 @@ impl Remote {
             .nodes
             .iter()
             .cloned()
-            .map(|n| Node { saved: n, live: Live { conn: None, status: None, rtt_ms: 0, failed_at: None, checked_at: None, last_error: String::new(), refused: false } })
+            .map(|n| Node { saved: n, live: Live { conn: None, status: None, rtt_ms: 0, failed_at: None, checked_at: None, last_error: String::new(), refused: false, observed_chat: 0.0, slow_until: None } })
             .collect();
-        let r = Arc::new(Remote { inflight: Mutex::new(HashMap::new()), rt, ep, id, path, inner: Mutex::new(Inner { enabled: saved.enabled, nodes, seen: HashMap::new() }) });
+        let r = Arc::new(Remote { started: Instant::now(), last_kick: std::sync::atomic::AtomicU64::new(0), inflight: Mutex::new(HashMap::new()), rt, ep, id, path, inner: Mutex::new(Inner { enabled: saved.enabled, nodes, seen: HashMap::new() }) });
         r.save();
         r.rt.spawn(monitor(r.clone()));
         Ok(r)
@@ -268,7 +360,7 @@ impl Remote {
     // ------------------------------------------------------------------ discovery and pairing
 
     /// A computer the phone's network discovery just found.
-    pub fn seen(&self, name: &str, id: &str, port: u16, addrs: &[String]) {
+    pub fn seen(self: &Arc<Self>, name: &str, id: &str, port: u16, addrs: &[String]) {
         let addrs: Vec<SocketAddr> = addrs.iter().filter_map(|a| a.parse::<std::net::IpAddr>().ok()).filter(|a| a.is_ipv4()).map(|a| SocketAddr::new(a, port)).collect();
         if addrs.is_empty() {
             return;
@@ -280,6 +372,12 @@ impl Remote {
             n.live.failed_at = None;
         }
         g.seen.insert(id.to_string(), Seen { name: name.to_string(), id: id.to_string(), addrs, at: Instant::now() });
+        // A paired node that is announcing itself again is looked at right away, so work waiting for one starts sooner.
+        let known_offline = g.nodes.iter().any(|n| id.len() >= 16 && n.saved.fp.starts_with(id) && n.live.conn.as_ref().map(|c| c.close_reason().is_some()).unwrap_or(true));
+        drop(g);
+        if known_offline {
+            self.kick();
+        }
     }
 
     /// Pairs with a computer, given either its address or the id discovery reported, and the code
@@ -323,7 +421,7 @@ impl Remote {
         g.nodes.retain(|n| n.saved.fp != fp);
         g.nodes.push(Node {
             saved: SavedNode { fp: fp.clone(), name: name.clone(), addrs: vec![a.to_string()], approved: true },
-            live: Live { conn: None, status: None, rtt_ms: 0, failed_at: None, checked_at: None, last_error: String::new(), refused: false },
+            live: Live { conn: None, status: None, rtt_ms: 0, failed_at: None, checked_at: None, last_error: String::new(), refused: false, observed_chat: 0.0, slow_until: None },
         });
         drop(g);
         self.save();
@@ -378,7 +476,7 @@ impl Remote {
         g.nodes.retain(|n| n.saved.fp != fp);
         g.nodes.push(Node {
             saved: SavedNode { fp: fp.clone(), name: name.clone(), addrs: vec![a.to_string()], approved },
-            live: Live { conn: None, status: None, rtt_ms: 0, failed_at: None, checked_at: None, last_error: String::new(), refused: false },
+            live: Live { conn: None, status: None, rtt_ms: 0, failed_at: None, checked_at: None, last_error: String::new(), refused: false, observed_chat: 0.0, slow_until: None },
         });
         drop(g);
         self.save();
@@ -427,7 +525,7 @@ impl Remote {
                 json!({
                     "state": state, "pending": pending,
                     "fp": n.saved.fp, "name": n.saved.name, "online": online, "rtt_ms": n.live.rtt_ms,
-                    "chat": caps.chat, "embed": caps.embed, "chat_tok_s": caps.chat_tok_s, "embed_per_s": caps.embed_per_s,
+                    "chat": caps.chat, "embed": caps.embed, "transcribe": caps.transcribe, "transcribe_x": caps.transcribe_x, "chat_tok_s": caps.chat_tok_s, "embed_per_s": caps.embed_per_s,
                     "busy": n.live.status.as_ref().map(|s| s.running + s.waiting).unwrap_or(0),
                     "problem": if online || state == "waiting" { String::new() } else { n.live.last_error.clone() },
                 })
@@ -465,6 +563,12 @@ impl Remote {
     /// sent (they are shown to the person, so they cannot be taken back). When every computer has
     /// failed, [`ChatOutcome::Continue`] hands the words so far back so the phone can carry on itself.
     pub fn chat(self: &Arc<Self>, req: &GenRequest) -> Option<ChatOutcome> {
+        self.chat_from(req, "")
+    }
+
+    /// Like [`Self::chat`], for an answer that is already partly written (by the phone, or by a node that
+    /// dropped out): the first node asked carries on from `start`.
+    pub fn chat_from(self: &Arc<Self>, req: &GenRequest, start: &str) -> Option<ChatOutcome> {
         if !req.images.is_empty() || !self.enabled() {
             return None;
         }
@@ -472,7 +576,7 @@ impl Remote {
         if candidates.is_empty() {
             return None;
         }
-        let mut partial = String::new();
+        let mut partial = start.to_string();
         for cand in candidates {
             if req.cancel.load(Ordering::Relaxed) {
                 return Some(ChatOutcome::Done(Ok(GenStats::default())));
@@ -494,6 +598,34 @@ impl Remote {
             }
         }
         if partial.is_empty() { None } else { Some(ChatOutcome::Continue { partial }) }
+    }
+
+    /// True when a compute node could take a chat job right now. While none is up this also looks for
+    /// one, at most every 5 seconds, so a node that comes back is noticed while the phone is working.
+    pub fn chat_ready(self: &Arc<Self>) -> bool {
+        if !self.enabled() {
+            return false;
+        }
+        if self.chat_parallelism() > 0 {
+            return true;
+        }
+        self.kick();
+        false
+    }
+
+    /// Looks at every paired node in the background (rate limited).
+    fn kick(self: &Arc<Self>) {
+        let now = self.started.elapsed().as_millis() as u64;
+        let last = self.last_kick.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < 5000 || self.inner.lock().nodes.is_empty() {
+            return;
+        }
+        self.last_kick.store(now.max(1), Ordering::Relaxed);
+        let count = self.inner.lock().nodes.len();
+        for i in 0..count {
+            let r = self.clone();
+            self.rt.spawn(async move { r.ensure_idx(i, true).await });
+        }
     }
 
     /// One attempt on one computer. Every word that arrives is passed on and added to `partial`.
@@ -534,6 +666,10 @@ impl Remote {
     async fn read_chat(&self, node: &Picked, req: &GenRequest, recv: &mut quinn::RecvStream, partial: &mut String, seam: &mut Option<SeamFilter>) -> Result<GenStats> {
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         let mut last_progress = Instant::now();
+        // Speed watch: words counted over 5 second windows once they are flowing.
+        let mut window = (Instant::now(), 0u32);
+        let mut first_token: Option<Instant> = None;
+        let mut tokens = 0u32;
         loop {
             // While words are flowing a pause of more than a few seconds means the link is gone. Before
             // the first word the computer may be reading a long prompt, so it gets longer.
@@ -562,6 +698,20 @@ impl Remote {
                 }
                 ChatEvent::Token(t) => {
                     last_progress = Instant::now();
+                    tokens += 1;
+                    if first_token.is_none() {
+                        first_token = Some(Instant::now());
+                        window = (Instant::now(), 0);
+                    }
+                    window.1 += 1;
+                    if window.0.elapsed() >= SPEED_WINDOW {
+                        let rate = window.1 as f32 / window.0.elapsed().as_secs_f32();
+                        if rate < SLOW_TOK_S {
+                            self.mark_slow(&node.fp, rate);
+                            bail!("the compute node slowed down to {rate:.1} words a second");
+                        }
+                        window = (Instant::now(), 0);
+                    }
                     match seam.as_mut() {
                         Some(f) => f.push(&t, &mut |x| {
                             partial.push_str(x);
@@ -579,6 +729,12 @@ impl Remote {
                             partial.push_str(x);
                             (req.on_event)(GenEvent::Token(x.to_string()));
                         });
+                    }
+                    // What the phone really got, from the first word to the last.
+                    if let Some(t0) = first_token {
+                        if tokens >= 30 {
+                            self.record_speed(&node.fp, tokens as f32 / t0.elapsed().as_secs_f32().max(0.05));
+                        }
                     }
                     return Ok(GenStats { prompt_tokens: prompt_tokens as usize, generated_tokens: generated_tokens as usize, served_by: Some(node.name.clone()), remote_ms: elapsed_ms as u64, ..Default::default() });
                 }
@@ -634,6 +790,203 @@ impl Remote {
         None
     }
 
+    /// The name of a compute node that could transcribe recorded audio right now, from what was last seen
+    /// (the fastest one when several can).
+    pub fn transcribe_node_available(&self) -> Option<String> {
+        let g = self.inner.lock();
+        if !g.enabled {
+            return None;
+        }
+        g.nodes
+            .iter()
+            .filter(|n| n.saved.approved)
+            .filter(|n| n.live.conn.as_ref().map(|c| c.close_reason().is_none()).unwrap_or(false))
+            .filter_map(|n| n.live.status.as_ref().filter(|s| can_transcribe(s)).map(|s| (s.caps.transcribe_x, n.saved.name.clone())))
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, name)| name)
+    }
+
+    /// Speech to text on recorded audio, on a compute node with a large speech model.
+    ///
+    /// `open_audio(start_ms)` gives the audio (16 kHz mono 16 bit little endian, in pieces of up to 1 MB)
+    /// from `start_ms` on. Times everywhere are milliseconds from the start of the whole audio.
+    ///
+    /// Nodes are tried best first (fastest, then least busy). When one drops out partway, the segments it
+    /// finished are kept and the next node gets only the audio after the last of them. `None` means no node
+    /// qualifies and nothing was sent. `Some(Err)` means every node failed before finishing anything. Otherwise the
+    /// outcome says whether the whole audio was covered (`complete`) or where it stopped, so the caller can keep
+    /// the live transcript for the rest. `on_progress(done_ms, total_ms, node)` reports how far it is and
+    /// `on_segment` gets each finished stretch.
+    pub fn transcribe(
+        self: &Arc<Self>,
+        job: &TranscribeJob<'_>,
+        open_audio: impl Fn(u64) -> Result<PcmFrames>,
+        on_progress: impl Fn(u64, u64, &str),
+        mut on_segment: impl FnMut(u64, u64, &str),
+    ) -> Option<Result<TranscribeOutcome>> {
+        if !self.enabled() || job.total_ms == 0 {
+            return None;
+        }
+        let candidates = self.rt.block_on(self.pick_all(Kind::Transcribe));
+        if candidates.is_empty() {
+            return None;
+        }
+        let mut out = TranscribeOutcome { segments: Vec::new(), language: None, complete: false, node: String::new() };
+        let mut last_err: Option<anyhow::Error> = None;
+        for cand in candidates {
+            if job.cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let start = resume_point_ms(&out.segments);
+            if !out.segments.is_empty() && tail_is_negligible(job.total_ms, start) {
+                out.complete = true;
+                break;
+            }
+            let frames = match open_audio(start) {
+                Ok(f) => f,
+                // The recording itself cannot be read: another node would not help.
+                Err(e) => return Some(Err(e)),
+            };
+            let _out = Out::new(self, &cand.fp);
+            let started = Instant::now();
+            let before = out.segments.len();
+            match self.rt.block_on(self.transcribe_on(&cand, job, start, frames, &mut out, &on_progress, &mut on_segment)) {
+                Ok(Attempt::Finished) => {
+                    tracing::info!("transcript from {}: {} segments in {:.1}s", cand.name, out.segments.len() - before, started.elapsed().as_secs_f32());
+                    out.complete = true;
+                    out.node = cand.name.clone();
+                    break;
+                }
+                Ok(Attempt::Cancelled) => break,
+                Err(e) => {
+                    tracing::warn!("{} stopped the transcript ({e:#}), {} segments had arrived", cand.name, out.segments.len() - before);
+                    if out.segments.len() > before {
+                        out.node = cand.name.clone();
+                    }
+                    self.mark_failed(&cand.fp, &e);
+                    last_err = Some(e);
+                }
+            }
+        }
+        if out.segments.is_empty() && !out.complete && !job.cancel.load(Ordering::Relaxed) {
+            return Some(Err(last_err.unwrap_or_else(|| anyhow!("no compute node could listen to the recording"))));
+        }
+        Some(Ok(out))
+    }
+
+    /// One attempt on one node: the audio from `start_ms` goes up while the answers come down.
+    #[allow(clippy::too_many_arguments)]
+    async fn transcribe_on(
+        &self,
+        node: &Picked,
+        job: &TranscribeJob<'_>,
+        start_ms: u64,
+        frames: PcmFrames,
+        out: &mut TranscribeOutcome,
+        on_progress: &impl Fn(u64, u64, &str),
+        on_segment: &mut impl FnMut(u64, u64, &str),
+    ) -> Result<Attempt> {
+        let req = TranscribeRequest { language: job.language.clone(), total_ms: job.total_ms.saturating_sub(start_ms), priority: Priority::Background };
+        let (mut send, recv) = client::open(&node.conn, &Request::Transcribe(req)).await?;
+        // Decoding is slow work: it runs on its own thread and hands over a few pieces ahead of the upload.
+        let (ftx, mut frx) = tokio::sync::mpsc::channel::<Vec<u8>>(3);
+        let producer = tokio::task::spawn_blocking(move || {
+            for f in frames {
+                if ftx.blocking_send(f).is_err() {
+                    break;
+                }
+            }
+        });
+        // The answers are read on a task of their own: reading half a frame must never be cut off by another branch.
+        let (etx, mut erx) = tokio::sync::mpsc::channel::<Result<Option<TranscribeEvent>>>(64);
+        let reader = tokio::spawn(async move {
+            let mut recv = recv;
+            loop {
+                let r = wire::read_frame::<TranscribeEvent>(&mut recv).await;
+                let last = !matches!(r, Ok(Some(_)));
+                if etx.send(r).await.is_err() || last {
+                    break;
+                }
+            }
+        });
+        let last_up = std::cell::Cell::new(Instant::now());
+        let result: Result<Attempt> = {
+        let upload = async {
+            while let Some(f) = frx.recv().await {
+                for part in f.chunks(AUDIO_FRAME_MAX) {
+                    wire::write_frame(&mut send, &AudioFrame::Pcm(part.to_vec())).await?;
+                    last_up.set(Instant::now());
+                }
+            }
+            wire::write_frame(&mut send, &AudioFrame::End).await?;
+            let _ = send.finish();
+            last_up.set(Instant::now());
+            Ok::<(), anyhow::Error>(())
+        };
+        tokio::pin!(upload);
+        let mut uploaded = false;
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let mut last_event = Instant::now();
+        let mut last_progress = Instant::now();
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    if job.cancel.load(Ordering::Relaxed) {
+                        break Ok(Attempt::Cancelled);
+                    }
+                    if link_is_lost(last_event.elapsed(), last_up.get().elapsed()) {
+                        break Err(anyhow!("the computer took too long"));
+                    }
+                    if last_progress.elapsed() > TRANSCRIBE_NO_PROGRESS {
+                        break Err(anyhow!("the computer is not making progress"));
+                    }
+                }
+                r = &mut upload, if !uploaded => match r {
+                    Ok(()) => uploaded = true,
+                    Err(e) => break Err(e),
+                },
+                ev = erx.recv() => {
+                    let ev = match ev {
+                        Some(Ok(Some(e))) => e,
+                        Some(Ok(None)) | None => break Err(anyhow!("the computer stopped answering")),
+                        Some(Err(e)) => break Err(e),
+                    };
+                    last_event = Instant::now();
+                    match ev {
+                        TranscribeEvent::Queued { .. } => last_progress = Instant::now(),
+                        TranscribeEvent::Working => {}
+                        TranscribeEvent::Progress { done_ms, .. } => {
+                            last_progress = Instant::now();
+                            on_progress((start_ms + done_ms).min(job.total_ms), job.total_ms, &node.name);
+                        }
+                        TranscribeEvent::Segment { t0_ms, t1_ms, text } => {
+                            last_progress = Instant::now();
+                            let (t0, t1) = shift_segment(start_ms, t0_ms, t1_ms);
+                            if !text.trim().is_empty() {
+                                on_segment(t0, t1, &text);
+                                out.segments.push((t0, t1, text));
+                            }
+                        }
+                        TranscribeEvent::Done { language, .. } => {
+                            if !language.trim().is_empty() {
+                                out.language = Some(language);
+                            }
+                            break Ok(Attempt::Finished);
+                        }
+                        TranscribeEvent::Error(e) => break Err(anyhow!(e)),
+                    }
+                }
+            }
+        }
+        };
+        reader.abort();
+        let _ = producer; // ends by itself at its next piece
+        if !matches!(result, Ok(Attempt::Finished)) {
+            let _ = send.reset(0u32.into());
+        }
+        result
+    }
+
     /// How many home computers could take a chat job right now, from what was last seen. The write-up
     /// uses it to decide how many parts to have written at the same time.
     pub fn chat_parallelism(&self) -> usize {
@@ -679,6 +1032,25 @@ impl Remote {
         }
     }
 
+    /// Remembers how fast a compute node really answered, as a moving average.
+    fn record_speed(&self, fp: &str, tok_s: f32) {
+        let mut g = self.inner.lock();
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.saved.fp == fp) {
+            n.live.observed_chat = if n.live.observed_chat > 0.0 { n.live.observed_chat * 0.6 + tok_s * 0.4 } else { tok_s };
+            n.live.slow_until = None;
+        }
+    }
+
+    /// A compute node that turned slow is not given chat jobs for a while.
+    fn mark_slow(&self, fp: &str, tok_s: f32) {
+        let mut g = self.inner.lock();
+        if let Some(n) = g.nodes.iter_mut().find(|n| n.saved.fp == fp) {
+            n.live.observed_chat = tok_s;
+            n.live.slow_until = Some(Instant::now() + SLOW_PAUSE);
+            tracing::warn!("{} is slow ({tok_s:.1} words a second), leaving it alone for {} s", n.saved.name, SLOW_PAUSE.as_secs());
+        }
+    }
+
     fn mark_failed(&self, fp: &str, e: &anyhow::Error) {
         let mut g = self.inner.lock();
         if let Some(n) = g.nodes.iter_mut().find(|n| n.saved.fp == fp) {
@@ -708,9 +1080,13 @@ impl Remote {
             if conn.close_reason().is_some() || st.paused {
                 continue;
             }
+            if matches!(kind, Kind::Chat) && n.live.slow_until.map(|t| t > Instant::now()).unwrap_or(false) {
+                continue;
+            }
             let ok = match kind {
                 Kind::Chat => st.caps.chat.is_some() && (st.caps.chat_tok_s == 0.0 || st.caps.chat_tok_s >= MIN_CHAT_TOK_S),
                 Kind::Embed => st.caps.embed.is_some() && st.caps.embed_dim == 768 && (st.caps.embed_per_s == 0.0 || st.caps.embed_per_s >= MIN_EMBED_PER_S),
+                Kind::Transcribe => can_transcribe(st),
             };
             if !ok {
                 continue;
@@ -718,13 +1094,17 @@ impl Remote {
             // Expected wait: the jobs ahead plus this one, divided by how fast the computer works, so a
             // quick computer with a short queue beats an idle slow one. The round trip breaks ties.
             let speed = match kind {
+                // What the node says it does now, or what this phone really got from it, whichever is lower.
+                Kind::Chat if n.live.observed_chat > 0.0 && st.caps.chat_tok_s > 0.0 => st.caps.chat_tok_s.min(n.live.observed_chat),
+                Kind::Chat if n.live.observed_chat > 0.0 => n.live.observed_chat,
                 Kind::Chat => st.caps.chat_tok_s,
                 Kind::Embed => st.caps.embed_per_s,
+                Kind::Transcribe => st.caps.transcribe_x,
             };
-            let speed = if speed > 0.0 { speed } else { 10.0 };
+            let speed = if speed > 0.0 { speed } else if matches!(kind, Kind::Transcribe) { UNMEASURED_TRANSCRIBE_X } else { 10.0 };
             let ours = self.inflight.lock().get(&n.saved.fp).copied().unwrap_or(0);
             let ahead = (st.running + st.waiting).max(ours);
-            let wait = ((ahead + 1) as f32 / speed * 1000.0) as u32;
+            let wait = if matches!(kind, Kind::Transcribe) { transcribe_wait(st.caps.transcribe_x, ahead) } else { ((ahead + 1) as f32 / speed * 1000.0) as u32 };
             ranked.push((wait, n.live.rtt_ms, Picked { conn, fp: n.saved.fp.clone(), name: n.saved.name.clone() }));
         }
         ranked.sort_by_key(|r| (r.0, r.1));
@@ -736,6 +1116,7 @@ impl Remote {
 enum Kind {
     Chat,
     Embed,
+    Transcribe,
 }
 
 struct Picked {
@@ -924,6 +1305,7 @@ async fn monitor(r: Arc<Remote>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use marginalia_proto::AudioFrame;
 
     fn run(shown: &str, pieces: &[&str]) -> String {
         let mut f = SeamFilter::new(shown);
@@ -957,5 +1339,257 @@ mod tests {
     #[test]
     fn short_answers_are_flushed_at_the_end() {
         assert_eq!(run("one two three four", &["five"]), "five");
+    }
+
+    // ------------------------------------------------------------------ listening to recorded audio
+
+    fn seg(t0: u64, t1: u64) -> (u64, u64, String) {
+        (t0, t1, "x".into())
+    }
+
+    #[test]
+    fn the_next_node_picks_up_after_the_last_finished_segment() {
+        assert_eq!(resume_point_ms(&[]), 0);
+        assert_eq!(resume_point_ms(&[seg(0, 4000), seg(4500, 9000), seg(9000, 8000)]), 9000);
+        assert_eq!(shift_segment(9000, 0, 2500), (9000, 11500));
+        assert_eq!(shift_segment(9000, 300, 100), (9300, 9300), "an end before the start is not allowed");
+        assert!(tail_is_negligible(100_000, 97_000));
+        assert!(!tail_is_negligible(100_000, 90_000));
+    }
+
+    #[test]
+    fn silence_only_counts_when_nothing_goes_up_either() {
+        let s = |n| Duration::from_secs(n);
+        assert!(!link_is_lost(s(2), s(2)));
+        assert!(!link_is_lost(s(10), s(1)), "audio is still going up");
+        assert!(!link_is_lost(s(1), s(10)), "the node is still answering");
+        assert!(link_is_lost(s(7), s(7)));
+    }
+
+    #[test]
+    fn faster_and_less_busy_nodes_rank_first() {
+        assert!(transcribe_wait(8.0, 0) < transcribe_wait(2.0, 0));
+        assert!(transcribe_wait(4.0, 0) < transcribe_wait(4.0, 2));
+        assert!(transcribe_wait(8.0, 3) > transcribe_wait(8.0, 1));
+        assert_eq!(transcribe_wait(0.0, 0), transcribe_wait(UNMEASURED_TRANSCRIBE_X, 0));
+    }
+
+    fn status(transcribe: Option<&str>, x: f32, paused: bool) -> StatusReply {
+        let mut st = StatusReply { proto: marginalia_proto::PROTO_VERSION, paused, ..Default::default() };
+        st.caps.transcribe = transcribe.map(String::from);
+        st.caps.transcribe_x = x;
+        st
+    }
+
+    #[test]
+    fn only_a_node_that_listens_quickly_and_is_not_paused_qualifies() {
+        assert!(can_transcribe(&status(Some("large"), 6.0, false)));
+        assert!(can_transcribe(&status(Some("large"), 0.0, false)), "not measured yet is let through");
+        assert!(!can_transcribe(&status(Some("large"), 0.4, false)), "slower than real time");
+        assert!(!can_transcribe(&status(None, 6.0, false)));
+        assert!(!can_transcribe(&status(Some("large"), 6.0, true)));
+    }
+
+    // A small node that speaks the protocol, to try the phone side against.
+
+    #[derive(Clone, Copy)]
+    enum Mode {
+        /// Listens to everything and answers.
+        Good,
+        /// Answers this many segments, then the connection dies.
+        DropAfter(usize),
+        /// Says it failed.
+        Broken,
+    }
+
+    struct Fake {
+        fp: String,
+        addr: SocketAddr,
+        /// For every listening job: (total_ms announced, bytes of audio received).
+        jobs: Arc<std::sync::Mutex<Vec<(u64, usize)>>>,
+    }
+
+    fn start_fake(rt: &tokio::runtime::Runtime, x: f32, mode: Mode) -> Fake {
+        use marginalia_proto::tls;
+        let id = tls::Identity::generate().unwrap();
+        let _g = rt.enter();
+        let ep = quinn::Endpoint::server(tls::server_config(&id).unwrap(), (std::net::Ipv4Addr::LOCALHOST, 0).into()).unwrap();
+        let addr = ep.local_addr().unwrap();
+        let jobs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let jobs2 = jobs.clone();
+        rt.spawn(async move {
+            while let Some(incoming) = ep.accept().await {
+                let jobs = jobs2.clone();
+                tokio::spawn(async move {
+                    let Ok(conn) = incoming.await else { return };
+                    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+                        let (jobs, conn) = (jobs.clone(), conn.clone());
+                        tokio::spawn(async move {
+                            let Ok(Some(req)) = wire::read_frame::<Request>(&mut recv).await else { return };
+                            match req {
+                                Request::Status => {
+                                    let mut st = status(Some("large-test"), x, false);
+                                    st.node_name = "fake".into();
+                                    let _ = wire::write_frame(&mut send, &st).await;
+                                    let _ = send.finish();
+                                    let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
+                                }
+                                Request::Transcribe(t) => {
+                                    let mut bytes = 0usize;
+                                    loop {
+                                        match wire::read_frame::<AudioFrame>(&mut recv).await {
+                                            Ok(Some(AudioFrame::Pcm(p))) => bytes += p.len(),
+                                            _ => break,
+                                        }
+                                    }
+                                    jobs.lock().unwrap().push((t.total_ms, bytes));
+                                    if matches!(mode, Mode::Broken) {
+                                        let _ = wire::write_frame(&mut send, &TranscribeEvent::Error("no model".into())).await;
+                                        let _ = send.finish();
+                                        let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
+                                        return;
+                                    }
+                                    let _ = wire::write_frame(&mut send, &TranscribeEvent::Queued { ahead: 0 }).await;
+                                    let secs = bytes / 32_000;
+                                    for i in 0..secs {
+                                        if let Mode::DropAfter(n) = mode {
+                                            if i == n {
+                                                tokio::time::sleep(Duration::from_millis(300)).await; // let what was sent arrive
+                                                conn.close(9u32.into(), b"boom");
+                                                return;
+                                            }
+                                        }
+                                        let (a, b) = (i as u64 * 1000, (i as u64 + 1) * 1000);
+                                        let _ = wire::write_frame(&mut send, &TranscribeEvent::Segment { t0_ms: a, t1_ms: b, text: format!("w{i}") }).await;
+                                        let _ = wire::write_frame(&mut send, &TranscribeEvent::Progress { done_ms: b, total_ms: t.total_ms }).await;
+                                    }
+                                    let _ = wire::write_frame(&mut send, &TranscribeEvent::Done { language: "en".into(), segments: secs as u32, elapsed_ms: 5 }).await;
+                                    let _ = send.finish();
+                                    let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
+                                }
+                                _ => {}
+                            }
+                        });
+                    }
+                });
+            }
+        });
+        Fake { fp: id.fingerprint(), addr, jobs }
+    }
+
+    fn remote_with(fakes: &[(&str, &Fake)], tag: &str) -> Arc<Remote> {
+        let dir = std::env::temp_dir().join(format!("marginalia-remote-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let r = Remote::open(dir.join("remote.json")).unwrap();
+        {
+            let mut g = r.inner.lock();
+            for (name, f) in fakes {
+                g.nodes.push(Node {
+                    saved: SavedNode { fp: f.fp.clone(), name: name.to_string(), addrs: vec![f.addr.to_string()], approved: true },
+                    live: Live { conn: None, status: None, rtt_ms: 0, failed_at: None, checked_at: None, last_error: String::new(), refused: false, observed_chat: 0.0, slow_until: None },
+                });
+            }
+        }
+        r
+    }
+
+    /// `total_secs` seconds of silence, one second per piece, starting at `start_ms`.
+    fn silence(total_secs: u64) -> impl Fn(u64) -> Result<PcmFrames> {
+        move |start_ms| {
+            let left = total_secs.saturating_sub(start_ms / 1000);
+            Ok(Box::new((0..left).map(|_| vec![0u8; 32_000])) as PcmFrames)
+        }
+    }
+
+    fn run_job(r: &Arc<Remote>, secs: u64) -> (Option<Result<TranscribeOutcome>>, Vec<(u64, u64)>) {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let job = TranscribeJob { total_ms: secs * 1000, language: Some("en".into()), cancel: &cancel };
+        let progress = std::sync::Mutex::new(Vec::new());
+        let out = r.transcribe(&job, silence(secs), |d, t, _| progress.lock().unwrap().push((d, t)), |_, _, _| {});
+        (out, progress.into_inner().unwrap())
+    }
+
+    #[test]
+    fn a_node_that_listens_returns_the_whole_transcript() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let a = start_fake(&rt, 8.0, Mode::Good);
+        let r = remote_with(&[("a", &a)], "good");
+        assert_eq!(r.transcribe_node_available(), None, "nothing is known before the node has been looked at");
+        r.refresh();
+        assert_eq!(r.transcribe_node_available().as_deref(), Some("a"));
+        let (out, progress) = run_job(&r, 6);
+        let out = out.expect("a node qualifies").unwrap();
+        assert!(out.complete);
+        assert_eq!(out.language.as_deref(), Some("en"));
+        assert_eq!(out.segments.len(), 6);
+        assert_eq!(out.segments[5], (5000, 6000, "w5".to_string()));
+        assert_eq!(progress.last(), Some(&(6000, 6000)));
+        assert_eq!(a.jobs.lock().unwrap().as_slice(), &[(6000, 6 * 32_000)]);
+        assert_eq!(r.inflight.lock().values().sum::<u32>(), 0, "the job is no longer counted as out");
+    }
+
+    #[test]
+    fn nothing_is_sent_when_no_node_can_listen() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let r = remote_with(&[], "none");
+        assert!(run_job(&r, 5).0.is_none());
+        r.set_enabled(false);
+        let a = start_fake(&rt, 8.0, Mode::Good);
+        let r = remote_with(&[("a", &a)], "off");
+        r.set_enabled(false);
+        assert!(run_job(&r, 5).0.is_none());
+        assert!(a.jobs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn when_a_node_drops_out_the_next_one_gets_only_the_audio_after_it() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // The first is faster, so it is asked first, and dies after three segments.
+        let a = start_fake(&rt, 9.0, Mode::DropAfter(3));
+        let b = start_fake(&rt, 4.0, Mode::Good);
+        let r = remote_with(&[("a", &a), ("b", &b)], "failover");
+        let (out, progress) = run_job(&r, 10);
+        let out = out.unwrap().unwrap();
+        assert!(out.complete);
+        assert_eq!(out.node, "b");
+        let times: Vec<(u64, u64)> = out.segments.iter().map(|s| (s.0, s.1)).collect();
+        assert_eq!(times, (0..10).map(|i| (i * 1000, (i + 1) * 1000)).collect::<Vec<_>>(), "no gap and no repeat");
+        assert_eq!(a.jobs.lock().unwrap().as_slice(), &[(10_000, 10 * 32_000)]);
+        assert_eq!(b.jobs.lock().unwrap().as_slice(), &[(7_000, 7 * 32_000)], "only the audio after the last finished segment was sent");
+        assert_eq!(out.segments[3].2, "w0", "the second node's text starts where the first stopped");
+        assert!(progress.windows(2).all(|w| w[0].0 <= w[1].0 || w[1].0 <= 3000), "progress never runs backwards past what was kept");
+    }
+
+    #[test]
+    fn when_every_node_drops_out_the_partial_transcript_comes_back() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let a = start_fake(&rt, 9.0, Mode::DropAfter(4));
+        let b = start_fake(&rt, 4.0, Mode::DropAfter(2));
+        let r = remote_with(&[("a", &a), ("b", &b)], "partial");
+        let out = run_job(&r, 20).0.unwrap().unwrap();
+        assert!(!out.complete);
+        assert_eq!(out.segments.len(), 6);
+        assert_eq!(out.covered_ms(), 6000);
+    }
+
+    #[test]
+    fn when_every_node_fails_at_once_it_is_an_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let a = start_fake(&rt, 9.0, Mode::Broken);
+        let r = remote_with(&[("a", &a)], "broken");
+        let out = run_job(&r, 5).0.unwrap();
+        assert!(out.is_err());
+    }
+
+    #[test]
+    fn a_cancelled_job_stops_without_an_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let a = start_fake(&rt, 9.0, Mode::Good);
+        let r = remote_with(&[("a", &a)], "cancel");
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        let job = TranscribeJob { total_ms: 5000, language: None, cancel: &cancel };
+        let out = r.transcribe(&job, silence(5), |_, _, _| {}, |_, _, _| {}).unwrap().unwrap();
+        assert!(!out.complete && out.segments.is_empty());
     }
 }

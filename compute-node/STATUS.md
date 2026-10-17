@@ -2,22 +2,47 @@
 
 ## What works (checked on Linux with a real phone)
 
-- Phone finds nodes by itself (Android NSD), one tap trusts one or all of them, nodes let phones in without a code
-  (lock mode and approve exist, pairing with a code stays as the strict route), block list per node.
+- Phone finds nodes by itself (Android NSD), a banner on the main screen offers "Connect", one tap connects to one or all of them,
+  nodes let phones in without a code (lock mode and approve exist, pairing with a code stays as the strict route), block list per node.
 - Notes, answers and search vectors run on nodes: about 100 tokens a second and 1000 passages a second on an
   RTX 4060 against about 15 and 1 on the phone. If no node answers, the phone does the work itself.
-- Nodes are ranked by expected wait. A job that fails moves to the next node. A node lost halfway through an
-  answer is replaced by another node, or by the phone, which carries on from the words already shown.
-- Several jobs run side by side so every node is busy, and a meeting write-up writes its parts on several nodes.
-- The node reports counts and timings only. `marginalia-node stats`, and a tray icon (Linux verified over D-Bus).
+- Nodes are ranked by expected wait (jobs ahead over speed, using the lower of the advertised and the really observed speed).
+  A job that fails moves to the next node. A node lost or turned slow halfway through an answer is replaced by another node,
+  or by the phone, which carries on from the words already shown (a seam filter removes a repeated sentence).
+- A node folds the speed of real jobs into what it reports and measures itself again every 5 minutes while idle.
+- Several jobs run side by side so every node is busy, and a meeting write-up writes its parts on several nodes (tested with
+  three nodes on one PC, each loaded with its own state, names and ports).
+- Wi-Fi off and on during a recording, the app in the background, a node killed with SIGKILL and brought back by systemd: the
+  recording and the jots carried on. Pause, resume and stop work on the running service. The tray icon shows in the Ubuntu
+  top bar and its panel shows the live numbers.
+- The node reports counts and timings only (`marginalia-node stats`).
+- Transcription of recordings with `ggml-large-v3-turbo-q5_0` (whisper.cpp built against the same ggml as llama.cpp, so one ggml
+  in the process, CUDA). Checked on the RTX 4060 with `marginalia-node probe ADDR --transcribe FILE.wav` against a second node
+  instance (ports 47690 and 47691, own state folder, the service on 47615 was not touched):
+  - The public domain JFK sample (11 s) came back word for word right ("And so, my fellow Americans, ask not what your country can
+    do for you, ask what you can do for your country."), language detected as English, 0.3 to 0.4 s of work (27 to 38 times faster than real time).
+  - The same sample repeated with 3 s of faint noise between, 770 s (13 min): 55 of 55 segments, segments arrive while the job runs,
+    progress after every percent, 110 times faster than real time with a beam of 5 (122 times greedy).
+  - 4620 s (77 min, 147 MB of audio sent in about 0.3 s over loopback): 329 of 330 repeats came back (two neighbouring repeats were
+    merged by the model, no pipeline loss), 94 times faster than real time with a beam of 5 (34 s of work, 137 times with greedy decoding). Heartbeats
+    arrived every 2 seconds. Node process memory peaked near 1.3 GB (344 MB before, about 490 MB after: the node hands memory back),
+    graphics memory went from 3.76 GB to 4.13 GB while working and back to 3.81 GB afterwards (this includes the other work on the card).
+  - Hanging up halfway: the node stopped working and freed everything within a second (`running_jobs` 0, memory back). A phone that
+    vanishes without closing the connection is noticed at the 30 second idle timeout.
+  - `pause` turns a transcription away with "paused". A second recording sent during the first waits and is told "queued behind 1"
+    every 2 seconds, then runs after it. `stats` and `status` show the speech model, jobs, seconds of audio and speed.
+  - A node started with only the speech model file (no Gemma, no embedder) serves transcription and says so in its status.
 
 ## Not verified yet
 
 - Everything on Windows: the node build, the tray (`compute-node/tray/src/windows.rs` was written without being
   compiled), the Task Scheduler start at login, the firewall prompt, mDNS announcements from Windows.
-- Pause, resume and stop on a running node were only compile checked (the tray agent did not run the node).
 - Nodes finding and sharing work with each other (cluster) is designed in `DESIGN.md`, not built.
-- Speech to text on nodes (post meeting large-v3 and live streaming) is not built, transcription is phone only.
+- Live (streaming) speech to text on nodes is not built. Only transcription of finished recordings exists on the node.
+- Transcription on the processor only (`run --cpu`) was tried once while the machine was busy: the 11 s sample took about 20 s (0.5 times real time, same correct text), so the large model is only practical on a graphics card. Vulkan and Windows were not tried.
+- A phone sending a real recording: only the `probe --transcribe` client (same protocol, written like the phone) was used, not the Android app.
+- Real meeting audio in other languages: only the English JFK sample was available, so accuracy on other languages and noisy rooms is not measured.
+- A left click on the tray icon opening the panel was only triggered over D-Bus, not with a real mouse click.
 
 ## Building on Windows
 
@@ -30,7 +55,7 @@ the new `models` command were written on Linux, nothing here ran on Windows. Wha
   else CPU. Builds node and tray in release, installs to `%LOCALAPPDATA%\MarginaliaNode`, runs `marginalia-node.exe models
   download`, registers Scheduled Tasks `Marginalia Node` (through `start-node.vbs`, hidden, log in `node.log`, restart on failure)
   and `Marginalia Node Tray` at logon, adds firewall rules for UDP 47615 and 5353 (Private profile, one admin prompt through
-  `firewall.ps1`), starts both. Options `-Cpu -Vulkan -Cuda -SkipBuild -SkipModels -ModelsDir -Auto`.
+  `firewall.ps1`), starts both. Options `-Cpu -Vulkan -Cuda -SkipBuild -SkipModels -SkipSpeech -ModelsDir -Auto`.
 - `build.ps1`, `download-models.ps1` (falls back to its own resumable download before the node is built), `status.ps1`,
   `uninstall.ps1` (`-Purge` also deletes models and state).
 - Things most likely to need a fix on the first real run: the winget package ids, the Task Scheduler registration, the VBS launcher
@@ -56,5 +81,5 @@ Models for the APK are linked by `scripts/stage-models.sh` (symlinks, so use WSL
 
 1. Run `windows\setup.ps1` on Windows, run the node and the tray there and fix what breaks.
 2. Cluster: peers pair and gossip, entry node forwards jobs, block records spread, hot-hot and standby (`DESIGN.md`).
-3. Speech on nodes: re-transcribe the kept audio with large-v3 after a meeting, then live streaming with failover.
+3. Speech on nodes: the phone uses the `Transcribe` request to replace its live transcript after a meeting (the node side is done and checked), then live streaming with failover.
 4. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).

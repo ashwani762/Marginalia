@@ -7,7 +7,7 @@ use crate::metrics::Metrics;
 use crate::state::Store;
 use anyhow::Result;
 use marginalia_proto::tls::{self, Identity};
-use marginalia_proto::{pair, wire, ChatEvent, DecideReply, EmbedReply, KnockReply, PairReply, PendingPhone, Priority, Request, StatusReply};
+use marginalia_proto::{pair, wire, AudioFrame, ChatEvent, DecideReply, EmbedReply, KnockReply, PairReply, PendingPhone, Priority, Request, StatusReply, TranscribeEvent};
 use std::collections::HashMap;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -111,12 +111,12 @@ impl Shared {
 
     /// Jobs accepted and not finished yet (the one being worked on plus those waiting).
     pub fn in_flight(&self) -> u32 {
-        self.host.chat_jobs.load(Ordering::Relaxed) + self.host.embed_jobs.load(Ordering::Relaxed)
+        self.host.chat_jobs.load(Ordering::Relaxed) + self.host.embed_jobs.load(Ordering::Relaxed) + self.host.speech_jobs.load(Ordering::Relaxed)
     }
 
-    /// Chat and search jobs finished since the node started.
+    /// Chat, search and transcription jobs finished since the node started.
     pub fn served(&self) -> u64 {
-        self.metrics.chat_jobs.load(Ordering::Relaxed) + self.metrics.embed_jobs.load(Ordering::Relaxed)
+        self.metrics.chat_jobs.load(Ordering::Relaxed) + self.metrics.embed_jobs.load(Ordering::Relaxed) + self.metrics.speech_jobs.load(Ordering::Relaxed)
     }
 
     fn status(&self) -> StatusReply {
@@ -222,6 +222,7 @@ async fn request(sh: Arc<Shared>, conn: quinn::Connection, fp: String, mut send:
         (Request::Status, Some(_)) => wire::write_frame(&mut send, &sh.status()).await?,
         (Request::Chat(r), Some(c)) => chat(&sh, r, &mut send, c).await?,
         (Request::Embed(r), Some(c)) => embed(&sh, r, &mut send, c).await?,
+        (Request::Transcribe(r), Some(c)) => transcribe(&sh, &conn, r, &mut send, recv, c).await?,
     }
     let _ = send.finish();
     // Let the other side read everything before the stream is dropped.
@@ -302,6 +303,9 @@ async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut qui
                 GenEvent::Done(s) => {
                     done_jobs.fetch_sub(1, Ordering::Relaxed);
                     sh2.metrics.chat_done(&cl.fp, &cl.name, s.prompt_tokens as u64, s.generated_tokens as u64, s.elapsed_ms as u64);
+                    if s.generated_tokens >= 30 && s.elapsed_ms > 0 {
+                        sh2.host.note_chat_speed(s.generated_tokens as f32 * 1000.0 / s.elapsed_ms as f32);
+                    }
                     ChatEvent::Done { prompt_tokens: s.prompt_tokens as u32, generated_tokens: s.generated_tokens as u32, elapsed_ms: s.elapsed_ms.min(u32::MAX as u128) as u32 }
                 }
                 GenEvent::Error(e) => {
@@ -370,12 +374,205 @@ async fn embed(sh: &Arc<Shared>, r: marginalia_proto::EmbedRequest, send: &mut q
         }
     };
     jobs.fetch_sub(1, Ordering::Relaxed);
-    sh.metrics.embed_done(&client.fp, &client.name, count, t0.elapsed().as_millis() as u64, matches!(out, Ok(Ok(_))));
+    let took = t0.elapsed();
+    let ok = matches!(out, Ok(Ok(_)));
+    sh.metrics.embed_done(&client.fp, &client.name, count, took.as_millis() as u64, ok);
+    if ok && count >= 8 && !took.is_zero() {
+        sh.host.note_embed_speed(count as f32 / took.as_secs_f32());
+    }
     let reply = match out {
         Ok(Ok(v)) => EmbedReply::Vectors(v),
         Ok(Err(e)) => EmbedReply::Error(format!("{e:#}")),
         Err(e) => EmbedReply::Error(format!("{e}")),
     };
     wire::write_frame(send, &reply).await?;
+    Ok(())
+}
+
+/// The longest recording a node takes: 3 hours of 16 kHz audio is about 350 MB in memory.
+const MAX_AUDIO_MS: u64 = 3 * 60 * 60 * 1000;
+/// Recordings waiting behind the one being transcribed. More than this are turned away.
+const MAX_WAITING: u32 = 3;
+
+/// Counts a transcription job while it exists, so `status` and a clean stop see it until the work has really ended.
+struct SpeechJob(Arc<std::sync::atomic::AtomicU32>);
+
+impl Drop for SpeechJob {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Reads the audio frames of a transcription request: raw 16 bit mono PCM until `AudioFrame::End`.
+async fn read_audio(mut recv: quinn::RecvStream, expected_ms: u64) -> Result<Vec<i16>> {
+    let max_samples = (MAX_AUDIO_MS * 16) as usize;
+    let mut out: Vec<i16> = Vec::with_capacity((expected_ms * 16).min(MAX_AUDIO_MS * 16) as usize);
+    let mut carry: Option<u8> = None;
+    loop {
+        match wire::read_frame_max::<AudioFrame>(&mut recv, 8 * 1024 * 1024).await? {
+            Some(AudioFrame::Pcm(bytes)) => {
+                let mut it = carry.take().into_iter().chain(bytes.iter().copied());
+                while let Some(lo) = it.next() {
+                    match it.next() {
+                        Some(hi) => out.push(i16::from_le_bytes([lo, hi])),
+                        None => carry = Some(lo),
+                    }
+                }
+                if out.len() > max_samples {
+                    anyhow::bail!("The recording is longer than 3 hours, which is the most a compute node takes.");
+                }
+            }
+            Some(AudioFrame::End) => return Ok(out),
+            None => anyhow::bail!("The audio stopped before the end marker."),
+        }
+    }
+}
+
+async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_proto::TranscribeRequest, send: &mut quinn::SendStream, recv: quinn::RecvStream, client: crate::state::Client) -> Result<()> {
+    if sh.paused.load(Ordering::Relaxed) {
+        wire::write_frame(send, &TranscribeEvent::Error("paused".into())).await?;
+        return Ok(());
+    }
+    let Some(whisper) = sh.host.whisper.clone() else {
+        wire::write_frame(send, &TranscribeEvent::Error("This compute node does not transcribe recordings.".into())).await?;
+        return Ok(());
+    };
+    if r.total_ms > MAX_AUDIO_MS {
+        wire::write_frame(send, &TranscribeEvent::Error("The recording is longer than 3 hours, which is the most a compute node takes.".into())).await?;
+        return Ok(());
+    }
+    let jobs = sh.host.speech_jobs.clone();
+    let ahead = jobs.fetch_add(1, Ordering::Relaxed);
+    let job = SpeechJob(jobs.clone());
+    if ahead > MAX_WAITING {
+        wire::write_frame(send, &TranscribeEvent::Error("busy".into())).await?;
+        return Ok(());
+    }
+    if ahead > 0 {
+        wire::write_frame(send, &TranscribeEvent::Queued { ahead }).await?;
+    }
+    let mut beat = tokio::time::interval(Duration::from_secs(2));
+
+    // The audio arrives first, while the heartbeat tells the phone this node is alive.
+    let mut reader = tokio::spawn(read_audio(recv, r.total_ms));
+    let pcm = loop {
+        tokio::select! {
+            res = &mut reader => break res,
+            _ = beat.tick() => {
+                if wire::write_frame(send, &TranscribeEvent::Working).await.is_err() {
+                    reader.abort();
+                    return Ok(());
+                }
+            }
+            _ = conn.closed() => {
+                reader.abort();
+                return Ok(());
+            }
+        }
+    };
+    let pcm = match pcm {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            sh.metrics.speech_done(&client.fp, &client.name, 0, 0, false);
+            wire::write_frame(send, &TranscribeEvent::Error(format!("{e:#}"))).await?;
+            return Ok(());
+        }
+        Err(_) => return Ok(()),
+    };
+    let audio_ms = pcm.len() as u64 / 16;
+
+    // One recording at a time, in the order they came.
+    let mut wait = Box::pin(sh.host.speech_gate.clone().acquire_owned());
+    let permit = loop {
+        tokio::select! {
+            p = &mut wait => match p {
+                Ok(p) => break p,
+                Err(_) => return Ok(()),
+            },
+            _ = beat.tick() => {
+                let ahead = jobs.load(Ordering::Relaxed).saturating_sub(1);
+                if wire::write_frame(send, &TranscribeEvent::Queued { ahead }).await.is_err() {
+                    return Ok(());
+                }
+            }
+            _ = conn.closed() => return Ok(()),
+        }
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TranscribeEvent>();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (cancel2, language) = (cancel.clone(), r.language.clone());
+    let work = tokio::task::spawn_blocking(move || {
+        // The permit and the job count are held until whisper has really stopped.
+        let (_permit, _job) = (permit, job);
+        let started = Instant::now();
+        let audio: Vec<f32> = pcm.iter().map(|&s| s as f32 / 32768.0).collect();
+        drop(pcm);
+        let (tx_seg, tx_prog) = (tx.clone(), tx.clone());
+        let mut last_pct = -1;
+        let res = whisper.transcribe(
+            &audio,
+            language.as_deref(),
+            &cancel2,
+            &mut |seg| {
+                let _ = tx_seg.send(TranscribeEvent::Segment { t0_ms: seg.t0_ms, t1_ms: seg.t1_ms, text: seg.text });
+            },
+            &mut |pct| {
+                if pct != last_pct {
+                    last_pct = pct;
+                    let _ = tx_prog.send(TranscribeEvent::Progress { done_ms: audio_ms * pct.clamp(0, 100) as u64 / 100, total_ms: audio_ms });
+                }
+            },
+        );
+        drop(audio);
+        let took = started.elapsed();
+        engine::whisper::give_back_memory();
+        (res, took)
+    });
+
+    let mut gone = false;
+    loop {
+        let ev = tokio::select! {
+            ev = rx.recv() => match ev { Some(e) => e, None => break },
+            _ = beat.tick() => TranscribeEvent::Working,
+            _ = conn.closed() => { gone = true; break }
+        };
+        if wire::write_frame(send, &ev).await.is_err() {
+            gone = true;
+            break;
+        }
+    }
+    if gone {
+        // The phone went away or gave up: stop working for nobody. The audio is freed when whisper stops.
+        cancel.store(true, Ordering::Relaxed);
+        let sh = sh.clone();
+        tokio::spawn(async move {
+            let _ = work.await;
+            sh.metrics.speech_done(&client.fp, &client.name, audio_ms, 0, false);
+        });
+        return Ok(());
+    }
+    let (res, took) = match work.await {
+        Ok(x) => x,
+        Err(e) => {
+            sh.metrics.speech_done(&client.fp, &client.name, audio_ms, 0, false);
+            wire::write_frame(send, &TranscribeEvent::Error(format!("{e}"))).await?;
+            return Ok(());
+        }
+    };
+    let ev = match res {
+        Ok(out) => {
+            sh.metrics.speech_done(&client.fp, &client.name, audio_ms, took.as_millis() as u64, true);
+            if audio_ms >= 20_000 && !took.is_zero() {
+                sh.host.note_speech_speed(audio_ms as f32 / took.as_millis().max(1) as f32);
+            }
+            TranscribeEvent::Done { language: out.language, segments: out.segments, elapsed_ms: took.as_millis().min(u32::MAX as u128) as u32 }
+        }
+        Err(e) => {
+            sh.metrics.speech_done(&client.fp, &client.name, audio_ms, 0, false);
+            TranscribeEvent::Error(format!("{e:#}"))
+        }
+    };
+    wire::write_frame(send, &ev).await?;
     Ok(())
 }

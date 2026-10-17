@@ -61,6 +61,8 @@ pub struct Settings {
     pub vision: bool,
     /// "System", "Light" or "Dark" (rendered by the UI layer).
     pub appearance: String,
+    /// After a meeting, let a compute node listen to the kept recording again with a larger speech model.
+    pub improve_transcript: bool,
 }
 
 impl Default for Settings {
@@ -76,6 +78,7 @@ impl Default for Settings {
             user_name: "You".into(),
             vision: true,
             appearance: "System".into(),
+            improve_transcript: true,
         }
     }
 }

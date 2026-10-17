@@ -1,4 +1,4 @@
-//! Live assistance during a meeting: question cards that look things up in the library, typed questions and ideas to ask the speaker.
+//! Live assistance during a meeting: question cards answered from what was said in the meeting first, then the library, typed questions and ideas to ask the speaker.
 
 use super::*;
 
@@ -51,7 +51,7 @@ impl Core {
 
     pub(super) fn create_card(self: &Arc<Self>, question: String) {
         let question = question.trim().trim_matches('"').to_string();
-        if question.split_whitespace().count() < 3 {
+        if question.split_whitespace().count() < 3 || skip_question(&question) {
             return;
         }
         let id = {
@@ -76,14 +76,24 @@ impl Core {
         std::thread::Builder::new()
             .name("card".into())
             .spawn(move || {
-                let folder = core.live.lock().as_ref().and_then(|l| l.folder);
+                let (folder, meeting_ctx) = {
+                    let g = core.live.lock();
+                    match g.as_ref() {
+                        Some(l) => (l.folder, meeting_context(l, &question)),
+                        None => (None, String::new()),
+                    }
+                };
                 let hits = core.kb.search_in(&question, 4, Scope::All, folder).unwrap_or_default();
-                core.on_card_hits(id, hits);
+                core.on_card_hits(id, hits, meeting_ctx);
             })
             .expect("spawn card");
     }
 
-    pub(super) fn on_card_hits(self: &Arc<Self>, id: u64, hits: Vec<Hit>) {
+    pub(super) fn on_card_hits(self: &Arc<Self>, id: u64, hits: Vec<Hit>, meeting_ctx: String) {
+        // What was said in this meeting comes first. Documents only count when they match closely, so a
+        // library about something else does not answer a question about this talk.
+        let has_ctx = !meeting_ctx.trim().is_empty();
+        let hits: Vec<Hit> = if has_ctx { hits.into_iter().filter(|h| h.dense >= 0.55 || h.lexical >= 0.70).collect() } else { hits };
         let strong = hits.iter().any(|h| h.dense >= 0.40 || h.lexical >= 0.55);
         let request;
         {
@@ -91,7 +101,7 @@ impl Core {
             let Some(l) = g.as_mut() else { return };
             let meeting_id = l.meeting_id;
             let Some(pos) = l.cards.iter().position(|c| c.id == id) else { return };
-            if hits.is_empty() || !strong {
+            if !has_ctx && (hits.is_empty() || !strong) {
                 l.cards[pos].state = CardState::NoMatch;
                 let json = l.cards[pos].json();
                 // Keep only a few quiet "heard this" entries.
@@ -117,7 +127,8 @@ impl Core {
             c.gen += 1;
             let cites = serde_json::to_string(&c.hits).unwrap_or_default();
             c.db_id = self.kb.store.add_card(meeting_id, &c.question, "", &cites).ok();
-            request = Some((c.gen, format!("Question raised in the meeting: {}\n\nPassages:\n{passages}\n\nAnswer now.", c.question)));
+            let docs = if passages.is_empty() { String::new() } else { format!("Documents:\n{passages}\n\n") };
+            request = Some((c.gen, format!("Question raised in the meeting: {}\n\nWhat was said in the meeting:\n{meeting_ctx}\n\n{docs}Answer now.", c.question)));
             self.emit(json!({"type": "card", "card": c.json()}));
         }
         let _ = self.kb.store.bump_counter("questions_answered", 1);
@@ -163,6 +174,16 @@ impl Core {
                             if stats.preempted && c.answer.trim().is_empty() {
                                 c.gen += 1;
                                 retry = Some(c.gen);
+                            } else if c.kind.is_empty() && says_unanswered(&c.answer) {
+                                // Nothing in the talk or the library answers it: the card is dropped, not kept as a quiet entry.
+                                let (gone, db) = (c.id, c.db_id);
+                                l.cards.retain(|x| x.id != card);
+                                if let Some(db) = db {
+                                    let _ = core.kb.store.delete_card(db);
+                                }
+                                drop(g);
+                                core.emit(json!({"type": "card_remove", "id": gone}));
+                                return;
                             } else {
                                 c.state = CardState::Done;
                                 if let Some(db) = c.db_id {
@@ -270,5 +291,72 @@ impl Core {
         let user = format!("{context}\n\nThe 3 questions:");
         self.generate_card_with(id, gen, user, IDEAS_SYSTEM, 170, Priority::High);
         Ok(json!({"id": id}))
+    }
+}
+
+/// What this meeting has said that bears on a question: the notes on earlier parts, the lines that share
+/// its words, and the latest minutes, which is where a question usually gets its answer.
+fn meeting_context(l: &Live, question: &str) -> String {
+    if l.lines.is_empty() {
+        return String::new();
+    }
+    let now = l.lines.last().map(|x| x.t1).unwrap_or(0.0);
+    let mut ctx = String::new();
+    if let Some(sec) = l.sections.last() {
+        ctx.push_str(&format!("Notes on earlier parts:\n{}\n\n", head_tokens(&sec.text, 200)));
+    }
+    let about = lines_about(&l.lines, question, now - 120.0, now + 1.0, 5);
+    if !about.is_empty() {
+        ctx.push_str("Earlier, related:\n");
+        ctx.push_str(&about);
+        ctx.push('\n');
+    }
+    let from = l.sec_upto.min(l.lines.len());
+    ctx.push_str("Just now:\n");
+    ctx.push_str(&tail_tokens(&transcript_text(&l.lines, from.saturating_sub(2), 60_000), 700));
+    ctx
+}
+
+/// Questions that should not become cards: the speaker polling the audience, and questions about who the people in the
+/// room are. Speech recognition can turn a harmless word into one of these, and answering it helps nobody.
+fn skip_question(q: &str) -> bool {
+    let q = q.to_lowercase();
+    const POLLS: [&str; 10] = ["how many people here", "how many of you", "how many in the room", "raise your hand", "show of hands", "who here", "who in the room", "anyone here", "anybody here", "how many people in this room"];
+    const PERSONAL: [&str; 12] = ["gay", "lesbian", "bisexual", "transgender", "sexual orientation", "religion", "religious", "muslim", "christian", "jewish", "ethnicity", "pregnant"];
+    if POLLS.iter().any(|p| q.contains(p)) {
+        return true;
+    }
+    q.split(|c: char| !c.is_alphabetic()).any(|w| PERSONAL.contains(&w))
+}
+
+/// The model's way of saying the talk and the library do not answer the question.
+fn says_unanswered(answer: &str) -> bool {
+    let a = answer.trim().to_lowercase();
+    a.is_empty()
+        || a.starts_with("not answered")
+        || ["does not contain", "do not contain", "doesn't contain", "not mentioned", "no information", "not covered", "does not say", "cannot be answered", "not discussed", "not stated", "does not mention", "not addressed"]
+            .iter()
+            .any(|p| a.contains(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audience_polls_and_personal_questions_do_not_become_cards() {
+        assert!(skip_question("How many people here are gay?"));
+        assert!(skip_question("How many of you have used threads before?"));
+        assert!(skip_question("Please raise your hand if you write C++"));
+        assert!(skip_question("What religion are most of the attendees?"));
+        assert!(!skip_question("How does the scheduler pick the next task?"));
+    }
+
+    #[test]
+    fn answers_that_say_nothing_answers_it_are_recognised() {
+        assert!(says_unanswered("Not answered yet."));
+        assert!(says_unanswered("The meeting transcript does not contain information about this."));
+        assert!(says_unanswered(""));
+        assert!(!says_unanswered("A mutex stops two threads changing the variable at once [12:03]."));
     }
 }

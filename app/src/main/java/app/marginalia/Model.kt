@@ -184,6 +184,8 @@ data class Prefs(
     val liveAssistance: Boolean = true,
     val userName: String = "You",
     val appearance: String = "System",
+    /** After a meeting, a compute node listens to the recording again with a larger model. */
+    val improveTranscript: Boolean = true,
 ) {
     companion object {
         fun from(o: JSONObject) = Prefs(
@@ -192,6 +194,7 @@ data class Prefs(
             liveAssistance = o.optBoolean("live_assistance", true),
             userName = o.optString("user_name", "You"),
             appearance = o.optString("appearance", "System"),
+            improveTranscript = o.optBoolean("improve_transcript", true),
         )
     }
 }
@@ -241,6 +244,8 @@ data class HomeComputer(
     val state: String = "approved",
     /** Other phones asking to use this compute node. Only filled when this phone is approved there. */
     val pending: List<PendingPhone> = emptyList(),
+    /** Name of the speech model when this compute node can listen to a recording again, else null. */
+    val transcribe: String? = null,
 ) {
     val approved: Boolean get() = state != "waiting" && state != "refused"
 
@@ -258,9 +263,20 @@ data class HomeComputer(
             problem = o.optString("problem"),
             state = o.optString("state").lowercase().ifBlank { "approved" },
             pending = o.optJSONArray("pending")?.objects().orEmpty().map(PendingPhone::from),
+            transcribe = if (o.isNull("transcribe")) null else o.optString("transcribe").ifBlank { null },
         )
     }
 }
+
+/**
+ * The compute node that could listen to a recording again right now: switched on, approved, reachable and with a
+ * speech model. Null when there is none, and then "Improve transcript" is not offered.
+ */
+fun transcribeNode(n: HomeComputers): HomeComputer? =
+    if (!n.enabled) null else n.paired.firstOrNull { it.approved && it.online && it.transcribe != null }
+
+/** Whether the Review screen offers "Improve transcript": a kept recording, a compute node that can listen, and nothing else being written for the meeting. */
+fun canImproveTranscript(n: HomeComputers, hasAudio: Boolean, busy: Boolean): Boolean = hasAudio && !busy && transcribeNode(n) != null
 
 /** Another phone that is asking to use a home compute node. */
 data class PendingPhone(val id: String, val name: String, val waitedS: Int) {

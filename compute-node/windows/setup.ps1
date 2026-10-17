@@ -4,14 +4,15 @@
 #   .\compute-node\windows\setup.ps1
 #
 # What it does: checks the tools it needs (and prints the exact winget command for each missing one),
-# builds the node and the tray icon, installs them to %LOCALAPPDATA%\MarginaliaNode, downloads the two
-# models, makes both start at logon (Task Scheduler), opens the Windows Firewall for phones, and starts them.
+# builds the node and the tray icon, installs them to %LOCALAPPDATA%\MarginaliaNode, downloads the
+# models (chat, search and speech to text), makes both start at logon (Task Scheduler), opens the Windows Firewall for phones, and starts them.
 #
 # Options:
 #   -Auto        run the winget installs for missing tools itself (Windows asks for permission on some)
 #   -Cpu         build without a GPU backend      -Cuda / -Vulkan  force that backend
 #   -SkipBuild   use the programs already built in target\release
 #   -SkipModels  do not download the models
+#   -SkipSpeech  download the chat and search models but not the speech model (570 MB)
 #   -ModelsDir   keep the models in this folder (default %APPDATA%\marginalia\models)
 param(
     [switch]$Cpu,
@@ -19,6 +20,7 @@ param(
     [switch]$Cuda,
     [switch]$SkipBuild,
     [switch]$SkipModels,
+    [switch]$SkipSpeech,
     [string]$ModelsDir = '',
     [switch]$Auto
 )
@@ -191,6 +193,7 @@ if ($SkipModels.IsPresent) {
 } else {
     $dlArgs = @('models', 'download')
     if ($ModelsDir) { $dlArgs += @('--dir', $ModelsDir) }
+    if ($SkipSpeech.IsPresent) { $dlArgs += '--skip-speech' }
     & $nodeExe @dlArgs
     if ($LASTEXITCODE -eq 0) {
         Step-Ok 'Models are in place'
@@ -285,7 +288,7 @@ Write-Host ''
 Write-Host '  Tray icon : look at the bottom right near the clock, maybe behind the ^ arrow.'
 Write-Host '              Drag it onto the taskbar to keep it visible. Left click opens the details panel.'
 Write-Host '  Phone     : open the app, Settings, Compute nodes. It lists this machine by itself when both are'
-Write-Host '              on the same network, then tap Trust. Or run  marginalia-node.exe pair  for a code.'
+Write-Host '              on the same network, then tap Connect. Or run  marginalia-node.exe pair  for a code.'
 if ($addresses.Count -gt 0) { Write-Host ('  Addresses : ' + ($addresses -join '   ')) }
 Write-Host '  Check     : marginalia-node.exe stats      (open a NEW PowerShell window so PATH is current)'
 Write-Host ('              or  ' + (Join-Path $PSScriptRoot 'status.ps1'))

@@ -40,13 +40,19 @@ enum Cmd {
         /// The name phones see. Defaults to this machine's name.
         #[arg(long)]
         name: Option<String>,
-        /// Folder holding gemma-4-E2B-it-Q4_0.gguf and embeddinggemma-2-Q8_0.gguf.
+        /// Folder holding gemma-4-E2B-it-Q4_0.gguf, embeddinggemma-2-Q8_0.gguf and ggml-large-v3-turbo-q5_0.bin.
         #[arg(long)]
         models: Option<PathBuf>,
         #[arg(long)]
         chat_model: Option<PathBuf>,
         #[arg(long)]
         embed_model: Option<PathBuf>,
+        /// The speech model (a whisper.cpp `.bin` file) used to transcribe recordings.
+        #[arg(long)]
+        speech_model: Option<PathBuf>,
+        /// Do not load the speech model, so this node does not transcribe recordings.
+        #[arg(long)]
+        no_speech: bool,
         /// Do not use the graphics card.
         #[arg(long)]
         cpu: bool,
@@ -61,7 +67,7 @@ enum Cmd {
     Lock,
     /// Any phone whose owner trusts this compute node may use it (the default).
     Unlock,
-    /// Turn new chat and search jobs away for now. The models stay loaded and running jobs finish.
+    /// Turn new jobs away for now. The models stay loaded and running jobs finish.
     Pause,
     /// Take jobs again after `pause`.
     Resume,
@@ -101,6 +107,15 @@ enum Cmd {
         decide: Option<String>,
         #[arg(long)]
         deny: bool,
+        /// Send this recording (16 kHz mono 16 bit `.wav`, or raw `.pcm`) for transcription instead of the other jobs.
+        #[arg(long)]
+        transcribe: Option<PathBuf>,
+        /// Language code for `--transcribe` (for example en or hi). Leave out to detect it.
+        #[arg(long)]
+        language: Option<String>,
+        /// With `--transcribe`: close the connection after this many seconds, to check that the node stops.
+        #[arg(long, hide = true)]
+        hang_up_after: Option<f32>,
     },
 }
 
@@ -118,12 +133,15 @@ enum ModelsCmd {
         /// The models folder. Defaults to the one `run` uses.
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Only the chat model or only the search model.
+        /// Only the chat model, only the search model or only the speech model.
         #[arg(long, value_enum)]
         only: Option<models_dl::Only>,
         /// Which chat model. The node itself loads gemma-4-E2B-it-Q4_0.gguf unless told otherwise with `run --chat-model`.
         #[arg(long, value_enum, default_value = "e2b")]
         chat_model: models_dl::ChatChoice,
+        /// Leave out the speech model (about 570 MB), which is fetched by default.
+        #[arg(long)]
+        skip_speech: bool,
     },
 }
 
@@ -151,7 +169,7 @@ async fn main() -> Result<()> {
     match &cli.cmd {
         Cmd::Models { cmd } => match cmd {
             ModelsCmd::List { dir } => models_dl::list(dir.clone())?,
-            ModelsCmd::Download { dir, only, chat_model } => models_dl::download(dir.clone(), *only, *chat_model)?,
+            ModelsCmd::Download { dir, only, chat_model, skip_speech } => models_dl::download(dir.clone(), *only, *chat_model, *skip_speech)?,
         },
         Cmd::Pair => {
             let r = admin::ask(cli.admin_port, json!({"cmd": "pair"})).await?;
@@ -182,8 +200,8 @@ async fn main() -> Result<()> {
         Cmd::Approve { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "approve", "who": who})).await?),
         Cmd::Deny { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "deny", "who": who})).await?),
         Cmd::Revoke { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "revoke", "who": who})).await?),
-        Cmd::Probe { addr, code, knock, decide, deny } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny).await?,
-        Cmd::Run { port, name, models, chat_model, embed_model, cpu, ctx, lock } => {
+        Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, hang_up_after } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *hang_up_after).await?,
+        Cmd::Run { port, name, models, chat_model, embed_model, speech_model, no_speech, cpu, ctx, lock } => {
             let store = Arc::new(state::Store::open(dir.clone())?);
             let identity = store.identity()?;
             if *lock {
@@ -192,15 +210,17 @@ async fn main() -> Result<()> {
             let locked_before = store.locked();
             let name = name.clone().unwrap_or_else(|| hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|_| "helper-node".into()));
             let models_dir = models.clone().unwrap_or_else(models_dl::default_dir);
-            let missing = models_dl::missing_for_run(&models_dir, chat_model.is_some(), embed_model.is_some());
-            if missing.len() == 2 {
+            let missing = models_dl::missing_for_run(&models_dir, chat_model.is_some(), embed_model.is_some(), speech_model.is_some() || *no_speech);
+            // Speech alone is enough to serve, so the node only refuses when it has none of the three.
+            let speech_here = !*no_speech && (speech_model.is_some() || models_dir.join(host::SPEECH_FILE).is_file());
+            if missing.iter().filter(|m| m.role != "speech").count() == 2 && !speech_here {
                 anyhow::bail!("{}", models_dl::missing_message(&models_dir));
             }
             for m in &missing {
                 tracing::warn!("the {} model {} is not in {}, so this node will not do {} jobs. Get it with: marginalia-node models download --only {}", m.role, m.file, models_dir.display(), m.role, m.role);
             }
             tracing::info!("loading models from {}", models_dir.display());
-            let opts = host::Options { models_dir, chat_model: chat_model.clone(), embed_model: embed_model.clone(), cpu_only: *cpu, ctx: *ctx };
+            let opts = host::Options { models_dir, chat_model: chat_model.clone(), embed_model: embed_model.clone(), speech_model: speech_model.clone(), no_speech: *no_speech, cpu_only: *cpu, ctx: *ctx };
             let host = Arc::new(tokio::task::spawn_blocking(move || host::Host::start(&opts)).await??);
             let shared = Arc::new(server::Shared { store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), stop: Default::default() });
             let ep = server::endpoint(&shared, *port)?;
@@ -211,6 +231,20 @@ async fn main() -> Result<()> {
             }
             tracing::info!("node {name} ready on port {port}; {} phone(s) paired. Run `marginalia-node pair` to add one.", shared.store.list().len());
             tokio::spawn(admin::serve(shared.clone(), cli.admin_port, *port));
+            // The measured speed is re-taken while the node is idle, so a graphics card that is busy with
+            // something else, or hot, shows up in what phones are told.
+            {
+                let host = host.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                        if host.idle() {
+                            let h = host.clone();
+                            let _ = tokio::task::spawn_blocking(move || h.benchmark()).await;
+                        }
+                    }
+                });
+            }
             tokio::select! {
                 _ = server::serve(shared.clone(), ep.clone()) => {}
                 _ = tokio::signal::ctrl_c() => tracing::info!("stopping"),

@@ -58,6 +58,9 @@ pub struct Info {
     pub search_model: Option<String>,
     pub chat_tok_s: f64,
     pub search_per_s: f64,
+    /// The speech model, if this node transcribes recordings, and how many times faster than real time it is.
+    pub speech_model: Option<String>,
+    pub speech_x: f64,
     pub chat_jobs: u64,
     pub search_jobs: u64,
     pub failed: u64,
@@ -144,9 +147,11 @@ pub fn parse(status: &Value, stats: Option<&Value>) -> Info {
         search_model: text(&status["embed"]),
         chat_tok_s: status["chat_tok_s"].as_f64().unwrap_or(0.0),
         search_per_s: status["embed_per_s"].as_f64().unwrap_or(0.0),
+        speech_model: text(&status["speech"]),
+        speech_x: status["speech_x"].as_f64().unwrap_or(0.0),
         chat_jobs: jobs("chat", "jobs"),
         search_jobs: jobs("search", "jobs"),
-        failed: jobs("chat", "errors") + jobs("search", "errors"),
+        failed: jobs("chat", "errors") + jobs("search", "errors") + jobs("speech", "errors"),
         phones,
         asking,
         addresses: status["addresses"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect(),
@@ -194,6 +199,32 @@ pub fn search_speed_text(per_s: f64) -> String {
     if per_s > 0.0 { format!("{per_s:.0} passages/s") } else { "not measured".into() }
 }
 
+/// How many times faster than the recording itself a node transcribes. Zero means no recording was transcribed yet.
+pub fn speech_speed_text(x: f64) -> String {
+    if x <= 0.0 {
+        return "not measured".into();
+    }
+    if x < 1.0 {
+        return "slower than the recording".into();
+    }
+    // "1 hour of audio in 1 min" says more than "60x real time".
+    let secs = 3600.0 / x;
+    if secs < 60.0 { format!("1 hour of audio in {secs:.0} s") } else { format!("1 hour of audio in {:.0} min", secs / 60.0) }
+}
+
+#[cfg(test)]
+mod speech_text_tests {
+    use super::speech_speed_text;
+
+    #[test]
+    fn speech_speed_is_said_in_plain_terms() {
+        assert_eq!(speech_speed_text(0.0), "not measured");
+        assert_eq!(speech_speed_text(0.5), "slower than the recording");
+        assert_eq!(speech_speed_text(60.0), "1 hour of audio in 1 min");
+        assert_eq!(speech_speed_text(120.0), "1 hour of audio in 30 s");
+    }
+}
+
 /// Short form for the big number in the panel: "45s", "12m", "1h 6m", "2d 5h".
 pub fn uptime_short(secs: u64) -> String {
     match secs {
@@ -225,6 +256,7 @@ pub fn gauge(value: f64, max: f64) -> f32 {
 /// Sensible tops for the two speed bars. Faster than this just fills the bar.
 pub const CHAT_TOK_S_MAX: f64 = 150.0;
 pub const SEARCH_PER_S_MAX: f64 = 500.0;
+pub const SPEECH_X_MAX: f64 = 200.0;
 
 /// "4:32" for a countdown.
 pub fn countdown(secs: u64) -> String {

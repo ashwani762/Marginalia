@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
@@ -235,16 +236,20 @@ fun PhotoViewer(photo: Photo, onClose: () -> Unit, onDelete: () -> Unit) {
 
 /** A Live Assistance card: a question heard in the meeting and its cited answer. */
 @Composable
-fun AssistCard(card: Card, modifier: Modifier = Modifier, onCite: (Source) -> Unit, onPick: ((String) -> Unit)? = null) {
+fun AssistCard(card: Card, modifier: Modifier = Modifier, onCite: (Source) -> Unit, onPick: ((String) -> Unit)? = null, onRemove: (() -> Unit)? = null) {
     val p = pal
     val shape = RoundedCornerShape(p.rMid)
     if (card.kind == "ideas") {
-        IdeasCard(card, modifier, onPick)
+        IdeasCard(card, modifier, onPick, onRemove)
         return
     }
-    Column(modifier.fillMaxWidth().clip(shape).background(p.surface3).border(1.dp, p.line, shape).padding(16.dp)) {
+    Box(modifier.fillMaxWidth().clip(shape).background(p.surface3).border(1.dp, p.line, shape)) {
+    Column(Modifier.fillMaxWidth().padding(16.dp)) {
         Row(verticalAlignment = Alignment.Top) {
-            Text(if (card.kind == "ask") card.question else "“${card.question}”", style = type.label.copy(color = p.accentInk), modifier = Modifier.weight(1f))
+            Text(
+                if (card.kind == "ask") card.question else "“${card.question}”", style = type.label.copy(color = p.accentInk),
+                modifier = Modifier.weight(1f).padding(end = if (onRemove != null) 28.dp else 0.dp),
+            )
         }
         Spacer(Modifier.height(8.dp))
         when (card.state) {
@@ -267,16 +272,28 @@ fun AssistCard(card: Card, modifier: Modifier = Modifier, onCite: (Source) -> Un
             }
         }
     }
+    if (onRemove != null) RemoveCardButton(onRemove, Modifier.align(Alignment.TopEnd))
+    }
+}
+
+/** A small, deliberate remove control for a card. A plain tap target, not a swipe, so scrolling never triggers it. */
+@Composable
+private fun RemoveCardButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier.padding(2.dp).size(40.dp).clip(CircleShape).pressable(pressedScale = 0.88f, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) { Icon(Icons.Rounded.Close, "Remove card", tint = pal.textFaint, modifier = Modifier.size(18.dp)) }
 }
 
 
 /** Questions the listener could put to the speaker. Tapping one keeps it as a Question in the notes. */
 @Composable
-private fun IdeasCard(card: Card, modifier: Modifier, onPick: ((String) -> Unit)?) {
+private fun IdeasCard(card: Card, modifier: Modifier, onPick: ((String) -> Unit)?, onRemove: (() -> Unit)?) {
     val p = pal
     val shape = RoundedCornerShape(p.rMid)
     val questions = card.answer.lines().map { it.trim().trimStart('-', '*', '•', ' ', '1', '2', '3', '.', ')').trim() }.filter { it.length > 6 }
-    Column(modifier.fillMaxWidth().clip(shape).background(p.surface3).border(1.dp, p.accentInk.copy(alpha = 0.45f), shape).padding(16.dp)) {
+    Box(modifier.fillMaxWidth().clip(shape).background(p.surface3).border(1.dp, p.accentInk.copy(alpha = 0.45f), shape)) {
+    Column(Modifier.fillMaxWidth().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Rounded.AutoAwesome, null, tint = p.accentInk, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(8.dp))
@@ -299,5 +316,7 @@ private fun IdeasCard(card: Card, modifier: Modifier, onPick: ((String) -> Unit)
             if (card.state != CardState.Done) { Spacer(Modifier.height(4.dp)); ThinkingDots(color = p.accentInk) }
             else if (onPick != null) { Spacer(Modifier.height(6.dp)); Text("Tap one to keep it in your notes.", style = type.caption.copy(color = p.textFaint)) }
         }
+    }
+    if (onRemove != null) RemoveCardButton(onRemove, Modifier.align(Alignment.TopEnd))
     }
 }

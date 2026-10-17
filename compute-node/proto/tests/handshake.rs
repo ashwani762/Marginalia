@@ -112,7 +112,7 @@ async fn handle(st: Arc<State>, id: Identity, conn: quinn::Connection, fp: Strin
                 proto: PROTO_VERSION,
                 node_name: "fake-node".into(),
                 version: "test".into(),
-                caps: Capabilities { chat: None, embed: Some("emb".into()), embed_dim: 768, chat_tok_s: 0.0, embed_per_s: 12.5 },
+                caps: Capabilities { chat: None, embed: Some("emb".into()), embed_dim: 768, chat_tok_s: 0.0, embed_per_s: 12.5, ..Default::default() },
                 running: 0,
                 waiting: 0,
                 clients: st.paired.lock().unwrap().len() as u32,
@@ -584,7 +584,7 @@ async fn pair_and_status_replies_round_trip() {
         proto: PROTO_VERSION,
         node_name: "node".into(),
         version: "0.1.0".into(),
-        caps: Capabilities { chat: Some("gemma".into()), embed: Some("emb".into()), embed_dim: 768, chat_tok_s: 41.5, embed_per_s: 250.0 },
+        caps: Capabilities { chat: Some("gemma".into()), embed: Some("emb".into()), embed_dim: 768, chat_tok_s: 41.5, embed_per_s: 250.0, transcribe: Some("whisper".into()), transcribe_x: 30.0 },
         running: 1,
         waiting: 2,
         clients: 3,
@@ -670,4 +670,18 @@ async fn garbage_body_is_an_error_not_a_panic() {
         assert!(task.await.unwrap().is_err());
     })
     .await;
+}
+
+#[test]
+fn transcribe_messages_round_trip() {
+    use marginalia_proto::{AudioFrame, TranscribeEvent, TranscribeRequest};
+    let req = Request::Transcribe(TranscribeRequest { language: Some("hi".into()), total_ms: 960_000, priority: Priority::Background });
+    let bytes = postcard::to_stdvec(&req).unwrap();
+    assert!(matches!(postcard::from_bytes::<Request>(&bytes).unwrap(), Request::Transcribe(r) if r.total_ms == 960_000));
+    let pcm = AudioFrame::Pcm(vec![1, 2, 3, 4]);
+    assert!(matches!(postcard::from_bytes::<AudioFrame>(&postcard::to_stdvec(&pcm).unwrap()).unwrap(), AudioFrame::Pcm(b) if b == vec![1, 2, 3, 4]));
+    for ev in [TranscribeEvent::Working, TranscribeEvent::Progress { done_ms: 1, total_ms: 2 }, TranscribeEvent::Segment { t0_ms: 1, t1_ms: 2, text: "hello".into() }, TranscribeEvent::Done { language: "en".into(), segments: 3, elapsed_ms: 4 }] {
+        let b = postcard::to_stdvec(&ev).unwrap();
+        let _ = postcard::from_bytes::<TranscribeEvent>(&b).unwrap();
+    }
 }

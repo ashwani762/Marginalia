@@ -1,5 +1,6 @@
 //! The models the node serves. They load once and stay loaded; a job only borrows them.
 
+use crate::engine::whisper::{Whisper, WhisperConfig};
 use crate::engine::{ChatMessage, EmbedHandle, EmbedKind, GenParams, LlmHandle, Priority};
 use anyhow::{anyhow, Context, Result};
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -15,23 +16,39 @@ pub struct Options {
     pub embed_model: Option<PathBuf>,
     pub cpu_only: bool,
     pub ctx: u32,
+    /// The speech model file, if not the default one in `models_dir`.
+    pub speech_model: Option<PathBuf>,
+    /// Do not load the speech model even if it is there.
+    pub no_speech: bool,
 }
 
 pub struct Host {
     _backend: Arc<LlamaBackend>,
     pub llm: Option<LlmHandle>,
     pub embed: Option<EmbedHandle>,
+    /// Speech to text, if the model file was there.
+    pub whisper: Option<Arc<Whisper>>,
     pub caps: parking_lot::Mutex<Capabilities>,
     /// Jobs that have been accepted and not yet finished.
     pub chat_jobs: Arc<AtomicU32>,
     pub embed_jobs: Arc<AtomicU32>,
+    pub speech_jobs: Arc<AtomicU32>,
+    /// One transcription runs at a time, the others wait here.
+    pub speech_gate: Arc<tokio::sync::Semaphore>,
 }
 
+pub const SPEECH_FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
 pub const CHAT_FILE: &str = "gemma-4-E2B-it-Q4_0.gguf";
 pub const EMBED_FILE: &str = "embeddinggemma-2-Q8_0.gguf";
 
 fn tiers(cpu_only: bool) -> Vec<u32> {
     if cpu_only { vec![0] } else { vec![999, 16, 0] }
+}
+
+/// `ggml-large-v3-turbo-q5_0.bin` is shown as `large-v3-turbo-q5_0`.
+fn speech_name(path: &std::path::Path) -> String {
+    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "speech".into());
+    stem.strip_prefix("ggml-").map(str::to_string).unwrap_or(stem)
 }
 
 fn threads() -> i32 {
@@ -93,23 +110,52 @@ impl Host {
             tracing::warn!("no chat model at {}", chat_path.display());
             None
         };
-        if llm.is_none() && embed.is_none() {
+
+        let speech_path = opts.speech_model.clone().unwrap_or_else(|| opts.models_dir.join(SPEECH_FILE));
+        let whisper = if opts.no_speech {
+            None
+        } else if speech_path.is_file() {
+            let mut found = None;
+            // The graphics card first, then the processor.
+            for gpu in if opts.cpu_only { vec![false] } else { vec![true, false] } {
+                let cfg = WhisperConfig { model_path: speech_path.clone(), use_gpu: gpu, threads: threads() };
+                match Whisper::load(&cfg) {
+                    Ok(w) => {
+                        tracing::info!("speech model loaded ({})", if gpu { "graphics card" } else { "processor" });
+                        found = Some(Arc::new(w));
+                        break;
+                    }
+                    Err(e) => tracing::warn!("speech model did not load{}: {e:#}", if gpu { " on the graphics card" } else { "" }),
+                }
+            }
+            if found.is_some() {
+                caps.transcribe = Some(speech_name(&speech_path));
+            }
+            found
+        } else {
+            tracing::warn!("no speech model at {}, so this node will not transcribe recordings", speech_path.display());
+            None
+        };
+        if llm.is_none() && embed.is_none() && whisper.is_none() {
             return Err(anyhow!("no models found in {}", opts.models_dir.display()));
         }
-        let mut host = Host {
+        let host = Host {
             _backend: backend,
             llm,
             embed,
+            whisper,
             caps: parking_lot::Mutex::new(caps),
             chat_jobs: Arc::new(AtomicU32::new(0)),
             embed_jobs: Arc::new(AtomicU32::new(0)),
+            speech_jobs: Arc::new(AtomicU32::new(0)),
+            speech_gate: Arc::new(tokio::sync::Semaphore::new(1)),
         };
         host.benchmark();
         Ok(host)
     }
 
     /// A short run of each model, so phones know what this machine is worth before they send work.
-    fn benchmark(&mut self) {
+    pub fn benchmark(&self) {
         let mut caps = self.caps.lock();
         if let Some(e) = &self.embed {
             let texts: Vec<String> = (0..16).map(|i| format!("title: none | text: Benchmark passage number {i} about gardens, weather and meetings that ran long.")).collect();
@@ -133,6 +179,27 @@ impl Host {
             }
         }
         tracing::info!("measured: chat {:.0} tokens a second, search {:.0} passages a second", caps.chat_tok_s, caps.embed_per_s);
+    }
+
+    /// Folds the speed of a real job into the figure phones see, so a node that slows down says so.
+    pub fn note_chat_speed(&self, tok_s: f32) {
+        let mut c = self.caps.lock();
+        c.chat_tok_s = if c.chat_tok_s > 0.0 { c.chat_tok_s * 0.7 + tok_s * 0.3 } else { tok_s };
+    }
+
+    pub fn note_embed_speed(&self, per_s: f32) {
+        let mut c = self.caps.lock();
+        c.embed_per_s = if c.embed_per_s > 0.0 { c.embed_per_s * 0.7 + per_s * 0.3 } else { per_s };
+    }
+
+    /// `x` is how many times faster than real time a job transcribed.
+    pub fn note_speech_speed(&self, x: f32) {
+        let mut c = self.caps.lock();
+        c.transcribe_x = if c.transcribe_x > 0.0 { c.transcribe_x * 0.7 + x * 0.3 } else { x };
+    }
+
+    pub fn idle(&self) -> bool {
+        self.chat_jobs.load(std::sync::atomic::Ordering::Relaxed) + self.embed_jobs.load(std::sync::atomic::Ordering::Relaxed) + self.speech_jobs.load(std::sync::atomic::Ordering::Relaxed) == 0
     }
 
     pub fn shutdown(&self) {
