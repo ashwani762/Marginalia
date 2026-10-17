@@ -26,15 +26,15 @@ The node runs in a console window. To keep it out of sight, tick **Run whether u
 
 ## Tray icon
 
-`marginalia-node-tray.exe` puts a small status icon in the system tray (the area by the clock, maybe behind the `^` arrow). Click it to see what the node is doing. The menu can pause or resume the node, lock new phones, show a pairing code, show details and stop the node. When the node is not running it offers "Start node".
+`marginalia-node-tray.exe` puts a small status icon in the system tray (the area by the clock, maybe behind the `^` arrow). A left click opens a small details panel (jobs, phones, speed, models, activity, addresses, with buttons to pause, lock, show a pairing code, allow or block phones and stop the node). A right click shows a short menu: status, Pause or Resume, Show details, Stop node and Quit tray. When the node is not running the panel and the menu offer "Start node".
 
-Note: the Windows version of the tray is written but has not been compiled or run yet. Please report anything that does not work.
+Note: the Windows version of the tray and the panel are written but have not been compiled or run yet. The panel uses OpenGL, so a machine with very old graphics drivers may not show it. Please report anything that does not work.
 
 1. Build it with `cargo build --release -p marginalia-node-tray` and copy `marginalia-node-tray.exe` into the same folder as `marginalia-node.exe`. "Start node" looks for `marginalia-node.exe` next to the tray, then in PATH.
 2. Start it at login with the Startup folder: press Win+R, type `shell:startup`, and put a shortcut to `marginalia-node-tray.exe` in the folder that opens. (Task Scheduler works too: another task with trigger **At log on**, Start a program, no arguments.)
 3. If you gave the node a different `--admin-port`, give the tray the same: add `--admin-port 47620` to the shortcut's Target, after the path.
 
-The tray only talks to the node on this computer (127.0.0.1) and only receives counts and names. A pairing code or the details open in a small message box.
+The tray only talks to the node on this computer (127.0.0.1) and only receives counts and names. The panel is a second process (`marginalia-node-tray.exe --panel`) that the tray starts on a click, so keep it in the same folder. Errors such as "Could not pause the node" appear in a message box.
 
 When you pick "Stop node" the node finishes running jobs (up to 10 seconds) and exits cleanly, so Task Scheduler's "restart if the task fails" does not bring it back. Use "Start node" in the tray, or run the task again.
 

@@ -1,13 +1,28 @@
-.gradle/
+# Build output
+/target/
+**/target/
+core/target*/
 build/
 app/build/
-local.properties
-app/src/main/jniLibs/
-models-stage/
-core/target*/
+.gradle/
+.kotlin/
 *.apk
 *.aab
-.idea/
+app/src/main/jniLibs/
 app/libs/
-.kotlin/
-/target/
+
+# Local machine settings and editors
+local.properties
+.idea/
+.vscode/
+*.iml
+.DS_Store
+*.swp
+
+# Models and anything made while running (never commit these)
+models-stage/
+*.gguf
+*.litertlm
+*.bin
+*.sqlite3*
+*.log

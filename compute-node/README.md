@@ -86,7 +86,7 @@ State (identity and paired list) lives in `~/.config/marginalia-node` on Linux. 
 
 ## Tray icon
 
-`marginalia-node-tray` is a small separate program that puts the node in the Ubuntu top bar (or the Windows system tray). It talks only to the node's local control channel (`127.0.0.1:47616`, change with `--admin-port`), polls it every 2 seconds and shows counts and names. It never sees anything a phone asked.
+`marginalia-node-tray` is a small separate program that puts the node in the Ubuntu top bar (or the Windows system tray). It talks only to the node's local control channel (`127.0.0.1:47616`, change with `--admin-port`) and shows counts, names and timings. It never sees anything a phone asked.
 
 ```sh
 cargo build --release -p marginalia-node-tray   # pure Rust, no system packages
@@ -94,12 +94,23 @@ compute-node/packaging/install-linux.sh         # installs it and adds it to ~/.
 marginalia-node-tray --print                    # prints the menu as text and exits, to check the setup
 ```
 
-- The icon is a ring with a dot: green when the node is running, amber when it is paused, grey when it is not running. Hover for a line such as "falcon: running, 12 jobs served, 2 phones".
-- Click it to open the menu. It starts with read-only lines: the node's name and state, jobs served and paired phones, the chat and search models, the measured speed, uptime, jobs and failures, whether new phones must be allowed first, each paired phone with its job counts and the addresses the node can be reached at. The pairing code is never shown there.
-- Then the actions: **Pause** or **Resume**, **Lock new phones** or **Unlock**, **Show pairing code** (a notification with the code and the addresses, nothing is copied), **Show details** (the same as `marginalia-node stats`, in a zenity window if zenity is installed, otherwise a notification) and **Stop node**. **Quit tray** only closes the icon.
-- When the node is not running the menu offers **Start node**. On Linux it starts the `marginalia-node` user service if that is installed, otherwise it runs `marginalia-node run` from next to the tray or from PATH.
-- On Ubuntu the top bar shows the icon through the AppIndicator extension, which ships and is on by default. On a plain GNOME without it: `sudo apt install gnome-shell-extension-appindicator` and log in again. The icon uses the StatusNotifierItem protocol over D-Bus (the `ksni` crate), so no GTK libraries are needed.
-- Messages use `notify-send`, so the `libnotify-bin` package must be installed (Ubuntu has it).
+- **Icon.** A ring with a dot: green when the node is running, amber when it is paused, grey when it is not running. Hover for a line such as "falcon: running, 12 jobs served, 2 phones". The icon is polled every 5 seconds.
+- **Left click: the details panel.** A small dark window (about 340 by 540 pixels, no title bar, always on top) opens near the icon. It closes with Escape, with the x, when you click anywhere else, or with a second click on the icon. It shows, from top to bottom:
+  - the node name with a state pill (Running, Paused, Not running) and a line saying what pause and lock mean right now
+  - phones that are asking to join, with Allow and Deny, when there are any
+  - big numbers: jobs served, phones, uptime
+  - speed bars for chat (tokens a second) and search (passages a second), each with its model name
+  - live activity: one pulsing dot per running or waiting job, a strip of the last 2 minutes (kept in memory in the panel only), and the failure count
+  - the paired phones with their job counts and when they were last seen, each with Block and Remove (both ask first)
+  - the addresses the node can be reached at
+  - buttons: Pause or Resume, Show pairing code, Lock new phones or Unlock, Stop node (asks first)
+- **Pairing code.** It appears inside the panel in large type with a 5 minute countdown, and is hidden otherwise. It is never in the menu and nothing is copied.
+- **Not running.** The panel shows a friendly empty state with a Start node button.
+- **Right click: a short menu.** The status line, Pause or Resume, Show details (opens the panel), Stop node and Quit tray. When the node is not running: Start node and Quit tray.
+- **Start node.** On Linux it starts the `marginalia-node` user service if that is installed, otherwise it runs `marginalia-node run` from next to the tray or from PATH.
+- **How it is built.** The tray and the panel are the same program. The tray starts `marginalia-node-tray --panel` as a second process when the panel is wanted and stops it when it is not, so the tray stays small. The panel polls the node every 1.5 seconds while it is open. On Windows the panel appears bottom right above the taskbar, on X11 top right, and on Wayland the compositor chooses the place because windows cannot position themselves there.
+- **Ubuntu.** The top bar shows the icon through the AppIndicator extension, which ships and is on by default. On a plain GNOME without it: `sudo apt install gnome-shell-extension-appindicator` and log in again. The icon uses the StatusNotifierItem protocol over D-Bus (the `ksni` crate) and the panel uses `egui` with OpenGL, so no GTK or other development packages are needed. The OpenGL, X11 and Wayland libraries are loaded at run time and are on any desktop.
+- Short messages (for example "Could not pause the node") use `notify-send`, so the `libnotify-bin` package must be installed (Ubuntu has it).
 - On Windows it uses the `tray-icon` crate. That part could not be built or tried where it was written. See `packaging/windows.md` for starting it at login.
 - It is built on its own and is not part of the default workspace build.
 

@@ -570,7 +570,7 @@ impl eframe::App for Panel {
                         });
                     });
                     // A soft fade at the bottom says there is more to scroll to.
-                    let more = out.state.offset().y + out.inner_rect.height() < out.content_size.y - 2.0;
+                    let more = out.state.clamped_offset().y + out.inner_rect.height() < out.content_size.y - 2.0;
                     if more {
                         let r = out.inner_rect;
                         for k in 0..10 {

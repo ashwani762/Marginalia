@@ -4,7 +4,7 @@
 [Desktop Entry]
 Type=Application
 Name=Marginalia node tray
-Comment=Shows the Marginalia compute node in the top bar and lets you pause, lock and stop it
+Comment=Shows the Marginalia compute node in the top bar. Click it for details, right click for the menu
 Exec=@HOME@/.local/bin/marginalia-node-tray
 Terminal=false
 Icon=network-server
