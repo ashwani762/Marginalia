@@ -22,10 +22,12 @@ $MN_Launcher  = Join-Path $MN_InstallDir 'start-node.vbs'
 $MN_LogFile   = Join-Path $MN_InstallDir 'node.log'
 # The model files the node serves and their exact sizes (same as compute-node/node/src/models_dl.rs).
 $MN_Models = @(
-    @{ Role = 'chat';   File = 'gemma-4-E4B-it-Q4_0.gguf';   Size = 4590807392 },
+    @{ Role = 'chat';   File = 'gemma-4-E2B-it-Q4_0.gguf';   Size = 2841481184 },
     @{ Role = 'search'; File = 'embeddinggemma-2-Q8_0.gguf'; Size = 309855456 },
     @{ Role = 'speech'; File = 'ggml-large-v3-turbo-q5_0.bin'; Size = 574041195 }
 )
+# The larger chat model. Setup downloads it so the tray menu can switch to it. Not part of verify.ps1.
+$MN_ChatLarge = @{ Role = 'chat'; File = 'gemma-4-E4B-it-Q4_0.gguf'; Size = 4590807392 }
 
 # ---- Output: one line per step ------------------------------------------------------------------
 function Write-Tag([string]$tag, [string]$text, [string]$color) {
@@ -374,7 +376,7 @@ function Test-InstalledCurrent([string]$built, [string]$installed) {
 # The file names of required model files that are missing or have the wrong size in $dir.
 function Get-MissingModels([string]$dir, [bool]$skipSpeech) {
     $miss = @()
-    foreach ($m in $MN_Models) {
+    foreach ($m in ($MN_Models + @($MN_ChatLarge))) {
         if ($skipSpeech -and $m.Role -eq 'speech') { continue }
         $f = Join-Path $dir $m.File
         if (-not (Test-Path $f) -or (Get-Item $f).Length -ne $m.Size) { $miss += $m.File }

@@ -16,6 +16,10 @@ pub enum Action {
     ShowDetails,
     Stop,
     Start,
+    /// Saves the smaller chat model (E2B) as the choice and restarts the node.
+    ChatSmall,
+    /// Saves the larger chat model (E4B) as the choice and restarts the node.
+    ChatLarge,
     Quit,
 }
 
@@ -353,6 +357,59 @@ pub fn menu(v: &View) -> Vec<Entry> {
     }
     m.push(Item("Quit tray".into(), Action::Quit));
     m
+}
+
+/// The right-click menu as the icons show it: `menu` plus the entry that switches the chat model (E2B or E4B).
+pub fn menu_with_chat_switch(v: &View) -> Vec<Entry> {
+    let mut m = menu(v);
+    if let Poll::Up(i) = &v.poll {
+        let entry = match i.chat_model.as_deref() {
+            Some(c) if c.contains("E4B") => Some(Entry::Item("Use chat model E2B (restarts node)".into(), Action::ChatSmall)),
+            Some(c) if c.contains("E2B") => Some(Entry::Item("Use chat model E4B (restarts node)".into(), Action::ChatLarge)),
+            _ => None,
+        };
+        if let (Some(e), Some(at)) = (entry, m.iter().position(|e| matches!(e, Entry::Item(_, Action::ShowDetails)))) {
+            m.insert(at + 1, e);
+        }
+    }
+    m
+}
+
+#[cfg(test)]
+mod chat_switch_tests {
+    use super::*;
+
+    fn view(chat: Option<&str>) -> View {
+        let i = Info { name: "falcon".into(), chat_model: chat.map(String::from), ..Default::default() };
+        View { poll: Poll::Up(Box::new(i)), starting: false }
+    }
+
+    #[test]
+    fn menu_offers_the_other_chat_model_after_show_details() {
+        let m = menu_with_chat_switch(&view(Some("gemma-4-E2B-it-Q4_0")));
+        let at = m.iter().position(|e| matches!(e, Entry::Item(_, Action::ShowDetails))).unwrap();
+        assert_eq!(m[at + 1], Entry::Item("Use chat model E4B (restarts node)".into(), Action::ChatLarge));
+        let m = menu_with_chat_switch(&view(Some("gemma-4-E4B-it-Q4_0")));
+        assert!(m.contains(&Entry::Item("Use chat model E2B (restarts node)".into(), Action::ChatSmall)));
+    }
+
+    #[test]
+    fn no_chat_entry_when_unknown_or_node_down() {
+        assert_eq!(menu_with_chat_switch(&view(None)), menu(&view(None)));
+        let down = View { poll: Poll::Down, starting: false };
+        assert_eq!(menu_with_chat_switch(&down), menu(&down));
+    }
+
+    #[test]
+    fn chat_entry_wording_is_plain() {
+        for c in ["gemma-4-E2B-it-Q4_0", "gemma-4-E4B-it-Q4_0"] {
+            for e in menu_with_chat_switch(&view(Some(c))) {
+                if let Entry::Item(t, _) = e {
+                    assert!(!t.contains(';') && !t.contains('\u{2014}'), "bad wording: {t}");
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

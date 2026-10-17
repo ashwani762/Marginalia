@@ -1,4 +1,4 @@
-# Downloads the model files the node serves (about 5.5 GB: chat Gemma 4 E4B, search and speech to text). -ChatModel e2b picks the smaller chat model. Safe to stop and run again, it continues.
+# Downloads the model files the node serves (about 3.7 GB: chat Gemma 4 E2B, search and speech to text). -ChatModel e4b fetches the larger chat model (4.6 GB) that the tray menu can switch to. Safe to stop and run again, it continues.
 #   .\compute-node\windows\download-models.ps1
 #   .\compute-node\windows\download-models.ps1 -Only search      (or chat, or speech)
 #   .\compute-node\windows\download-models.ps1 -SkipSpeech        leave out the speech model (570 MB)
@@ -8,7 +8,7 @@
 param(
     [string]$Dir = '',
     [ValidateSet('', 'chat', 'search', 'speech')][string]$Only = '',
-    [ValidateSet('e2b', 'e4b')][string]$ChatModel = 'e4b',
+    [ValidateSet('e2b', 'e4b')][string]$ChatModel = 'e2b',
     [switch]$SkipSpeech
 )
 . (Join-Path $PSScriptRoot 'common.ps1')

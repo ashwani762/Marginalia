@@ -45,6 +45,9 @@ enum Cmd {
         models: Option<PathBuf>,
         #[arg(long)]
         chat_model: Option<PathBuf>,
+        /// Which chat model to load from the models folder, e2b (smaller) or e4b. Without it the choice saved with `chat-model` is used, then e2b, or e4b when it is the only one present.
+        #[arg(long, value_enum)]
+        chat: Option<models_dl::ChatChoice>,
         #[arg(long)]
         embed_model: Option<PathBuf>,
         /// The speech model (a whisper.cpp `.bin` file) used to transcribe recordings.
@@ -73,6 +76,11 @@ enum Cmd {
     Unlock,
     /// Turn new jobs away for now. The models stay loaded and running jobs finish.
     Pause,
+    /// Show or choose the chat model this node loads (e2b is smaller and faster, e4b answers better). Restart the node to apply it.
+    ChatModel {
+        #[arg(value_enum)]
+        choice: Option<models_dl::ChatChoice>,
+    },
     /// Take jobs again after `pause`.
     Resume,
     /// Stop the running node: finish running jobs (up to 10 seconds), leave the network, exit.
@@ -146,8 +154,8 @@ enum ModelsCmd {
         /// Only the chat model, only the search model or only the speech model.
         #[arg(long, value_enum)]
         only: Option<models_dl::Only>,
-        /// Which chat model. The node loads gemma-4-E4B-it-Q4_0.gguf, or gemma-4-E2B-it-Q4_0.gguf when only that one is present, unless told otherwise with `run --chat-model`.
-        #[arg(long, value_enum, default_value = "e4b")]
+        /// Which chat model. The node loads gemma-4-E2B-it-Q4_0.gguf, or E4B when only that one is present, unless chosen with `chat-model` or `run --chat`.
+        #[arg(long, value_enum, default_value = "e2b")]
         chat_model: models_dl::ChatChoice,
         /// Leave out the speech model (about 570 MB), which is fetched by default.
         #[arg(long)]
@@ -191,6 +199,16 @@ async fn main() -> Result<()> {
         }
         Cmd::Status => println!("{}", serde_json::to_string_pretty(&admin::ask(cli.admin_port, json!({"cmd": "status"})).await?)?),
         Cmd::Stats => println!("{}", metrics::report(&admin::ask(cli.admin_port, json!({"cmd": "stats"})).await?)),
+        Cmd::ChatModel { choice } => match choice {
+            Some(c) => {
+                models_dl::save_chat_choice(&dir, *c)?;
+                println!("Chat model set to {} ({}). Restart the node to use it. If the file is missing run: marginalia-node models download --chat-model {}", c.name(), c.file(), c.name());
+            }
+            None => match models_dl::saved_chat_choice(&dir) {
+                Some(c) => println!("Chat model: {} ({})", c.name(), c.file()),
+                None => println!("Chat model: automatic (e2b, or e4b when it is the only one present). Choose with: marginalia-node chat-model e2b|e4b"),
+            },
+        },
         Cmd::Pause => {
             admin::ask(cli.admin_port, json!({"cmd": "pause"})).await?;
             println!("Paused. New jobs are turned away until you run `marginalia-node resume`. Jobs already running finish.");
@@ -211,7 +229,7 @@ async fn main() -> Result<()> {
         Cmd::Deny { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "deny", "who": who})).await?),
         Cmd::Revoke { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "revoke", "who": who})).await?),
         Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, window, prompt, hang_up_after } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *window, prompt.clone(), *hang_up_after).await?,
-        Cmd::Run { port, name, models, chat_model, embed_model, speech_model, no_speech, cpu, ctx, lock, window_max_seconds } => {
+        Cmd::Run { port, name, models, chat_model, chat, embed_model, speech_model, no_speech, cpu, ctx, lock, window_max_seconds } => {
             let store = Arc::new(state::Store::open(dir.clone())?);
             let identity = store.identity()?;
             if *lock {
@@ -220,6 +238,15 @@ async fn main() -> Result<()> {
             let locked_before = store.locked();
             let name = name.clone().unwrap_or_else(|| hostname::get().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|_| "helper-node".into()));
             let models_dir = models.clone().unwrap_or_else(models_dl::default_dir);
+            let chosen = chat.or_else(|| models_dl::saved_chat_choice(&dir));
+            let chat_model = match (chat_model, chosen) {
+                (Some(p), _) => Some(p.clone()),
+                (None, Some(c)) => Some(models_dir.join(c.file())),
+                (None, None) => None,
+            };
+            if let Some(p) = chat_model.as_ref().filter(|p| !p.is_file()) {
+                tracing::warn!("the chosen chat model {} is missing. Get it with: marginalia-node models download --chat-model e2b|e4b", p.display());
+            }
             let missing = models_dl::missing_for_run(&models_dir, chat_model.is_some(), embed_model.is_some(), speech_model.is_some() || *no_speech);
             // Speech alone is enough to serve, so the node only refuses when it has none of the three.
             let speech_here = !*no_speech && (speech_model.is_some() || models_dir.join(host::SPEECH_FILE).is_file());

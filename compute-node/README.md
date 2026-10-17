@@ -49,7 +49,7 @@ Put these files in the models folder:
 
 | File | Used for |
 | --- | --- |
-| `gemma-4-E4B-it-Q4_0.gguf` | chat (write-ups, answers), the default. The smaller `gemma-4-E2B-it-Q4_0.gguf` (`--chat-model e2b`) is used when it is the only one present |
+| `gemma-4-E2B-it-Q4_0.gguf` | chat (write-ups, answers), the default. The larger `gemma-4-E4B-it-Q4_0.gguf` (`--chat-model e4b`) is used when chosen from the tray menu or with `chat-model e4b` |
 | `embeddinggemma-2-Q8_0.gguf` | search (embeddings) |
 | `ggml-large-v3-turbo-q5_0.bin` | speech to text on recorded audio (about 570 MB, from the `ggerganov/whisper.cpp` repository on Hugging Face) |
 
@@ -62,6 +62,8 @@ At start the node runs a short measurement and reports tokens per second for cha
 ```sh
 marginalia-node models list
 marginalia-node models download [--dir DIR] [--only chat|search|speech] [--chat-model e4b|e2b] [--skip-speech]
+marginalia-node chat-model [e2b|e4b]   # show or choose the chat model, restart the node to apply. The tray menu has the same choice and restarts the node itself
+marginalia-node run --chat e2b|e4b      # choose it for one run
 marginalia-node run [--port 47615] [--name NAME] [--models DIR] [--cpu] [--speech-model FILE] [--no-speech] [--window-max-seconds 120]
 marginalia-node pair
 marginalia-node status

@@ -67,6 +67,23 @@ pub fn start_node(admin_port: u16) -> Result<String, String> {
     Ok(format!("Started {}", exe.display()))
 }
 
+/// Saves the chat model choice (`e2b` or `e4b`) with `marginalia-node chat-model`. The node reads it when it starts.
+pub fn set_chat_model(choice: &str) -> Result<(), String> {
+    let exe = find_node().ok_or_else(|| format!("Could not find {NODE_EXE}. Put it next to the tray program or in your PATH."))?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(["chat-model", choice]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err("The node could not save the choice.".into()),
+        Err(e) => Err(format!("Could not run {}: {e}", exe.display())),
+    }
+}
+
 pub const DEFAULT_ADMIN_PORT: u16 = 47616;
 
 /// A short message that goes away by itself.

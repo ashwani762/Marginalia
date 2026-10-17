@@ -52,10 +52,11 @@ pub const SPEECH_FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
 pub const CHAT_FILE: &str = "gemma-4-E2B-it-Q4_0.gguf";
 pub const CHAT_FILE_E4B: &str = "gemma-4-E4B-it-Q4_0.gguf";
 
-/// The chat model `run` loads when `--chat-model` is not given: the E4B file when it was downloaded, else E2B.
+/// The chat model `run` loads when nothing was chosen: E2B, or E4B when that is the only one downloaded.
 pub fn default_chat_path(models_dir: &std::path::Path) -> PathBuf {
+    let e2b = models_dir.join(CHAT_FILE);
     let e4b = models_dir.join(CHAT_FILE_E4B);
-    if e4b.is_file() { e4b } else { models_dir.join(CHAT_FILE) }
+    if !e2b.is_file() && e4b.is_file() { e4b } else { e2b }
 }
 pub const EMBED_FILE: &str = "embeddinggemma-2-Q8_0.gguf";
 

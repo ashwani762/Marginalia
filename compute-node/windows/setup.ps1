@@ -289,11 +289,19 @@ if ($SkipModels.IsPresent) {
 } elseif ((-not $Force.IsPresent) -and (@(Get-MissingModels $modelsPath $SkipSpeech.IsPresent).Count -eq 0)) {
     Step-Skip ('All model files are complete in ' + $modelsPath)
 } else {
-    $dlArgs = @('models', 'download', '--chat-model', 'e4b')
+    $dlArgs = @('models', 'download')
     if ($ModelsDir) { $dlArgs += @('--dir', $ModelsDir) }
     if ($SkipSpeech.IsPresent) { $dlArgs += '--skip-speech' }
     & $nodeExe @dlArgs
-    if ($LASTEXITCODE -eq 0) {
+    $dlCode = $LASTEXITCODE
+    # The larger chat model too, so the tray menu can switch to it. It is skipped when it is already there.
+    if ($dlCode -eq 0) {
+        $largeArgs = @('models', 'download', '--only', 'chat', '--chat-model', 'e4b')
+        if ($ModelsDir) { $largeArgs += @('--dir', $ModelsDir) }
+        & $nodeExe @largeArgs
+        $dlCode = $LASTEXITCODE
+    }
+    if ($dlCode -eq 0) {
         Step-Ok 'Models are in place'
     } else {
         Step-Warn 'The model download did not finish. Run  marginalia-node.exe models download  to continue where it stopped. If it asks for a login, set HF_TOKEN first.'

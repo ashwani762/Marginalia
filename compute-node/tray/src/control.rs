@@ -196,6 +196,29 @@ impl Controller {
                     }
                 }
             }
+            Action::ChatSmall | Action::ChatLarge => {
+                let choice = if action == Action::ChatSmall { "e2b" } else { "e4b" };
+                if let Err(e) = os::set_chat_model(choice) {
+                    return notice("Could not change the chat model", e);
+                }
+                // The old node must be gone first so its model leaves the graphics card before the new one loads.
+                if admin::ask(self.port, "shutdown").is_ok() {
+                    let mut gone = false;
+                    for _ in 0..60 {
+                        if admin::ask(self.port, "status").is_err() {
+                            gone = true;
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(500));
+                    }
+                    if !gone {
+                        return notice("Could not change the chat model", "The node did not stop in 30 seconds. The new choice is saved and is used the next time the node starts.".into());
+                    }
+                    // A moment for the graphics driver to take the memory back.
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+                self.perform(Action::Start)
+            }
             Action::Quit => None,
         }
     }
