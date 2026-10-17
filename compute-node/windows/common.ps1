@@ -323,16 +323,23 @@ function Get-MnStatus([string]$exe) {
 
 # ---- Is the work already done? (setup.ps1 and verify.ps1 use these to skip and to explain) -------------
 # The newest write time of the code that goes into the node and the tray.
-function Get-NewestSourceTime {
+# $which is node, tray or all. The tray is not rebuilt when only node code changed, so each program is compared with its own sources.
+function Get-NewestSourceTime([string]$which = 'all') {
     $newest = [DateTime]::MinValue
-    foreach ($d in @('compute-node\node\src', 'compute-node\tray\src', 'compute-node\proto\src')) {
+    $dirs = @('compute-node\node\src', 'compute-node\tray\src', 'compute-node\proto\src')
+    if ($which -eq 'node') { $dirs = @('compute-node\node\src', 'compute-node\proto\src') }
+    if ($which -eq 'tray') { $dirs = @('compute-node\tray\src') }
+    foreach ($d in $dirs) {
         $p = Join-Path $MN_RepoRoot $d
         if (-not (Test-Path $p)) { continue }
         foreach ($f in (Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue)) {
             if ($f.LastWriteTime -gt $newest) { $newest = $f.LastWriteTime }
         }
     }
-    foreach ($rel in @('Cargo.toml', 'Cargo.lock', 'compute-node\node\Cargo.toml', 'compute-node\node\build.rs', 'compute-node\tray\Cargo.toml', 'compute-node\proto\Cargo.toml', 'compute-node\vendor\llama-cpp-sys-2\build.rs', 'compute-node\vendor\llama-cpp-sys-2\Cargo.toml')) {
+    $files = @('Cargo.toml', 'Cargo.lock', 'compute-node\node\Cargo.toml', 'compute-node\node\build.rs', 'compute-node\tray\Cargo.toml', 'compute-node\proto\Cargo.toml', 'compute-node\vendor\llama-cpp-sys-2\build.rs', 'compute-node\vendor\llama-cpp-sys-2\Cargo.toml')
+    if ($which -eq 'node') { $files = @('Cargo.toml', 'Cargo.lock', 'compute-node\node\Cargo.toml', 'compute-node\node\build.rs', 'compute-node\proto\Cargo.toml', 'compute-node\vendor\llama-cpp-sys-2\build.rs', 'compute-node\vendor\llama-cpp-sys-2\Cargo.toml') }
+    if ($which -eq 'tray') { $files = @('Cargo.toml', 'Cargo.lock', 'compute-node\tray\Cargo.toml') }
+    foreach ($rel in $files) {
         $p = Join-Path $MN_RepoRoot $rel
         if (Test-Path $p) {
             $t = (Get-Item $p).LastWriteTime
@@ -353,10 +360,8 @@ function Get-BackendStamp([bool]$cpu, [bool]$vulkan, [bool]$cuda) {
 # $true when both built programs exist, are newer than all the sources, and were built with the same backend.
 function Test-BuildCurrent([bool]$cpu, [bool]$vulkan, [bool]$cuda) {
     if (-not (Test-Path $MN_BuiltNode) -or -not (Test-Path $MN_BuiltTray)) { return $false }
-    $built = (Get-Item $MN_BuiltNode).LastWriteTime
-    $t2 = (Get-Item $MN_BuiltTray).LastWriteTime
-    if ($t2 -lt $built) { $built = $t2 }
-    if ((Get-NewestSourceTime) -gt $built) { return $false }
+    if ((Get-NewestSourceTime 'node') -gt (Get-Item $MN_BuiltNode).LastWriteTime) { return $false }
+    if ((Get-NewestSourceTime 'tray') -gt (Get-Item $MN_BuiltTray).LastWriteTime) { return $false }
     if (-not (Test-Path $MN_BuildStamp)) { return $false }
     $want = Get-BackendStamp $cpu $vulkan $cuda
     if (-not $want) { return $false }

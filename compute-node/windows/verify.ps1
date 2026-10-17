@@ -111,9 +111,8 @@ if (-not ($haveNode -and $haveTray)) {
 } elseif (-not (Test-Path $MN_BuiltNode)) {
     Check-Skip 'installed copy is current' 'no build in target\release to compare with'
 } else {
-    $builtTime = (Get-Item $MN_BuiltNode).LastWriteTime
-    if ((Test-Path $MN_BuiltTray) -and (Get-Item $MN_BuiltTray).LastWriteTime -lt $builtTime) { $builtTime = (Get-Item $MN_BuiltTray).LastWriteTime }
-    if ((Get-NewestSourceTime) -gt $builtTime) {
+    $staleTray = (Test-Path $MN_BuiltTray) -and ((Get-NewestSourceTime 'tray') -gt (Get-Item $MN_BuiltTray).LastWriteTime)
+    if (((Get-NewestSourceTime 'node') -gt (Get-Item $MN_BuiltNode).LastWriteTime) -or $staleTray) {
         Check-Fail 'installed copy is current' 'the code changed after the last build, so what runs is old' $devCmd
     } elseif (-not (Test-InstalledCurrent $MN_BuiltNode $MN_InstNode) -or ((Test-Path $MN_BuiltTray) -and -not (Test-InstalledCurrent $MN_BuiltTray $MN_InstTray))) {
         Check-Fail 'installed copy is current' 'target\release holds newer programs than the installed ones' $devCmd
@@ -376,6 +375,18 @@ if ($SkipProbe.IsPresent) {
             Check-Fail 'self test: speech' ('transcription did not finish: ' + ((Get-LastLines $ttext 1) -join '')) $shown
         }
     }
+}
+
+# ---- Remove the test phone ------------------------------------------------------------------------
+# The self test pairs a phone called "probe". It should not stay in the list of phones. A locked node would need it
+# approved again next time, so it is only removed from a node that is not locked.
+if ($cli -and (Test-Path $probeDir)) {
+    try {
+        $st = (& $cli status 2>$null) | ConvertFrom-Json
+        if ($st -and -not $st.locked -and (@($st.clients | Where-Object { $_.name -eq 'probe' }).Count -gt 0)) {
+            & $cli revoke probe 2>$null | Out-Null
+        }
+    } catch { }
 }
 
 # ---- Summary -------------------------------------------------------------------------------------
