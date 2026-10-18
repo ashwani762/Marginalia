@@ -47,6 +47,8 @@ pub struct Shared {
     /// Paused: models stay loaded, new chat and search jobs are turned away, running jobs finish.
     /// Kept in memory only, so a restart is never paused.
     pub paused: AtomicBool,
+    /// The network announcement, set once it is up. Pausing and resuming announce again so phones see it at once.
+    pub announce: std::sync::OnceLock<crate::discovery::Advertiser>,
     /// Woken by the `shutdown` command to make the node stop.
     pub stop: tokio::sync::Notify,
 }

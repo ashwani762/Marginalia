@@ -314,11 +314,13 @@ async fn main() -> Result<()> {
             let host = Arc::new(tokio::task::spawn_blocking(move || host::Host::start(&opts)).await??);
             let peers = peers::Peers::open(&dir)?;
             let cluster = cluster::Cluster::new(store.clone(), peers, identity.clone(), name.clone(), *port)?;
-            let shared = Arc::new(server::Shared { cluster: cluster.clone(), store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), stop: Default::default() });
+            let shared = Arc::new(server::Shared { cluster: cluster.clone(), store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), announce: Default::default(), stop: Default::default() });
             let ep = server::endpoint(&shared, *port)?;
-            let mdns = discovery::advertise(&name, *port, &identity.fingerprint());
-            match &mdns {
-                Ok(_) => tracing::info!("announcing {name} on the local network"),
+            match discovery::advertise(&name, *port, &identity.fingerprint()) {
+                Ok(a) => {
+                    let _ = shared.announce.set(a);
+                    tracing::info!("announcing {name} on the local network");
+                }
                 Err(e) => tracing::warn!("could not announce on the network (phones can still be given the address): {e:#}"),
             }
             tracing::info!("node {name} ready on port {port}; {} phone(s) paired. Run `marginalia-node pair` to add one.", shared.store.list().len());
@@ -350,8 +352,8 @@ async fn main() -> Result<()> {
             // Stop taking new connections and new jobs, then give running jobs a moment to finish.
             shared.paused.store(true, std::sync::atomic::Ordering::Relaxed);
             ep.set_server_config(None);
-            if let Ok(d) = &mdns {
-                let _ = d.shutdown();
+            if let Some(a) = shared.announce.get() {
+                a.goodbye();
             }
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
             while shared.in_flight() > 0 && std::time::Instant::now() < deadline {

@@ -75,12 +75,45 @@ mod default_first_tests {
     }
 }
 
-pub fn advertise(name: &str, port: u16, fp: &str) -> Result<ServiceDaemon> {
-    let daemon = ServiceDaemon::new()?;
-    let host = format!("{}.local.", hostname::get()?.to_string_lossy());
-    let addrs = lan_addresses();
-    let props = [("v", marginalia_proto::PROTO_VERSION.to_string()), ("id", fp[..16].to_string()), ("name", name.to_string())];
-    let info = ServiceInfo::new(SERVICE_TYPE, name, &host, &addrs[..], port, &props[..])?;
-    daemon.register(info)?;
-    Ok(daemon)
+/// What this node tells the network, kept so the announcement can be sent again when the node is paused, resumed or stopped.
+pub struct Advertiser {
+    daemon: ServiceDaemon,
+    name: String,
+    host: String,
+    port: u16,
+    fp: String,
+    addrs: Vec<IpAddr>,
+}
+
+impl Advertiser {
+    fn info(&self, paused: bool) -> Result<ServiceInfo> {
+        let mut props = vec![("v", marginalia_proto::PROTO_VERSION.to_string()), ("id", self.fp[..16].to_string()), ("name", self.name.clone())];
+        if paused {
+            props.push(("paused", "1".to_string()));
+        }
+        Ok(ServiceInfo::new(SERVICE_TYPE, &self.name, &self.host, &self.addrs[..], self.port, &props[..])?)
+    }
+
+    /// Announces again with the new state, so a phone that is looking changes its light within a second.
+    pub fn set_paused(&self, paused: bool) {
+        if let Err(e) = self.info(paused).and_then(|i| Ok(self.daemon.register(i)?)) {
+            tracing::debug!("could not announce the new state: {e:#}");
+        }
+    }
+
+    /// Says goodbye on the network and stops announcing. Waits a moment so the goodbye is sent before the process ends.
+    pub fn goodbye(&self) {
+        if let Ok(i) = self.info(false) {
+            if let Ok(done) = self.daemon.unregister(i.get_fullname()) {
+                let _ = done.recv_timeout(std::time::Duration::from_millis(500));
+            }
+        }
+        let _ = self.daemon.shutdown();
+    }
+}
+
+pub fn advertise(name: &str, port: u16, fp: &str) -> Result<Advertiser> {
+    let a = Advertiser { daemon: ServiceDaemon::new()?, name: name.to_string(), host: format!("{}.local.", hostname::get()?.to_string_lossy()), port, fp: fp.to_string(), addrs: lan_addresses() };
+    a.daemon.register(a.info(false)?)?;
+    Ok(a)
 }

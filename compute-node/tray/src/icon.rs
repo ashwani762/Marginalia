@@ -1,13 +1,15 @@
 //! The tray icon, drawn in code: a ring with a dot in the middle. Green when the node is running,
-//! amber when it is paused, grey when it is not running.
+//! blue while it works on a job, amber when it is paused, violet when new phones must be allowed first, red when it is not running.
 
 use crate::model::State;
 
 pub fn colour(state: State) -> [u8; 3] {
     match state {
         State::Running => [46, 160, 67],
+        State::Busy => [40, 120, 220],
         State::Paused => [230, 150, 10],
-        State::Down => [140, 140, 140],
+        State::Locked => [140, 90, 200],
+        State::Down => [215, 60, 55],
     }
 }
 
@@ -51,7 +53,7 @@ mod tests {
 
     #[test]
     fn dot_in_a_ring_with_clear_corners() {
-        for state in [State::Running, State::Paused, State::Down] {
+        for state in ALL {
             let px = rgba(state, 32);
             assert_eq!(px.len(), 32 * 32 * 4);
             let [r, g, b] = colour(state);
@@ -64,11 +66,15 @@ mod tests {
         }
     }
 
+    const ALL: [State; 5] = [State::Running, State::Busy, State::Paused, State::Locked, State::Down];
+
     #[test]
-    fn states_have_different_colours() {
-        assert_ne!(colour(State::Running), colour(State::Paused));
-        assert_ne!(colour(State::Running), colour(State::Down));
-        assert_ne!(colour(State::Paused), colour(State::Down));
+    fn every_state_has_its_own_colour() {
+        for (i, a) in ALL.iter().enumerate() {
+            for b in &ALL[i + 1..] {
+                assert_ne!(colour(*a), colour(*b), "{a:?} and {b:?}");
+            }
+        }
     }
 
     #[test]

@@ -21,8 +21,8 @@ const TEXT: Color32 = Color32::from_rgb(232, 234, 238);
 const DIM: Color32 = Color32::from_rgb(142, 148, 160);
 const GREEN: Color32 = Color32::from_rgb(70, 200, 105);
 const AMBER: Color32 = Color32::from_rgb(240, 165, 30);
-const GREY: Color32 = Color32::from_rgb(130, 134, 142);
 const BLUE: Color32 = Color32::from_rgb(96, 156, 255);
+const VIOLET: Color32 = Color32::from_rgb(170, 125, 230);
 const RED: Color32 = Color32::from_rgb(240, 100, 95);
 const GREEN_BTN: Color32 = Color32::from_rgb(38, 120, 66);
 const RED_BTN: Color32 = Color32::from_rgb(110, 42, 44);
@@ -30,8 +30,10 @@ const RED_BTN: Color32 = Color32::from_rgb(110, 42, 44);
 fn state_colour(s: State) -> Color32 {
     match s {
         State::Running => GREEN,
+        State::Busy => BLUE,
         State::Paused => AMBER,
-        State::Down => GREY,
+        State::Locked => VIOLET,
+        State::Down => RED,
     }
 }
 
@@ -496,7 +498,7 @@ impl Panel {
     fn empty_state(&mut self, ui: &mut Ui, starting: bool) {
         ui.add_space(70.0);
         ui.vertical_centered(|ui| {
-            dot(ui, GREY, 16.0);
+            dot(ui, RED, 16.0);
             ui.add_space(8.0);
             ui.label(RichText::new(if starting { "Starting the node" } else { "The node is not running" }).size(17.0).strong().color(TEXT));
             ui.add_space(4.0);

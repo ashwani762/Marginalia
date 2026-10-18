@@ -25,8 +25,15 @@ pub enum Action {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
+    /// Ready for jobs.
     Running,
+    /// Working on a job right now.
+    Busy,
+    /// Paused by hand: new jobs are turned away.
     Paused,
+    /// New phones must be allowed first.
+    Locked,
+    /// Not running, or not answering.
     Down,
 }
 
@@ -100,6 +107,8 @@ impl View {
         match &self.poll {
             Poll::Down => State::Down,
             Poll::Up(i) if i.paused => State::Paused,
+            Poll::Up(i) if i.running_jobs > 0 => State::Busy,
+            Poll::Up(i) if i.locked => State::Locked,
             Poll::Up(_) => State::Running,
         }
     }
@@ -316,10 +325,11 @@ impl Activity {
 }
 
 fn state_word(i: &Info) -> &'static str {
-    if i.paused {
-        "paused"
-    } else {
-        "running"
+    match (View { poll: Poll::Up(Box::new(i.clone())), starting: false }).state() {
+        State::Paused => "paused",
+        State::Busy => "busy",
+        State::Locked => "running, locked",
+        _ => "running",
     }
 }
 
@@ -474,7 +484,11 @@ mod tests {
 
     #[test]
     fn state_mapping() {
-        assert_eq!(up().state(), State::Running);
+        // The fixture has a job running.
+        assert_eq!(up().state(), State::Busy);
+        let mut idle = parse(&status(), None);
+        idle.running_jobs = 0;
+        assert_eq!((View { poll: Poll::Up(Box::new(idle)), starting: false }).state(), State::Running);
         let mut paused = parse(&status(), None);
         paused.paused = true;
         assert_eq!(View { poll: Poll::Up(Box::new(paused)), starting: false }.state(), State::Paused);
@@ -482,8 +496,29 @@ mod tests {
     }
 
     #[test]
+    fn busy_and_locked_have_their_own_state_and_words() {
+        let with = |f: &dyn Fn(&mut Info)| {
+            let mut i = parse(&status(), None);
+            i.paused = false;
+            i.locked = false;
+            i.running_jobs = 0;
+            f(&mut i);
+            View { poll: Poll::Up(Box::new(i)), starting: false }
+        };
+        let busy = with(&|i| i.running_jobs = 1);
+        assert_eq!((busy.state(), tooltip(&busy).as_str()), (State::Busy, "falcon: busy, 12 jobs served, 2 phones"));
+        let locked = with(&|i| i.locked = true);
+        assert_eq!((locked.state(), tooltip(&locked).as_str()), (State::Locked, "falcon: running, locked, 12 jobs served, 2 phones"));
+        // Paused wins over busy and locked, because it is the one that turns jobs away.
+        let all = with(&|i| { i.paused = true; i.locked = true; i.running_jobs = 2 });
+        assert_eq!(all.state(), State::Paused);
+        let both = with(&|i| { i.locked = true; i.running_jobs = 1 });
+        assert_eq!(both.state(), State::Busy);
+    }
+
+    #[test]
     fn tooltip_text() {
-        assert_eq!(tooltip(&up()), "falcon: running, 12 jobs served, 2 phones");
+        assert_eq!(tooltip(&up()), "falcon: busy, 12 jobs served, 2 phones");
         let one = parse(&json!({"name": "pi", "paused": true, "served": 1, "clients": [{"name": "A", "fp": "x"}]}), None);
         assert_eq!(tooltip(&View { poll: Poll::Up(Box::new(one)), starting: false }), "pi: paused, 1 job served, 1 phone");
         assert_eq!(tooltip(&View { poll: Poll::Down, starting: false }), "Marginalia node: not running");
@@ -492,7 +527,7 @@ mod tests {
 
     #[test]
     fn right_click_menu_is_short() {
-        assert_eq!(lines(&menu(&up())), ["- falcon: running", "---", "> Pause", "> Show details", "---", "> Stop node", "> Quit tray"]);
+        assert_eq!(lines(&menu(&up())), ["- falcon: busy", "---", "> Pause", "> Show details", "---", "> Stop node", "> Quit tray"]);
         let mut i = parse(&status(), None);
         i.paused = true;
         let m = lines(&menu(&View { poll: Poll::Up(Box::new(i)), starting: false }));

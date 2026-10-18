@@ -58,6 +58,9 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                 "pause" | "resume" => {
                     let on = cmd == "pause";
                     sh.paused.store(on, Ordering::Relaxed);
+                    if let Some(a) = sh.announce.get() {
+                        a.set_paused(on);
+                    }
                     tracing::info!("{}", if on { "paused: new jobs are turned away" } else { "resumed" });
                     json!({"paused": on})
                 }
