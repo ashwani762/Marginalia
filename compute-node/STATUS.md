@@ -154,6 +154,23 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
    - Checked on the real phone and the real tray with real clicks: pause turns the chip yellow in under 1.5 s, resume green, stop red
      in under 1.5 s, start green in under 6 s (the node loads its models first). The tray shows amber for a moment while a stopping node
      finishes its jobs, then red.
+1b. Tomorrow (2026-10-19): telling speakers apart must run on a compute node, as "Improve transcript" does. Today it only runs on the phone.
+   - Found: `Diarizer.kt` runs sherpa-onnx on the phone (a pyannote segmentation model and a speaker model, about 36 MB, fetched on first use) and
+     `AppVm.separateSpeakers` shows "Telling speakers apart" there. The wire protocol has no request for it, so a node is never asked, even when one is
+     around and much faster. The core only stores the result (`meeting.speakers_apply`).
+   - Node: add a `Diarize` request (appended as the next variant, with a node capability so a phone knows which nodes can). The phone sends the kept
+     audio the way `Transcribe` does (16 kHz mono frames, cancel by closing the stream) and gets back who spoke when as spans with progress events.
+     Nothing is kept on the node. Run sherpa-onnx there (check the `sherpa-rs` crate or the C API first, and that it builds on Linux CUDA, CPU and Windows).
+     Models: `marginalia-node models download --only speakers`, the same two files as the phone. Show "speakers" next to chat, search and speech in
+     `status`, `peers` and the tray.
+   - Phone: `separateSpeakers` asks a node first (core `remote.rs` picks one like it does for `Transcribe`, paused nodes are skipped, a failed node falls
+     over to the next and then to the phone) and falls back to the phone when none can. The progress label says where it runs (for example "Listening on falcon").
+     Keep the choice of how many people spoke and the threshold. Keep the 3 hour limit.
+   - Check: does "Improve transcript" on a node drop the speaker labels that were already set? The segments are replaced, so the order matters.
+     Decide whether separating speakers runs after the node transcript (labels follow the new segments) and make that the one order.
+   - Check on a real phone with a real recording: a two voice talk with falcon (labels match the phone's result), falcon stopped mid-job (falls back
+     to the phone), a paused node (not asked), and a meeting with one voice. Tests: spans mapping, request framing in the proto crate, fallback in `remote.rs`.
+   - Also open from today: swipe-away background test, Windows beta, cluster remainder (member lists, standby, roles).
 2. Later: take Windows out of beta (tray clicks, a reboot, a real phone). The core features work today on Linux.
 3. Cluster, the rest: member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
 4. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.
