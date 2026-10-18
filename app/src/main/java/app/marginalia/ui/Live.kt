@@ -408,15 +408,17 @@ private fun Timeline(
                     // A line the compute node fixed replaces the old one on the spot. No fade in or out of its own: a row that fades out
                     // while the new one fades in shows both on top of each other for a moment. Rows do not slide either: a row that slides
                     // past one that was put in place at once (a card from the knowledge next to a fixed line) is drawn on top of it.
+                    // Nothing fades out or slides on removal: with a fade out but no slide, a card that was closed stayed behind as a
+                    // transparent block. A new card and a new line still fade in.
                     is Moment.Said -> SwipeToKeep(onKeep = { onKeep(m.line) }, modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = null)) {
                         TranscriptRow(m.line, animateIn = m.line.id !in s.freshFixes, dim = if (m.line.id == newestLine) 1f else 0.7f, fresh = m.line.id in s.freshFixes)
                     }
                     is Moment.Noted -> SwipeToDelete(
                         onDelete = { onDeleteJot(m.jot) },
-                        modifier = Modifier.animateItem(placementSpec = null).padding(horizontal = 16.dp, vertical = 6.dp),
+                        modifier = Modifier.animateItem(fadeOutSpec = null, placementSpec = null).padding(horizontal = 16.dp, vertical = 6.dp),
                     ) { JotCard(m.jot, Modifier.padding(0.dp), onEdit = { onEdit(m.jot) }, flat = true) }
-                    is Moment.Shot -> PhotoCard(m.photo, Modifier.animateItem(placementSpec = null), onReadNow = { onReadPhoto(m.photo) }, onOpen = { onPhoto(m.photo) })
-                    is Moment.Asked -> Column(Modifier.animateItem(placementSpec = null).padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    is Moment.Shot -> PhotoCard(m.photo, Modifier.animateItem(fadeOutSpec = null, placementSpec = null), onReadNow = { onReadPhoto(m.photo) }, onOpen = { onPhoto(m.photo) })
+                    is Moment.Asked -> Column(Modifier.animateItem(fadeOutSpec = null, placementSpec = null).padding(horizontal = 16.dp, vertical = 6.dp)) {
                         val label = when (m.card.kind) { "ask" -> "YOU ASKED"; "ideas" -> null; else -> "FROM YOUR KNOWLEDGE" }
                         if (label != null) Text(label, style = type.micro.copy(color = p.accentInk), modifier = Modifier.padding(start = 4.dp, bottom = 6.dp))
                         AssistCard(m.card, onCite = onCite, onPick = onPickIdea, onRemove = { onRemoveCard(m.card) })
