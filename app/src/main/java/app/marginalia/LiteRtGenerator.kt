@@ -80,6 +80,46 @@ class LiteRtGenerator(
         engine = null
     }
 
+    /**
+     * The engine sets up its image reader the first time a conversation starts, which takes the graphics chip for several seconds and
+     * stalls the screen. This does it once, right after loading and while the loading screen is up, with a tiny grey picture and a
+     * one word answer, so the first real job (often in the middle of a meeting) starts at once.
+     */
+    fun warmUp() {
+        val e = engine ?: return
+        var conv: Conversation? = null
+        try {
+            val picture = java.io.File(context.cacheDir, "warm-up.png")
+            if (!picture.exists()) {
+                val bitmap = android.graphics.Bitmap.createBitmap(64, 64, android.graphics.Bitmap.Config.ARGB_8888)
+                bitmap.eraseColor(0xFF808080.toInt())
+                picture.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            }
+            conv = e.createConversation(
+                ConversationConfig(
+                    systemInstruction = null,
+                    initialMessages = emptyList(),
+                    samplerConfig = SamplerConfig(topK = 1, topP = 1.0, temperature = 0.0, seed = 0),
+                    maxOutputToken = 1,
+                ),
+            )
+            val done = CountDownLatch(1)
+            conv.sendMessageAsync(
+                Contents.of(listOf(Content.ImageFile(picture.path), Content.Text("Ok"))),
+                object : MessageCallback {
+                    override fun onMessage(message: Message) {}
+                    override fun onDone() { done.countDown() }
+                    override fun onError(throwable: Throwable) { done.countDown() }
+                },
+            )
+            done.await(90, java.util.concurrent.TimeUnit.SECONDS)
+        } catch (t: Throwable) {
+            Log.w("Marginalia", "warm up failed: $t")
+        } finally {
+            runCatching { conv?.close() }
+        }
+    }
+
     override fun start(request: Long, json: String) {
         pool.execute { run(request, JSONObject(json)) }
     }

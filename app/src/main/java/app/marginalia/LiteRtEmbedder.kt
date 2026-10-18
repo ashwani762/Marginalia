@@ -43,7 +43,15 @@ class LiteRtEmbedder(
     }
 
     @Synchronized
-    override fun embed(texts: Array<String>): Array<FloatArray> {
+    override fun embed(texts: Array<String>): Array<FloatArray> = try {
+        embedNow(texts)
+    } catch (t: Throwable) {
+        // The core only learns that the embedder threw, so the reason is written down here.
+        Log.w("Marginalia", "embedding ${texts.size} texts failed: $t")
+        throw t
+    }
+
+    private fun embedNow(texts: Array<String>): Array<FloatArray> {
         val e = engine ?: error("embedder is not loaded")
         val options = EmbeddingOptions(true, true, 768)
         // Small batches keep memory flat on big documents.

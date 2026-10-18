@@ -58,11 +58,11 @@ class NodeDiscovery(context: Context, private val report: (SeenNode) -> Unit) {
         if (running) return
         running = true
         val listener = object : NsdManager.DiscoveryListener {
-            override fun onDiscoveryStarted(serviceType: String) { Log.i(LOG, "discovery started for $serviceType") }
+            override fun onDiscoveryStarted(serviceType: String) {}
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) { Log.w(LOG, "discovery failed to start: $errorCode"); main.post { if (discovery === this) { discovery = null; running = false } } }
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
             override fun onDiscoveryStopped(serviceType: String) {}
-            override fun onServiceFound(info: NsdServiceInfo) { Log.i(LOG, "found ${info.serviceName} ${info.serviceType}"); main.post { if (running && discovery === this) found(info) } }
+            override fun onServiceFound(info: NsdServiceInfo) { main.post { if (running && discovery === this) found(info) } }
             override fun onServiceLost(info: NsdServiceInfo) { main.post { if (discovery === this) lost(info) } }
         }
         discovery = listener
@@ -123,7 +123,6 @@ class NodeDiscovery(context: Context, private val report: (SeenNode) -> Unit) {
             port = info.port,
             addrs = addrs,
         )
-        Log.i(LOG, "resolved ${node.name} ${node.addrs} port ${node.port} id ${node.id}")
         seen[info.serviceName.orEmpty()] = node
         report(node)
     }

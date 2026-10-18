@@ -404,8 +404,10 @@ private fun Timeline(
         LazyColumn(state = list, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(top = 6.dp, bottom = 14.dp)) {
             items(items, key = { it.key }) { m ->
                 when (m) {
-                    is Moment.Said -> SwipeToKeep(onKeep = { onKeep(m.line) }, modifier = Modifier.animateItem()) {
-                        TranscriptRow(m.line, animateIn = true, dim = if (m.line.id == newestLine) 1f else 0.7f, fresh = m.line.id in s.freshFixes)
+                    // A line the compute node fixed replaces the old one on the spot. No fade in or out of its own: a row that fades out
+                    // while the new one fades in shows both on top of each other for a moment. Lines still slide when others move.
+                    is Moment.Said -> SwipeToKeep(onKeep = { onKeep(m.line) }, modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null)) {
+                        TranscriptRow(m.line, animateIn = m.line.id !in s.freshFixes, dim = if (m.line.id == newestLine) 1f else 0.7f, fresh = m.line.id in s.freshFixes)
                     }
                     is Moment.Noted -> SwipeToDelete(
                         onDelete = { onDeleteJot(m.jot) },

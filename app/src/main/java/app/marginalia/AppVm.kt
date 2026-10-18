@@ -256,6 +256,8 @@ class AppVm(private val app: Application) {
             eerr = withContext(loaderThread) { emb.prepare() }
         }
         if (eerr != null) { failure = "The search model could not start: $eerr"; publishBoot(); return }
+        // The first embedding is the slow one (it builds its caches). Do it now, with the other warm up, not at the first question.
+        withContext(loaderThread) { runCatching { emb.embed(arrayOf("warm up")) } }
         Native.setEmbedder(emb)
         Native.setGenerator(lazyChat)
         val gpuPlanned = prefs.getString("chat", "auto") != "litert-cpu" && !prefs.getBoolean("gpu_failed", false)
@@ -284,6 +286,10 @@ class AppVm(private val app: Application) {
         }
         if (chat == null) { failure = "The AI could not start.\n" + notes.joinToString("\n"); publishBoot(); return }
         runCatching { backend.call("engine.gpu", JSONObject().put("gpu", chat.label.contains("GPU"))) }
+        // The first conversation sets up the image reader, which stalls the screen. Do it now, behind the loading screen.
+        kotlinLabel = "Getting the AI ready"
+        publishBoot()
+        withContext(loaderThread) { chat.warmUp() }
         chatModel = chat
         engineNote = if (notes.isNotEmpty()) "The GPU was not usable, so the AI runs on the CPU." else ""
         modelInfo.value = "Gemma 4 ${if (gemmaFile() == ModelDownload.E4B_FILE) "E4B" else "E2B"} on ${chat.label} · EmbeddingGemma 2 on ${embedModel?.label ?: "CPU"} · Whisper small · ${Native.variant}" +
@@ -853,6 +859,7 @@ class AppVm(private val app: Application) {
     }
 
     private var aloneJob: Job? = null
+    @Volatile private var speechWarmed = false
 
     /** "Keep going": the person does not want to wait. The load carries on behind the app. */
     fun skipAiWarm() { warmSkipped = true; _aiWarm.value = null }
@@ -868,19 +875,28 @@ class AppVm(private val app: Application) {
     /**
      * With no compute node in reach the phone writes everything itself, so Gemma is loaded now, while the app is opening and
      * nothing is being recorded. Loading it later, in the middle of a meeting, stalls the screen for about 5 seconds then.
-     * A compute node that is paired gets three seconds to answer first, and if one does Gemma stays unloaded.
+     * A compute node that is paired gets six seconds to answer first (after it restarts the phone can take that long to see it), and if one does Gemma stays unloaded.
      */
     fun loadChatIfAlone() {
         aloneJob?.cancel()
         warmSkipped = false
         aloneJob = viewModelScope.launch(Dispatchers.Default) {
             while (!nativeReady) delay(250)
+            // All the warm up happens here, behind the loading screen when it is up: the search model, the speech model run once the
+            // way live captions run it, and (below) Gemma with its image reader. After this only real work is left.
+            ensureModels()
+            if (!speechWarmed) {
+                speechWarmed = true
+                runCatching { backend.call("engine.warm_speech") }
+            }
             var waited = 0
             while (true) {
                 loadNodes()
                 val n = _nodes.value
                 val hasNode = n.enabled && n.paired.any { it.approved }
-                if (!hasNode || keepAiReady.value || computeNodeInReach() || waited >= 3000) break
+                if (!hasNode || keepAiReady.value || computeNodeInReach() || waited >= 6000) break
+                // The loading screen says what it is waiting for, so a few seconds of looking for the compute node is not a mystery.
+                if (_aiWarm.value != null && !warmSkipped) _aiWarm.value = AiWarm("Looking for ${n.paired.first { it.approved }.name}", 0f)
                 delay(1000); waited += 1000
             }
             val alone = keepAiReady.value || !computeNodeInReach()
@@ -1004,7 +1020,6 @@ class AppVm(private val app: Application) {
     }
 
     fun openReview(id: Long) {
-        if (BuildConfig.DEBUG) android.util.Log.i("MarginaliaDbg", "openReview($id)", Throwable())
         viewModelScope.launch {
             try {
                 val o = backend.obj("meeting.get", JSONObject().put("id", id))

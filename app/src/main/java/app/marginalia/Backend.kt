@@ -44,7 +44,7 @@ class Backend(private val io: CoroutineDispatcher = Dispatchers.Default) {
     var modelGate: (suspend () -> Unit)? = null
 
     private val readOnly = setOf(
-        "engine.state", "engine.gpu", "db.checkpoint", "meeting.audio_add", "settings.get", "settings.set", "meeting.list", "meeting.get", "meeting.live", "meeting.rename",
+        "engine.state", "engine.gpu", "engine.warm_speech", "db.checkpoint", "meeting.audio_add", "settings.get", "settings.set", "meeting.list", "meeting.get", "meeting.live", "meeting.rename",
         "meeting.delete", "meeting.set_folder", "meeting.live_folder", "meeting.jot_delete", "meeting.photo_delete", "meeting.card_delete",
         "kb.docs", "kb.doc", "folders.list", "folders.create", "folders.rename", "folders.delete",
         "nodes.list", "nodes.seen", "nodes.pair", "nodes.trust", "nodes.decide", "nodes.forget", "nodes.enable", "nodes.refresh", "nodes.network",
