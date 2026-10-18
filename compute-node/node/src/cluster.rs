@@ -84,6 +84,16 @@ impl Drop for Sent<'_> {
     }
 }
 
+/// What became of a chat job offered to peers.
+pub enum Forward {
+    /// A peer answered it, or the phone went away. Nothing is left to do.
+    Done,
+    /// No peer began, so nothing reached the phone.
+    No,
+    /// A peer began and then stopped. These words were sent on to the phone already.
+    Broke(String),
+}
+
 enum Next<T> {
     Got(T),
     /// The peer closed, failed or said nothing for [`SILENCE`].
@@ -365,10 +375,10 @@ impl Cluster {
         place::choose(job, local, &seen).into_iter().filter_map(|fp| peers.iter().find(|p| p.fp == fp).cloned()).collect()
     }
 
-    /// Runs a chat job on the first peer that takes it and relays the answer to the phone. Returns false when no peer
-    /// produced a first token, so nothing has reached the phone and the caller runs the job itself. An answer that
-    /// breaks off after it began is reported to the phone as an error, like a node that fails halfway.
-    pub async fn forward_chat(&self, peers: Vec<Peer>, r: &ChatRequest, send: &mut quinn::SendStream) -> Result<bool> {
+    /// Runs a chat job on the first peer that takes it and relays the answer to the phone. [`Forward::No`] means no peer
+    /// produced a first token, so nothing has reached the phone and the caller runs the job itself. [`Forward::Broke`] means
+    /// the peer stopped after some words were sent on, and the caller carries on from those words.
+    pub async fn forward_chat(&self, peers: Vec<Peer>, r: &ChatRequest, send: &mut quinn::SendStream) -> Result<Forward> {
         for p in peers {
             let _count = Sent::new(self, &p.fp);
             let opened = async {
@@ -385,40 +395,54 @@ impl Cluster {
                 }
             };
             let _ = psend.finish();
-            let mut began = false;
+            // The words that went on to the phone, so an answer that breaks off can be carried on from them.
+            let mut sent_on = String::new();
             loop {
+                let began = !sent_on.is_empty();
                 let ev = match next_frame::<ChatEvent, _>(&mut precv, send, &ChatEvent::Working).await {
                     Next::Got(ev) => ev,
                     Next::PhoneGone => {
                         let _ = precv.stop(0u32.into());
-                        return Ok(true);
+                        return Ok(Forward::Done);
                     }
                     Next::Lost if !began => {
                         tracing::info!("{} went quiet before it answered, trying another node", p.name);
                         self.drop_connection(&p.fp);
                         break;
                     }
-                    Next::Lost => ChatEvent::Error("The compute node that was writing the answer stopped answering.".into()),
+                    Next::Lost => {
+                        tracing::info!("{} stopped answering after {} bytes, carrying on here", p.name, sent_on.len());
+                        self.drop_connection(&p.fp);
+                        let _ = precv.stop(0u32.into());
+                        return Ok(Forward::Broke(sent_on));
+                    }
                 };
-                if let (ChatEvent::Error(why), false) = (&ev, began) {
-                    tracing::info!("{} turned a chat job away ({why}), trying another node", p.name);
-                    break;
+                if let ChatEvent::Error(why) = &ev {
+                    if !began {
+                        tracing::info!("{} turned a chat job away ({why}), trying another node", p.name);
+                        break;
+                    }
+                    tracing::info!("{} failed after {} bytes ({why}), carrying on here", p.name, sent_on.len());
+                    let _ = precv.stop(0u32.into());
+                    return Ok(Forward::Broke(sent_on));
                 }
-                began |= matches!(ev, ChatEvent::Token(_));
-                let last = matches!(ev, ChatEvent::Done { .. } | ChatEvent::Error(_));
+                if let ChatEvent::Token(t) = &ev {
+                    sent_on.push_str(t);
+                }
+                let last = matches!(ev, ChatEvent::Done { .. });
                 if wire::write_frame(send, &ev).await.is_err() {
                     // The phone went away: stop the peer from writing for nobody.
                     let _ = precv.stop(0u32.into());
-                    return Ok(true);
+                    return Ok(Forward::Done);
                 }
                 if last {
                     self.forwarded.fetch_add(1, Ordering::Relaxed);
-                    return Ok(true);
+                    return Ok(Forward::Done);
                 }
             }
             let _ = precv.stop(0u32.into());
         }
-        Ok(false)
+        Ok(Forward::No)
     }
 
     /// Like [`Cluster::forward_chat`] for search vectors.

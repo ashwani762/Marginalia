@@ -14,7 +14,7 @@ pub enum Only {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>, knock: bool, decide: Option<String>, deny: bool, transcribe: Option<PathBuf>, language: Option<String>, window: bool, prompt: Option<String>, hang_up_after: Option<f32>, only: Option<Only>) -> Result<()> {
+pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>, knock: bool, decide: Option<String>, deny: bool, transcribe: Option<PathBuf>, language: Option<String>, window: bool, prompt: Option<String>, hang_up_after: Option<f32>, only: Option<Only>, long: bool) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let id_path = dir.join("probe-identity.json");
     let id: Identity = match std::fs::read(&id_path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
@@ -96,8 +96,8 @@ pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>,
 
     let t = Instant::now();
     let req = ChatRequest {
-        messages: vec![ChatMsg { role: Role::User, content: "In two sentences, why do meeting notes help?".into() }],
-        max_tokens: 120,
+        messages: vec![ChatMsg { role: Role::User, content: if long { "Write a long story about a lighthouse keeper and the storm that changed the town." } else { "In two sentences, why do meeting notes help?" }.into() }],
+        max_tokens: if long { 300 } else { 120 },
         temperature: 0.4,
         top_p: 0.95,
         top_k: 64,

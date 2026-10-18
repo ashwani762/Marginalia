@@ -186,6 +186,30 @@ check "b forwarded at least one job" test "$(forwarded b)" -gt "$B1"
 check "c answered at least one" test "$(served c)" -gt "$C2"
 check "all 4 jobs came back with an answer" test "$(grep -l '^chat: first token' "$ROOT"/burst-*.out | wc -l)" = 4
 
+say "a peer that stops halfway: the node carries on from the words it had"
+# Two long jobs go to b: b runs the first and passes the second to c. c is stopped while it writes it.
+LONG=("$BIN" --state-dir "$ROOT/phone-b" probe "127.0.0.1:${PORT[b]}" --only chat --long)
+"${LONG[@]}" >"$ROOT/long-1.out" 2>&1 &
+J1=$!
+sleep 1
+"${LONG[@]}" >"$ROOT/long-2.out" 2>&1 &
+J2=$!
+if eq_soon 30 1 field c '.running_jobs'; then
+  sleep 3
+  kill -9 "$PID_c" 2>/dev/null
+  ok "c was stopped while it wrote a job it got from b"
+else
+  bad "b never passed a job to c"
+fi
+wait "$J1" "$J2"
+check "both long jobs came back with an answer" test "$(grep -l '^chat: first token' "$ROOT"/long-*.out | wc -l)" = 2
+check "no job ended in an error" test "$(grep -il 'error' "$ROOT"/long-*.out | wc -l)" = 0
+if sed 's/\x1b\[[0-9;]*m//g' "$ROOT/b.log" | grep -q "carrying on here"; then ok "b carried the answer on itself"; else bad "b did not say it carried the answer on"; fi
+# c comes back for the next section.
+start c "$ROOT/models-chat"
+wait_for 240 "$ROOT/c.log" "ready on port" && ok "c is back" || bad "c did not start again"
+eq_soon 30 2 field b '[.peers[] | select(.reachable)] | length' && ok "b reaches both peers again" || bad "b does not reach c again"
+
 say "a peer that stops answering: the job runs on the node that got it"
 B2=$(served b)
 FWD=$(forwarded b)

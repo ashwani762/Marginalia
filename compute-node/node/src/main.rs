@@ -151,6 +151,9 @@ enum Cmd {
         /// Send only this job (status, embed or chat) instead of all of them.
         #[arg(long, value_enum)]
         only: Option<probe::Only>,
+        /// Ask the chat job for a long answer (about 300 tokens), to have time to stop a node while it writes.
+        #[arg(long)]
+        long: bool,
     },
 }
 
@@ -281,7 +284,7 @@ async fn main() -> Result<()> {
         Cmd::Approve { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "approve", "who": who})).await?),
         Cmd::Deny { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "deny", "who": who})).await?),
         Cmd::Revoke { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "revoke", "who": who})).await?),
-        Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, window, prompt, hang_up_after, only } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *window, prompt.clone(), *hang_up_after, *only).await?,
+        Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, window, prompt, hang_up_after, only, long } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *window, prompt.clone(), *hang_up_after, *only, *long).await?,
         Cmd::Run { port, name, models, chat_model, chat, embed_model, speech_model, no_speech, cpu, ctx, lock, window_max_seconds } => {
             let store = Arc::new(state::Store::open(dir.clone())?);
             let identity = store.identity()?;

@@ -166,9 +166,13 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
 - A node that dies halfway through an answer: the words already shown stay, the phone asks the next best node (or itself) to carry on
   and joins the text without repeating the last sentence. Checked by killing the answering node: the answer finished on the other node.
 - A node that passes a job to a peer which then dies: before the first word it tries the next peer and then runs the job itself.
-  After the first word it tells the phone the answer stopped, and the phone carries on as above. Checked with a fast third node
-  that was killed while it wrote an answer for the second node: the answer finished on the second node.
-  Not done: the node that forwarded could finish the answer itself, without the phone marking it as failed for a while.
+  After the first word the node carries on from the words it already sent on (`Forward::Broke` in `cluster.rs`, `resume.rs` in the
+  proto crate holds the request and the seam filter that the phone uses too), so the phone sees one answer and does not mark the node
+  as failed. Checked by `tests/cluster.sh` (a peer is killed while it writes a forwarded answer, the node logs that it carried on and the
+  job comes back whole) and earlier on the real phone with a third node killed mid-answer. If the node itself cannot carry on
+  (paused or no chat model) the phone gets the "stopped answering" error and carries on as in the case above.
+- Meetings screen: one pill for each allowed compute node, running first, then paused, then not reachable, at most 5, scrolling
+  sideways (`nodePills`). Settings lists every compute node. Checked on the real phone with four nodes.
 
 ## Cluster slice
 
@@ -176,7 +180,7 @@ Peers, shared phone records and placing chat and search jobs (design in `DESIGN.
 Standby mode, roles, mDNS between nodes, member lists, work stealing and batch requests are not built.
 
 Verified on Linux on one machine, with the debug build, three nodes with their own ports (47701 to 47703), state folders and
-`--cpu --lock`, by `compute-node/node/tests/cluster.sh` (about 2 minutes, all checks passed on the last run):
+`--cpu --lock`, by `compute-node/node/tests/cluster.sh` (a few minutes, all checks passed on the last run):
 
 - `join` between a and b and between c and b (a is a chain, a to b to c). `peers` and `status` list the peers, `peers.json` has mode 0600,
   a wrong code is refused, joining a peer again is refused, a peer is not counted as a phone.

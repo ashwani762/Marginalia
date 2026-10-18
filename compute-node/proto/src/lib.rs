@@ -7,10 +7,12 @@
 pub mod client;
 pub mod msg;
 pub mod pair;
+pub mod resume;
 pub mod tls;
 pub mod wire;
 
 pub use msg::*;
+pub use resume::SeamFilter;
 
 /// Bumped when the messages change in a way old peers cannot read. It is part of the TLS
 /// handshake, so a phone and a node on different versions refuse each other cleanly.

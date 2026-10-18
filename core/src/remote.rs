@@ -54,77 +54,12 @@ pub fn continuation(messages: &[crate::engine::llm::ChatMessage], partial: &str)
     let mut m = messages.to_vec();
     m.push(crate::engine::llm::ChatMessage::assistant(partial.to_string()));
     m.push(crate::engine::llm::ChatMessage::user(
-        "Your answer was cut off. Carry on from exactly where it stopped, without repeating anything and without a new introduction.",
+        marginalia_proto::resume::CONTINUE_PROMPT,
     ));
     m
 }
 
-/// Joins a resumed answer onto the words already shown. A model asked to carry on tends to say the last
-/// sentence again, so the first words of the new text are held back until it is clear whether they repeat
-/// the end of what was shown, and any repeat is dropped.
-pub struct SeamFilter {
-    tail: String,
-    buf: String,
-    released: bool,
-}
-
-impl SeamFilter {
-    const HOLD: usize = 100;
-    const MIN_OVERLAP: usize = 12;
-
-    pub fn new(shown: &str) -> SeamFilter {
-        let start = shown.char_indices().rev().nth(239).map(|(i, _)| i).unwrap_or(0);
-        SeamFilter { tail: shown[start..].to_string(), buf: String::new(), released: false }
-    }
-
-    pub fn push(&mut self, text: &str, emit: &mut dyn FnMut(&str)) {
-        if self.released {
-            emit(text);
-            return;
-        }
-        self.buf.push_str(text);
-        if self.buf.chars().count() >= Self::HOLD {
-            self.release(emit);
-        }
-    }
-
-    pub fn finish(&mut self, emit: &mut dyn FnMut(&str)) {
-        if !self.released {
-            self.release(emit);
-        }
-    }
-
-    fn release(&mut self, emit: &mut dyn FnMut(&str)) {
-        self.released = true;
-        let buf = std::mem::take(&mut self.buf);
-        let mut rest = buf.as_str();
-        // The longest end of what was shown that the new text starts with.
-        let starts: Vec<usize> = self.tail.char_indices().map(|(i, _)| i).collect();
-        for &i in &starts {
-            let suffix = &self.tail[i..];
-            if suffix.chars().count() < Self::MIN_OVERLAP {
-                break;
-            }
-            if rest.starts_with(suffix) {
-                rest = &rest[suffix.len()..];
-                break;
-            }
-        }
-        if rest.is_empty() {
-            return;
-        }
-        // The shown text may stop in the middle of a word or right after a sentence: keep words apart.
-        let last = self.tail.chars().last();
-        let first = rest.chars().next();
-        if let (Some(l), Some(f)) = (last, first) {
-            let needs_space = !l.is_whitespace() && !f.is_whitespace() && f.is_alphanumeric() && (".!?:;,)\"".contains(l) || (l.is_alphanumeric() && f.is_uppercase()));
-            if needs_space {
-                emit(" ");
-            }
-        }
-        emit(rest);
-    }
-}
+pub use marginalia_proto::SeamFilter;
 
 /// The node sends something every two seconds while it works. Silence for this long means the link is gone.
 const STALL: Duration = Duration::from_secs(6);
@@ -642,7 +577,6 @@ impl Remote {
         false
     }
 
-    /// Looks at every paired node in the background (rate limited).
     /// Called each time the screen asks for the list: nodes that answer are asked for a fresh status, at most every 4 seconds,
     /// so a pause or a change of models shows within a few seconds. Nodes that do not answer are left to their announcement and
     /// the slow check, so a stopped node is not tried again every few seconds.
@@ -668,6 +602,7 @@ impl Remote {
         }
     }
 
+    /// Looks at every paired node in the background (rate limited).
     fn kick(self: &Arc<Self>) {
         let now = self.started.elapsed().as_millis() as u64;
         let last = self.last_kick.load(Ordering::Relaxed);

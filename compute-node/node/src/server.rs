@@ -296,30 +296,42 @@ fn try_pair(sh: &Shared, conn: &quinn::Connection, fp: &str, name: String, proof
 async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut quinn::SendStream, client: crate::state::Client, from_peer: bool) -> Result<()> {
     // A job from a phone goes to a peer when this node is clearly the worse choice. A job from a peer stays here,
     // so a job is never passed on twice.
+    // The words a peer wrote before it stopped. This node carries on from them, so the phone sees one answer.
+    let mut resume: Option<String> = None;
     if !from_peer {
         let local = Node { load: sh.in_flight(), paused: sh.paused.load(Ordering::Relaxed), speed: sh.host.caps.lock().chat_tok_s, serves: sh.host.llm.is_some() };
         let order = sh.cluster.plan(Job::Chat { max_tokens: r.max_tokens }, &local);
-        if !order.is_empty() && sh.cluster.forward_chat(order, &r, send).await? {
-            return Ok(());
+        if !order.is_empty() {
+            match sh.cluster.forward_chat(order, &r, send).await? {
+                crate::cluster::Forward::Done => return Ok(()),
+                crate::cluster::Forward::No => {}
+                crate::cluster::Forward::Broke(words) => resume = Some(words),
+            }
         }
     }
+    // Words were already sent on, so a refusal now is the end of an answer and not a job turned away.
+    let cut_off = || ChatEvent::Error("The compute node that was writing the answer stopped answering.".into());
     if sh.paused.load(Ordering::Relaxed) {
-        wire::write_frame(send, &ChatEvent::Error("paused".into())).await?;
+        wire::write_frame(send, &if resume.is_some() { cut_off() } else { ChatEvent::Error("paused".into()) }).await?;
         return Ok(());
     }
     let Some(llm) = sh.host.llm.clone() else {
-        wire::write_frame(send, &ChatEvent::Error("This compute node does not serve chat.".into())).await?;
+        wire::write_frame(send, &if resume.is_some() { cut_off() } else { ChatEvent::Error("This compute node does not serve chat.".into()) }).await?;
         return Ok(());
     };
     let jobs = sh.host.chat_jobs.clone();
     let ahead = jobs.fetch_add(1, Ordering::Relaxed);
-    if ahead > 0 {
+    if ahead > 0 && resume.is_none() {
         wire::write_frame(send, &ChatEvent::Queued { ahead }).await?;
     }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ChatEvent>();
     let cancel = Arc::new(AtomicBool::new(false));
-    let messages = r
-        .messages
+    let asked = match &resume {
+        Some(words) => marginalia_proto::resume::continuation(&r.messages, words),
+        None => r.messages.clone(),
+    };
+    let mut seam = resume.as_deref().map(marginalia_proto::SeamFilter::new);
+    let messages = asked
         .into_iter()
         .map(|m| engine::ChatMessage {
             role: match m.role {
@@ -365,7 +377,24 @@ async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut qui
             _ = beat.tick() => ChatEvent::Working,
         };
         let last = matches!(ev, ChatEvent::Done { .. } | ChatEvent::Error(_));
-        if wire::write_frame(send, &ev).await.is_err() {
+        // A carried-on answer starts with words the peer may have written already. The seam filter drops the repeat.
+        let mut frames: Vec<ChatEvent> = Vec::new();
+        match (&mut seam, ev) {
+            (Some(f), ChatEvent::Token(t)) => f.push(&t, &mut |w| frames.push(ChatEvent::Token(w.to_string()))),
+            (Some(f), end) if last => {
+                f.finish(&mut |w| frames.push(ChatEvent::Token(w.to_string())));
+                frames.push(end);
+            }
+            (_, ev) => frames.push(ev),
+        }
+        let mut gone = false;
+        for frame in &frames {
+            if wire::write_frame(send, frame).await.is_err() {
+                gone = true;
+                break;
+            }
+        }
+        if gone {
             // The phone went away or gave up: stop generating for nobody.
             cancel.store(true, Ordering::Relaxed);
             break;
