@@ -48,6 +48,25 @@ pub struct Phone {
     pub last_seen: Option<u64>,
 }
 
+/// Another compute node this node works together with (joined with `marginalia-node join`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Peer {
+    pub name: String,
+    pub addr: String,
+    /// Answered the last time this node looked.
+    pub reachable: bool,
+    pub paused: bool,
+    /// Jobs running or waiting on it.
+    pub load: u64,
+}
+
+/// A compute node seen on the network that is not a peer yet.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Nearby {
+    pub name: String,
+    pub addr: Option<String>,
+}
+
 /// A phone that asked to join and has not been answered.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Waiting {
@@ -77,6 +96,8 @@ pub struct Info {
     pub failed: u64,
     pub phones: Vec<Phone>,
     pub asking: Vec<Waiting>,
+    pub peers: Vec<Peer>,
+    pub nearby: Vec<Nearby>,
     pub addresses: Vec<String>,
 }
 
@@ -148,6 +169,24 @@ pub fn parse(status: &Value, stats: Option<&Value>) -> Info {
         .flatten()
         .map(|w| Waiting { id: w["id"].as_str().unwrap_or("").to_string(), name: w["name"].as_str().unwrap_or("A phone").to_string(), waited_s: n(&w["waited_s"]) })
         .collect();
+    let peers = status["peers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| Peer {
+            name: text(&p["name"]).unwrap_or_else(|| "A compute node".into()),
+            addr: p["addr"].as_str().unwrap_or("").to_string(),
+            reachable: p["reachable"].as_bool().unwrap_or(false),
+            paused: p["paused"].as_bool().unwrap_or(false),
+            load: n(&p["load"]),
+        })
+        .collect();
+    let nearby = status["nearby"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| Nearby { name: text(&p["name"]).unwrap_or_else(|| "A compute node".into()), addr: text(&p["addr"]) })
+        .collect();
     Info {
         name: text(&status["name"]).unwrap_or_else(|| "node".into()),
         paused: status["paused"].as_bool().unwrap_or(false),
@@ -167,12 +206,27 @@ pub fn parse(status: &Value, stats: Option<&Value>) -> Info {
         failed: jobs("chat", "errors") + jobs("search", "errors") + jobs("speech", "errors"),
         phones,
         asking,
+        peers,
+        nearby,
         addresses: status["addresses"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect(),
     }
 }
 
 fn plural(count: u64, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// What a peer is doing, for the panel: "Not answering", "Paused", "Idle" or "Working on 2 jobs".
+pub fn peer_line(p: &Peer) -> String {
+    if !p.reachable {
+        "Not answering".into()
+    } else if p.paused {
+        "Paused".into()
+    } else if p.load == 0 {
+        "Idle".into()
+    } else {
+        format!("Working on {}", plural(p.load, "job", "jobs"))
+    }
 }
 
 /// "5 chat, 3 search, seen 3 min ago" for one phone in the panel. `now` is seconds since 1970.
@@ -338,7 +392,10 @@ pub fn tooltip(v: &View) -> String {
     match &v.poll {
         Poll::Down if v.starting => "Marginalia node: starting".into(),
         Poll::Down => "Marginalia node: not running".into(),
-        Poll::Up(i) => format!("{}: {}, {} served, {}", i.name, state_word(i), plural(i.served, "job", "jobs"), plural(i.phones.len() as u64, "phone", "phones")),
+        Poll::Up(i) => {
+            let peers = if i.peers.is_empty() { String::new() } else { format!(", {}", plural(i.peers.len() as u64, "peer", "peers")) };
+            format!("{}: {}, {} served, {}{peers}", i.name, state_word(i), plural(i.served, "job", "jobs"), plural(i.phones.len() as u64, "phone", "phones"))
+        }
     }
 }
 
@@ -493,6 +550,30 @@ mod tests {
         paused.paused = true;
         assert_eq!(View { poll: Poll::Up(Box::new(paused)), starting: false }.state(), State::Paused);
         assert_eq!(View { poll: Poll::Down, starting: false }.state(), State::Down);
+    }
+
+    #[test]
+    fn peers_and_nearby_nodes_are_read_from_the_status() {
+        let mut st = status();
+        st["peers"] = json!([
+            {"name": "Den", "id": "aaaaaaaaaaaaaaaa", "addr": "192.168.1.5:47615", "reachable": true, "load": 2, "paused": false},
+            {"name": "Attic", "id": "bbbbbbbbbbbbbbbb", "addr": "192.168.1.6:47615", "reachable": false, "load": null, "paused": null},
+            {"name": "Loft", "addr": "192.168.1.8:47615", "reachable": true, "load": 0, "paused": true},
+        ]);
+        st["nearby"] = json!([{"name": "Kitchen node", "id": "ca2d5dee00112233", "addr": "192.168.1.7:47621", "paused": false}, {"name": "", "addr": null}]);
+        let i = parse(&st, None);
+        assert_eq!(i.peers.len(), 3);
+        assert_eq!(i.peers.iter().map(peer_line).collect::<Vec<_>>(), ["Working on 2 jobs", "Not answering", "Paused"]);
+        assert_eq!(model_peer_idle(), "Idle");
+        assert_eq!(i.nearby, vec![Nearby { name: "Kitchen node".into(), addr: Some("192.168.1.7:47621".into()) }, Nearby { name: "A compute node".into(), addr: None }]);
+        let v = View { poll: Poll::Up(Box::new(i)), starting: false };
+        assert_eq!(tooltip(&v), "falcon: busy, 12 jobs served, 2 phones, 3 peers");
+        // An old node that says nothing about peers shows none.
+        assert!(parse(&status(), None).peers.is_empty() && parse(&status(), None).nearby.is_empty());
+    }
+
+    fn model_peer_idle() -> String {
+        peer_line(&Peer { name: "x".into(), addr: String::new(), reachable: true, paused: false, load: 0 })
     }
 
     #[test]

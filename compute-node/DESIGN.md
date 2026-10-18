@@ -32,7 +32,7 @@ designed, not built").
   connects to the saved fingerprint). A peer is known to the request handler like a paired phone, plus the right
   to trade records and to leave.
 - `marginalia-node peers` lists them, `status` shows them, `unjoin` forgets one (and tells it, if it answers).
-- A node is not found by mDNS and not told about other nodes by its peers yet. Joining is always by address.
+- Nodes see each other on the network through mDNS and list the ones they have not joined (`peers`, `status`, the tray window). Seeing is all it does, joining still needs a code from the other node. `join` takes the name or id of a node that was seen as well as an address. Peers do not tell each other about other nodes yet.
   Peers are not transitive for jobs, only for records (a record reaches a peer's peers because a change is sent on).
   A peer that moved gets its new address when it next contacts this node.
 
@@ -77,7 +77,7 @@ designed, not built").
 
 ### Still designed, not built
 
-- Nodes finding each other with mDNS, and peers handing each other their member lists (another subnet, a VPN).
+- Peers handing each other their member lists (another subnet, a VPN), and joining nodes that were seen without typing a code on both sides.
 - Per node settings (priority, role) as records, and revoking a node as a record. Leaving is `unjoin` on each side.
 - Idle nodes taking waiting work from a busy peer (work stealing), and fair sharing between phones.
 - A batch request (`ChatBatch`, `EmbedBatch`) that runs the sections of a long write-up in parallel on several nodes.

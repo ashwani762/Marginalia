@@ -49,6 +49,8 @@ pub struct Shared {
     pub paused: AtomicBool,
     /// The network announcement, set once it is up. Pausing and resuming announce again so phones see it at once.
     pub announce: std::sync::OnceLock<crate::discovery::Advertiser>,
+    /// Other nodes seen on the network, for showing in `peers`, `status` and the tray. Nothing is joined from this.
+    pub nearby: Arc<crate::discovery::NearbyList>,
     /// Woken by the `shutdown` command to make the node stop.
     pub stop: tokio::sync::Notify,
 }

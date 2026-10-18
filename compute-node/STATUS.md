@@ -155,7 +155,7 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
      in under 1.5 s, start green in under 6 s (the node loads its models first). The tray shows amber for a moment while a stopping node
      finishes its jobs, then red.
 2. Later: take Windows out of beta (tray clicks, a reboot, a real phone). The core features work today on Linux.
-3. Cluster, the rest: peers found by mDNS, member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
+3. Cluster, the rest: member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
 4. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.
 5. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).
 
@@ -171,13 +171,17 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
   as failed. Checked by `tests/cluster.sh` (a peer is killed while it writes a forwarded answer, the node logs that it carried on and the
   job comes back whole) and earlier on the real phone with a third node killed mid-answer. If the node itself cannot carry on
   (paused or no chat model) the phone gets the "stopped answering" error and carries on as in the case above.
+- Nodes see each other through mDNS (`Advertiser::watch` in `discovery.rs`). `peers` and `status` list the nodes seen and not joined,
+  `join` takes their name, and the tray window has a "Peers" card (green idle or working, amber paused, red not answering) and a
+  "Seen on this network" list. Checked with three nodes on one machine and real tray clicks: nodes find each other within seconds, join by
+  name works, a node that stops leaves the list at once and its peer shows "not answering".
 - Meetings screen: one pill for each allowed compute node, running first, then paused, then not reachable, at most 5, scrolling
   sideways (`nodePills`). Settings lists every compute node. Checked on the real phone with four nodes.
 
 ## Cluster slice
 
 Peers, shared phone records and placing chat and search jobs (design in `DESIGN.md`, use in `README.md`, "Working together").
-Standby mode, roles, mDNS between nodes, member lists, work stealing and batch requests are not built.
+Standby mode, roles, member lists, work stealing and batch requests are not built.
 
 Verified on Linux on one machine, with the debug build, three nodes with their own ports (47701 to 47703), state folders and
 `--cpu --lock`, by `compute-node/node/tests/cluster.sh` (a few minutes, all checks passed on the last run):

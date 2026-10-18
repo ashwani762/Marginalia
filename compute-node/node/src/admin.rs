@@ -42,12 +42,12 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                         "speech": caps.transcribe, "speech_x": caps.transcribe_x, "window_max_s": caps.window_max_s,
                         "blocked": sh.store.blocked_list().iter().map(|b| json!({"name": b.name, "id": &b.fp[..16], "at": b.at})).collect::<Vec<_>>(),
                         "waiting": sh.pending_list().iter().map(|p| json!({"id": p.id, "name": p.name, "waited_s": p.waited_s})).collect::<Vec<_>>(),
-                        "peers": sh.cluster.snapshot(), "forwarded": sh.cluster.forwarded.load(Ordering::Relaxed),
+                        "peers": sh.cluster.snapshot(), "nearby": nearby_not_joined(&sh), "forwarded": sh.cluster.forwarded.load(Ordering::Relaxed),
                         "clients": sh.store.list().iter().map(|c| json!({"name": c.name, "fp": &c.fp[..16], "paired_at": c.paired_at})).collect::<Vec<_>>(),
                     })
                 }
-                "peers" => json!({"peers": sh.cluster.snapshot()}),
-                "join" => match sh.cluster.join(req["addr"].as_str().unwrap_or(""), req["code"].as_str().unwrap_or("")).await {
+                "peers" => json!({"peers": sh.cluster.snapshot(), "nearby": nearby_not_joined(&sh)}),
+                "join" => match sh.cluster.join(&resolve_nearby(&sh, req["addr"].as_str().unwrap_or("")), req["code"].as_str().unwrap_or("")).await {
                     Ok(p) => json!({"joined": p.name, "id": &p.fp[..16], "addr": p.addr}),
                     Err(e) => json!({"error": format!("{e:#}")}),
                 },
@@ -142,4 +142,20 @@ pub async fn ask(port: u16, cmd: Value) -> Result<Value> {
     let mut line = String::new();
     BufReader::new(sock).read_line(&mut line).await?;
     Ok(serde_json::from_str(&line)?)
+}
+
+/// Nodes seen on the network that are not peers yet, as the control channel shows them.
+fn nearby_not_joined(sh: &Shared) -> Vec<serde_json::Value> {
+    let joined: Vec<String> = sh.cluster.peers.list().iter().map(|p| p.fp.clone()).collect();
+    sh.nearby
+        .list()
+        .into_iter()
+        .filter(|n| !joined.iter().any(|fp| fp.starts_with(&n.id)))
+        .map(|n| json!({"name": n.name, "id": n.id, "addr": n.address(), "paused": n.paused}))
+        .collect()
+}
+
+/// `join "Kitchen node" CODE` works when that node was seen on the network. Anything else is passed on as an address.
+fn resolve_nearby(sh: &Shared, who: &str) -> String {
+    sh.nearby.find(who).and_then(|n| n.address()).unwrap_or_else(|| who.to_string())
 }

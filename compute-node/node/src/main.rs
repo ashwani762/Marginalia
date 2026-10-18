@@ -195,13 +195,16 @@ async fn terminated() {
     std::future::pending::<()>().await
 }
 
-/// What `marginalia-node peers` prints.
+/// What `marginalia-node peers` prints: the peers, then the nodes seen on the network that are not peers yet.
 fn peers_text(r: &serde_json::Value) -> String {
     let list = r["peers"].as_array().cloned().unwrap_or_default();
+    let nearby = r["nearby"].as_array().cloned().unwrap_or_default();
+    let mut out = String::new();
     if list.is_empty() {
-        return "No peers. Run `marginalia-node pair` on another compute node, then `marginalia-node join ADDRESS CODE` here.\n".into();
+        out += "No peers yet.\n";
+    } else {
+        out += &format!("{} {}\n", list.len(), if list.len() == 1 { "peer" } else { "peers" });
     }
-    let mut out = format!("{} {}\n", list.len(), if list.len() == 1 { "peer" } else { "peers" });
     for p in &list {
         let what: Vec<&str> = [("chat", "chat"), ("embed", "search"), ("speech", "speech")].iter().filter(|(k, _)| p[*k].as_bool() == Some(true)).map(|(_, n)| *n).collect();
         let state = if p["reachable"].as_bool() == Some(true) {
@@ -211,6 +214,16 @@ fn peers_text(r: &serde_json::Value) -> String {
             "not answering".to_string()
         };
         out += &format!("  {} ({}) at {}: {}\n", p["name"].as_str().unwrap_or(""), p["id"].as_str().unwrap_or(""), p["addr"].as_str().unwrap_or(""), state);
+    }
+    if nearby.is_empty() {
+        if list.is_empty() {
+            out += "No other nodes were seen on this network. Run `marginalia-node pair` on another compute node, then `marginalia-node join ADDRESS CODE` here.\n";
+        }
+        return out;
+    }
+    out += &format!("{} seen on this network, not joined. Run `marginalia-node pair` on one of them, then `marginalia-node join NAME CODE` here.\n", nearby.len());
+    for n in &nearby {
+        out += &format!("  {} ({}) at {}{}\n", n["name"].as_str().unwrap_or(""), n["id"].as_str().unwrap_or(""), n["addr"].as_str().unwrap_or("an unknown address"), if n["paused"].as_bool() == Some(true) { ", paused" } else { "" });
     }
     out
 }
@@ -317,10 +330,11 @@ async fn main() -> Result<()> {
             let host = Arc::new(tokio::task::spawn_blocking(move || host::Host::start(&opts)).await??);
             let peers = peers::Peers::open(&dir)?;
             let cluster = cluster::Cluster::new(store.clone(), peers, identity.clone(), name.clone(), *port)?;
-            let shared = Arc::new(server::Shared { cluster: cluster.clone(), store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), announce: Default::default(), stop: Default::default() });
+            let shared = Arc::new(server::Shared { cluster: cluster.clone(), store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), announce: Default::default(), nearby: Default::default(), stop: Default::default() });
             let ep = server::endpoint(&shared, *port)?;
             match discovery::advertise(&name, *port, &identity.fingerprint()) {
                 Ok(a) => {
+                    a.watch(shared.nearby.clone());
                     let _ = shared.announce.set(a);
                     tracing::info!("announcing {name} on the local network");
                 }
@@ -378,4 +392,36 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod peers_text_tests {
+    use super::peers_text;
+    use serde_json::json;
+
+    #[test]
+    fn nothing_known_says_how_to_join() {
+        let t = peers_text(&json!({"peers": [], "nearby": []}));
+        assert!(t.starts_with("No peers yet.") && t.contains("join ADDRESS CODE"), "{t}");
+    }
+
+    #[test]
+    fn nodes_seen_on_the_network_are_listed_after_the_peers() {
+        let t = peers_text(&json!({
+            "peers": [{"name": "Den", "id": "aaaaaaaaaaaaaaaa", "addr": "192.168.1.5:47615", "reachable": true, "load": 1, "paused": false, "chat": true, "embed": true, "speech": false}],
+            "nearby": [{"name": "Kitchen node", "id": "ca2d5dee00112233", "addr": "192.168.1.7:47621", "paused": true}],
+        }));
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines[0], "1 peer");
+        assert!(lines[1].contains("Den") && lines[1].contains("1 job in progress"), "{t}");
+        assert!(lines[2].starts_with("1 seen on this network, not joined"), "{t}");
+        assert_eq!(lines[3], "  Kitchen node (ca2d5dee00112233) at 192.168.1.7:47621, paused");
+    }
+
+    #[test]
+    fn the_wording_has_no_semicolons_or_em_dashes() {
+        let t = peers_text(&json!({"peers": [], "nearby": [{"name": "A", "id": "x", "addr": null, "paused": false}]}));
+        assert!(!t.contains(';') && !t.contains('—'), "{t}");
+        assert!(t.contains("an unknown address"));
+    }
 }

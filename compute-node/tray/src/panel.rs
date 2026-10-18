@@ -23,6 +23,7 @@ const GREEN: Color32 = Color32::from_rgb(70, 200, 105);
 const AMBER: Color32 = Color32::from_rgb(240, 165, 30);
 const BLUE: Color32 = Color32::from_rgb(96, 156, 255);
 const VIOLET: Color32 = Color32::from_rgb(170, 125, 230);
+const GREY: Color32 = Color32::from_rgb(130, 134, 142);
 const RED: Color32 = Color32::from_rgb(240, 100, 95);
 const GREEN_BTN: Color32 = Color32::from_rgb(38, 120, 66);
 const RED_BTN: Color32 = Color32::from_rgb(110, 42, 44);
@@ -402,6 +403,50 @@ impl Panel {
         });
     }
 
+    /// Other compute nodes this node works together with, and the ones seen on the network that it has not joined.
+    /// Nothing is shown when there are none, so a node that works alone stays as quiet as before.
+    fn peers(&self, ui: &mut Ui, i: &Info) {
+        if i.peers.is_empty() && i.nearby.is_empty() {
+            return;
+        }
+        card(ui, |ui| {
+            if !i.peers.is_empty() {
+                heading(ui, &format!("PEERS ({})", i.peers.len()));
+                for p in &i.peers {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        dot(ui, if !p.reachable { RED } else if p.paused { AMBER } else { GREEN }, 4.0);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(dim(model::peer_line(p)));
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| truncated(ui, RichText::new(&p.name).size(13.0).strong().color(TEXT)));
+                        });
+                    });
+                    if !p.addr.is_empty() {
+                        ui.label(RichText::new(&p.addr).font(FontId::monospace(11.0)).color(DIM));
+                    }
+                }
+            }
+            if !i.nearby.is_empty() {
+                if !i.peers.is_empty() {
+                    ui.add_space(6.0);
+                }
+                heading(ui, &format!("SEEN ON THIS NETWORK ({})", i.nearby.len()));
+                for n in &i.nearby {
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        dot(ui, GREY, 4.0);
+                        truncated(ui, RichText::new(&n.name).size(13.0).strong().color(TEXT));
+                    });
+                    if let Some(a) = &n.addr {
+                        ui.label(RichText::new(a).font(FontId::monospace(11.0)).color(DIM));
+                    }
+                }
+                ui.add_space(2.0);
+                ui.label(dim("Not joined yet. Run marginalia-node pair on one of them, then marginalia-node join NAME CODE here."));
+            }
+        });
+    }
+
     fn addresses(&self, ui: &mut Ui, i: &Info) {
         card(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
@@ -572,6 +617,7 @@ impl eframe::App for Panel {
                             self.speed(ui, i);
                             self.activity(ui, i);
                             self.phones(ui, &i.phones);
+                            self.peers(ui, i);
                             self.addresses(ui, i);
                         });
                     });
