@@ -145,21 +145,30 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
 
 ## Next steps (in order)
 
-1. Tomorrow (2026-10-18): the phone and the tray must show what state a compute node is in.
-   - Today a node paused by hand (`marginalia-node pause` or the tray) still answers status, so the phone shows it green and then
-     wastes a try on it (the node answers "paused" to the job). The tray already turns orange when paused, the phone has no paused field.
-   - Phone: pass `paused` from the status reply through `nodes.list` (`core/src/remote.rs`, `HomeComputer` in `Model.kt`). Dot and
-     words in the Meetings chip, the banner and Settings: green running, yellow paused ("Paused on the node"), red stopped or not reachable.
-     A paused node is not offered jobs, so failover does not spend a try on it. Keep the mapping a plain function with unit tests.
-   - Node: announce stop and start (mDNS goodbye and announce) so the phone changes colour within a second and not at the next
-     5 second look. Check `marginalia-node stop` followed by `run` shows red then green.
-   - Tray icon: running green, busy, paused orange (exists), stopped or node unreachable red (check what `tray/src/model.rs` shows when the
-     node does not answer), locked. One icon per state with a tooltip that says it.
-   - Check on the real phone: pause from the tray with a real click, watch the dot turn yellow, stop and watch it turn red, start and watch green.
+1. Done (2026-10-18): the phone and the tray show what state a compute node is in.
+   - Phone: `nodes.list` carries `paused`. The dot and words are green running, yellow "Paused on the node", red stopped or not reachable,
+     in the Meetings chip and in Settings (`nodeChip`, `HomeComputer.light`, unit tested). A paused node is not offered jobs.
+   - Node: pausing, resuming and stopping are announced on the network (`paused=1` in the announcement, a goodbye on stop), the phone
+     reports a goodbye with `nodes.gone`, and `nodes.list` asks nodes that answer for a fresh status at most every 4 seconds.
+   - Tray: icons running green, busy blue, paused amber, locked violet, not running red, with the state in the tooltip.
+   - Checked on the real phone and the real tray with real clicks: pause turns the chip yellow in under 1.5 s, resume green, stop red
+     in under 1.5 s, start green in under 6 s (the node loads its models first). The tray shows amber for a moment while a stopping node
+     finishes its jobs, then red.
 2. Later: take Windows out of beta (tray clicks, a reboot, a real phone). The core features work today on Linux.
 3. Cluster, the rest: peers found by mDNS, member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
 4. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.
 5. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).
+
+## Several nodes and failures (checked on a real phone, 2026-10-18)
+
+- The phone looks at every paired node and keeps a connection to each one, so Settings shows each node with its own light and speed.
+  A chat or search job goes to one node, the one with the shortest expected wait, not to all of them.
+- A node that dies halfway through an answer: the words already shown stay, the phone asks the next best node (or itself) to carry on
+  and joins the text without repeating the last sentence. Checked by killing the answering node: the answer finished on the other node.
+- A node that passes a job to a peer which then dies: before the first word it tries the next peer and then runs the job itself.
+  After the first word it tells the phone the answer stopped, and the phone carries on as above. Checked with a fast third node
+  that was killed while it wrote an answer for the second node: the answer finished on the second node.
+  Not done: the node that forwarded could finish the answer itself, without the phone marking it as failed for a while.
 
 ## Cluster slice
 
