@@ -85,7 +85,15 @@ impl Core {
     }
 
     pub(super) fn answer(&self, turn: u64, question: String, scope: Scope, folder: Option<i64>, history: Vec<(String, String)>, cancel: Arc<AtomicBool>) {
-        let hits = self.kb.search_in(&question, 6, scope, folder).unwrap_or_default();
+        // A search that fails (the search model could not read the question) is not the same as nothing relevant, and the
+        // person is told which it was instead of getting "no relevant passages".
+        let (hits, search_error) = match self.kb.search_in(&question, 6, scope, folder) {
+            Ok(h) => (h, None),
+            Err(e) => {
+                tracing::warn!("search for an answer failed: {e:#}");
+                (Vec::new(), Some(format!("{e:#}")))
+            }
+        };
         let sources: Vec<Value> = hits.iter().enumerate().map(|(i, h)| hit_json(i, h)).collect();
         self.emit(json!({"type": "chat", "turn": turn, "state": "generating", "text": "", "sources": sources}));
 
@@ -94,7 +102,10 @@ impl Core {
         let passage_budget = budget_chars * 6 / 10;
         let history_budget = budget_chars * 25 / 100;
         let passages = if hits.is_empty() {
-            "(no relevant passages found)".to_string()
+            match &search_error {
+                Some(_) => "(the search could not run, so no passages are available)".to_string(),
+                None => "(no relevant passages found)".to_string(),
+            }
         } else {
             let per = (passage_budget / hits.len().max(1)).clamp(300, 2200);
             hits.iter()

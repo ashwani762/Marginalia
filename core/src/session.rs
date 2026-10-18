@@ -617,6 +617,12 @@ impl Core {
             "meeting.list" => Ok(Value::Array({ let f = self.kb.store.meeting_folders().unwrap_or_default(); self.kb.store.list_meetings()?.iter().map(|m| meeting_json(m, f.get(&m.id).copied())).collect() })),
             "meeting.get" => self.meeting_get(i("id")),
             "meeting.start" => self.meeting_start(opt_folder(args)),
+            "engine.warm_speech" => {
+                if let Some(w) = self.engine.whisper() {
+                    w.warm();
+                }
+                Ok(json!({}))
+            }
             "engine.gpu" => {
                 self.llm_on_gpu.store(args.get("gpu").and_then(Value::as_bool).unwrap_or(false), Ordering::Relaxed);
                 Ok(json!({}))

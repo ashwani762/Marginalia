@@ -63,6 +63,8 @@ enum Job {
     /// Transcribe a whole buffer (voice memo / audio file) and reply with all segments.
     Batch { pcm: Vec<f32>, reply: Sender<Result<Vec<Utterance>>> },
     SetLanguage(String),
+    /// Run the model once the way live captions do, so the first caption of a meeting is not the slow one.
+    Warm { reply: Sender<()> },
     Shutdown,
 }
 
@@ -88,6 +90,14 @@ impl WhisperHandle {
     }
     pub fn set_language(&self, lang: String) {
         let _ = self.tx.send(Job::SetLanguage(lang));
+    }
+    /// Blocks until the model has run once on two seconds of quiet noise, set up the way live captions are. The first run
+    /// allocates and compiles, which made the first caption of every recording about 2.5 seconds late.
+    pub fn warm(&self) {
+        let (reply, rx) = bounded(1);
+        if self.tx.send(Job::Warm { reply }).is_ok() {
+            let _ = rx.recv();
+        }
     }
     /// The language the live transcript settled on (an ISO code), if it has.
     pub fn language_lock(&self) -> Option<String> {
@@ -228,6 +238,13 @@ fn run_loop(ctx: Ctx, rx: Receiver<Job>, out: Sender<Transcript>, language: &mut
         for job in finals {
         match job {
             Job::Shutdown => return,
+            Job::Warm { reply } => {
+                let pcm: Vec<f32> = (0..32_000).map(|i| (i as f32 * 0.37).sin() * 0.02 + (i as f32 * 1.91).sin() * 0.01).collect();
+                let began = Instant::now();
+                let _ = transcribe_with(&ctx, pcm, language, threads, true, true);
+                tracing::debug!("speech model warmed in {:.1}s", began.elapsed().as_secs_f32());
+                let _ = reply.send(());
+            }
             Job::SetLanguage(l) => {
                 *locked.lock() = fixed_language(&l);
                 *language = l;
