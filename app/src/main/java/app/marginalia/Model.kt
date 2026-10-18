@@ -301,6 +301,9 @@ data class LiveState(
     val freshFixes: Set<Long> = emptySet(),
 )
 
+/** The state of a compute node as one dot: [Running] takes jobs, [Paused] was paused by hand, [Stopped] is off or not reachable. */
+enum class NodeLight { Running, Paused, Stopped }
+
 /** A compute node on the home network that has been paired with this phone. */
 data class HomeComputer(
     val fp: String,
@@ -321,8 +324,17 @@ data class HomeComputer(
     val transcribe: String? = null,
     /** The longest correction window, in seconds, that this compute node takes as a quick job. 0 when it does not say. */
     val windowMaxS: Int = 0,
+    /** Paused by hand on the compute node: it answers, but turns new jobs away. */
+    val paused: Boolean = false,
 ) {
     val approved: Boolean get() = state != "waiting" && state != "refused"
+
+    /** What the dot shows: green running, yellow paused on the node, red stopped or not reachable. */
+    val light: NodeLight get() = when {
+        !online -> NodeLight.Stopped
+        paused -> NodeLight.Paused
+        else -> NodeLight.Running
+    }
 
     companion object {
         fun from(o: JSONObject) = HomeComputer(
@@ -340,6 +352,7 @@ data class HomeComputer(
             pending = o.optJSONArray("pending")?.objects().orEmpty().map(PendingPhone::from),
             transcribe = if (o.isNull("transcribe")) null else o.optString("transcribe").ifBlank { null },
             windowMaxS = o.optInt("window_max_s", 0),
+            paused = o.optBoolean("paused", false),
         )
     }
 }
@@ -349,7 +362,7 @@ data class HomeComputer(
  * speech model. Null when there is none, and then "Improve transcript" is not offered.
  */
 fun transcribeNode(n: HomeComputers): HomeComputer? =
-    if (!n.enabled) null else n.paired.firstOrNull { it.approved && it.online && it.transcribe != null }
+    if (!n.enabled) null else n.paired.firstOrNull { it.approved && it.online && !it.paused && it.transcribe != null }
 
 /** Whether the Review screen offers "Improve transcript": a kept recording, a compute node that can listen, and nothing else being written for the meeting. */
 fun canImproveTranscript(n: HomeComputers, hasAudio: Boolean, busy: Boolean): Boolean = hasAudio && !busy && transcribeNode(n) != null
@@ -424,12 +437,25 @@ fun computersToOffer(n: HomeComputers, dismissed: Set<String>): List<FoundComput
 /** "1 compute node found on your network", "3 compute nodes found on your network". */
 fun offerTitle(count: Int): String = if (count == 1) "1 compute node found on your network" else "$count compute nodes found on your network"
 
-/** The small status chip text for the approved compute nodes that are online right now, or null when there are none. */
-fun onlineChipText(paired: List<HomeComputer>): String? {
-    val on = paired.filter { it.approved && it.online }
-    return when (on.size) {
-        0 -> null
-        1 -> on[0].name.trim().takeIf { it.isNotBlank() }?.let { "Compute node: $it" } ?: "Compute node"
-        else -> "Compute nodes: ${on.size}"
+/** The small status chip on the Meetings screen: its words and the colour of its dot. */
+data class NodeChip(val text: String, val light: NodeLight)
+
+/**
+ * What the chip says about the allowed compute nodes: how many are running, else that they are paused, else that none can be reached.
+ * Null when no compute node has been allowed yet or compute nodes are switched off.
+ */
+fun nodeChip(paired: List<HomeComputer>, enabled: Boolean = true): NodeChip? {
+    val mine = paired.filter { it.approved }
+    if (!enabled || mine.isEmpty()) return null
+    fun nameOf(c: HomeComputer) = c.name.trim().takeIf { it.isNotBlank() }
+    val running = mine.filter { it.light == NodeLight.Running }
+    val paused = mine.filter { it.light == NodeLight.Paused }
+    return when {
+        running.size == 1 -> NodeChip(nameOf(running[0])?.let { "Compute node: $it" } ?: "Compute node", NodeLight.Running)
+        running.size > 1 -> NodeChip("Compute nodes: ${running.size}", NodeLight.Running)
+        paused.size == 1 -> NodeChip(nameOf(paused[0])?.let { "Compute node: $it is paused" } ?: "Compute node is paused", NodeLight.Paused)
+        paused.size > 1 -> NodeChip("Compute nodes: ${paused.size} paused", NodeLight.Paused)
+        mine.size == 1 -> NodeChip(nameOf(mine[0])?.let { "Compute node: $it is not reachable" } ?: "Compute node is not reachable", NodeLight.Stopped)
+        else -> NodeChip("Compute nodes: none reachable", NodeLight.Stopped)
     }
 }

@@ -7,10 +7,17 @@ impl Core {
         let r = crate::remote::get().ok_or_else(|| anyhow!("home computers are not available"))?;
         let s = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").to_string();
         match method {
-            "nodes.list" => Ok(r.list()),
+            "nodes.list" => {
+                r.look_again_soon();
+                Ok(r.list())
+            }
             "nodes.seen" => {
                 let addrs: Vec<String> = args.get("addrs").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
-                r.seen(&s("name"), &s("id"), args.get("port").and_then(Value::as_u64).unwrap_or(0) as u16, &addrs);
+                r.seen(&s("name"), &s("id"), args.get("port").and_then(Value::as_u64).unwrap_or(0) as u16, &addrs, args.get("paused").and_then(Value::as_bool).unwrap_or(false));
+                Ok(json!({}))
+            }
+            "nodes.gone" => {
+                r.gone(&s("id"));
                 Ok(json!({}))
             }
             "nodes.pair" => {

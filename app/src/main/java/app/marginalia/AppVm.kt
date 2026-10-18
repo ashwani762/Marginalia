@@ -1542,17 +1542,25 @@ class AppVm(private val app: Application) {
     val pairing: StateFlow<Boolean> = _pairing.asStateFlow()
 
     /** Reports each compute node that network discovery finds to the core. */
-    private val discovery = NodeDiscovery(app) { n ->
+    private val discovery = NodeDiscovery(app, report = { n ->
         viewModelScope.launch(Dispatchers.Default) {
             // A compute node found while the app is still starting is reported as soon as the core is up.
             var waited = 0
             while (!nativeReady && waited < 120_000) { delay(250); waited += 250 }
             if (!nativeReady) return@launch
             runCatching {
-                backend.call("nodes.seen", JSONObject().put("name", n.name).put("id", n.id).put("port", n.port).put("addrs", JSONArray(n.addrs)))
+                backend.call("nodes.seen", JSONObject().put("name", n.name).put("id", n.id).put("port", n.port).put("addrs", JSONArray(n.addrs)).put("paused", n.paused))
             }
+            if (nodeWatch?.isActive == true) loadNodes()
         }
-    }
+    }, gone = { id ->
+        // A compute node that says goodbye is stopping. Show it as not reachable at once.
+        viewModelScope.launch(Dispatchers.Default) {
+            if (!nativeReady) return@launch
+            runCatching { backend.call("nodes.gone", JSONObject().put("id", id)) }
+            if (nodeWatch?.isActive == true) loadNodes()
+        }
+    })
 
     /**
      * Tells the core when the network under the phone changes, so work running on a home compute node

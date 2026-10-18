@@ -12,14 +12,14 @@ import android.util.Log
 import java.net.Inet4Address
 
 /** A home compute node found on the network, as the core wants to hear about it. */
-data class SeenNode(val name: String, val id: String, val port: Int, val addrs: List<String>)
+data class SeenNode(val name: String, val id: String, val port: Int, val addrs: List<String>, val paused: Boolean = false)
 
 /**
  * Finds `marginalia-node` compute nodes on the local network and tells [report] about each one.
  * It only runs while the app is on screen, and does nothing but listen for the compute nodes' announcements.
  * Every NsdManager callback is hopped onto the main thread so this class needs no locks.
  */
-class NodeDiscovery(context: Context, private val report: (SeenNode) -> Unit) {
+class NodeDiscovery(context: Context, private val report: (SeenNode) -> Unit, private val gone: (String) -> Unit = {}) {
     private val nsd = context.applicationContext.getSystemService(Context.NSD_SERVICE) as? NsdManager
     private val main = Handler(Looper.getMainLooper())
 
@@ -104,7 +104,7 @@ class NodeDiscovery(context: Context, private val report: (SeenNode) -> Unit) {
 
     private fun lost(info: NsdServiceInfo) {
         val name = info.serviceName ?: return
-        seen.remove(name)
+        seen.remove(name)?.let { gone(it.id) }
         queue.removeAll { it.serviceName == name }
         if (Build.VERSION.SDK_INT >= 34) {
             val cb = infoCallbacks.remove(name) as? NsdManager.ServiceInfoCallback ?: return
@@ -122,6 +122,7 @@ class NodeDiscovery(context: Context, private val report: (SeenNode) -> Unit) {
             id = txt("id").lowercase(),
             port = info.port,
             addrs = addrs,
+            paused = txt("paused") == "1",
         )
         seen[info.serviceName.orEmpty()] = node
         report(node)
@@ -143,7 +144,7 @@ class NodeDiscovery(context: Context, private val report: (SeenNode) -> Unit) {
         val cb = object : NsdManager.ServiceInfoCallback {
             override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) { main.post { infoCallbacks.remove(name) } }
             override fun onServiceUpdated(serviceInfo: NsdServiceInfo) { main.post { if (running && infoCallbacks[name] === this) accept(serviceInfo) } }
-            override fun onServiceLost() { main.post { if (infoCallbacks[name] === this) { infoCallbacks.remove(name); seen.remove(name) } } }
+            override fun onServiceLost() { main.post { if (infoCallbacks[name] === this) { infoCallbacks.remove(name); seen.remove(name)?.let { gone(it.id) } } } }
             override fun onServiceInfoCallbackUnregistered() {}
         }
         infoCallbacks[name] = cb

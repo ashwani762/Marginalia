@@ -149,15 +149,49 @@ class ModelParsingTest {
         assertEquals("3 compute nodes found on your network", offerTitle(3))
     }
 
-    @Test fun chipTextForZeroOneAndSeveralOnline() {
-        fun c(name: String, online: Boolean, state: String = "approved") =
-            HomeComputer.from(JSONObject("""{"fp":"$name","name":"$name","online":$online,"state":"$state"}"""))
-        assertNull(onlineChipText(emptyList()))
-        // Paired but offline, waiting or refused show nothing.
-        assertNull(onlineChipText(listOf(c("falcon", false), c("hawk", true, "waiting"), c("owl", true, "refused"))))
-        assertEquals("Compute node: falcon", onlineChipText(listOf(c("falcon", true), c("hawk", false))))
-        assertEquals("Compute nodes: 2", onlineChipText(listOf(c("falcon", true), c("hawk", true), c("owl", false))))
-        assertEquals("Compute node", onlineChipText(listOf(c("", true))))
+    private fun node(name: String, online: Boolean, state: String = "approved", paused: Boolean = false) =
+        HomeComputer.from(JSONObject("""{"fp":"$name","name":"$name","online":$online,"state":"$state","paused":$paused}"""))
+
+    @Test fun chipTextForZeroOneAndSeveralRunning() {
+        assertNull(nodeChip(emptyList()))
+        // Waiting or refused nodes show nothing, and nothing shows while compute nodes are switched off.
+        assertNull(nodeChip(listOf(node("hawk", true, "waiting"), node("owl", true, "refused"))))
+        assertNull(nodeChip(listOf(node("falcon", true)), enabled = false))
+        assertEquals(NodeChip("Compute node: falcon", NodeLight.Running), nodeChip(listOf(node("falcon", true), node("hawk", false))))
+        assertEquals(NodeChip("Compute nodes: 2", NodeLight.Running), nodeChip(listOf(node("falcon", true), node("hawk", true), node("owl", false))))
+        assertEquals(NodeChip("Compute node", NodeLight.Running), nodeChip(listOf(node("", true))))
+    }
+
+    @Test fun chipIsYellowWhenEveryReachableNodeIsPausedAndRedWhenNoneAnswers() {
+        assertEquals(NodeChip("Compute node: falcon is paused", NodeLight.Paused), nodeChip(listOf(node("falcon", true, paused = true))))
+        assertEquals(NodeChip("Compute nodes: 2 paused", NodeLight.Paused), nodeChip(listOf(node("a", true, paused = true), node("b", true, paused = true), node("c", false))))
+        // One running node is enough for green.
+        assertEquals(NodeChip("Compute node: b", NodeLight.Running), nodeChip(listOf(node("a", true, paused = true), node("b", true))))
+        assertEquals(NodeChip("Compute node: falcon is not reachable", NodeLight.Stopped), nodeChip(listOf(node("falcon", false))))
+        assertEquals(NodeChip("Compute node is not reachable", NodeLight.Stopped), nodeChip(listOf(node("", false))))
+        assertEquals(NodeChip("Compute nodes: none reachable", NodeLight.Stopped), nodeChip(listOf(node("a", false), node("b", false))))
+    }
+
+    @Test fun lightFollowsOnlineAndPaused() {
+        assertEquals(NodeLight.Running, node("a", true).light)
+        assertEquals(NodeLight.Paused, node("a", true, paused = true).light)
+        assertEquals(NodeLight.Stopped, node("a", false).light)
+        // A node that does not answer is stopped, whatever it said last.
+        assertEquals(NodeLight.Stopped, node("a", false, paused = true).light)
+        assertFalse(HomeComputer.from(JSONObject("""{"fp":"a","name":"a","online":true}""")).paused)
+    }
+
+    @Test fun settingsSaysPausedOnTheNode() {
+        assertEquals("Paused on the node" to null, app.marginalia.ui.statusOf(node("a", true, paused = true)))
+        assertEquals("Not reachable on this network" to null, app.marginalia.ui.statusOf(node("a", false)))
+    }
+
+    @Test fun aPausedNodeIsNotOfferedTheRecording() {
+        fun n(vararg list: HomeComputer) = HomeComputers(enabled = true, paired = list.toList())
+        fun c(paused: Boolean) = HomeComputer.from(JSONObject().put("fp", "x").put("name", "Desk").put("online", true).put("paused", paused).put("transcribe", "large"))
+        assertNull(transcribeNode(n(c(true))))
+        assertEquals("Desk", transcribeNode(n(c(true), c(false)))!!.name)
+        assertFalse(canCorrectLive(n(c(true))))
     }
 
     @Test fun computerReadsWhatItCanTranscribe() {

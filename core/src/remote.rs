@@ -307,6 +307,7 @@ struct Inner {
 pub struct Remote {
     started: Instant,
     last_kick: std::sync::atomic::AtomicU64,
+    last_look: std::sync::atomic::AtomicU64,
     /// Jobs this phone has out on each computer right now, by fingerprint. A computer's own status can
     /// be a few seconds old, so the phone counts its own jobs too when it chooses where to send the next.
     inflight: Mutex<HashMap<String, u32>>,
@@ -339,7 +340,7 @@ impl Remote {
             .cloned()
             .map(|n| Node { saved: n, live: Live { conn: None, status: None, rtt_ms: 0, failed_at: None, checked_at: None, last_error: String::new(), refused: false, observed_chat: 0.0, slow_until: None } })
             .collect();
-        let r = Arc::new(Remote { started: Instant::now(), last_kick: std::sync::atomic::AtomicU64::new(0), inflight: Mutex::new(HashMap::new()), rt, ep, id, path, inner: Mutex::new(Inner { enabled: saved.enabled, nodes, seen: HashMap::new() }) });
+        let r = Arc::new(Remote { started: Instant::now(), last_kick: std::sync::atomic::AtomicU64::new(0), last_look: std::sync::atomic::AtomicU64::new(0), inflight: Mutex::new(HashMap::new()), rt, ep, id, path, inner: Mutex::new(Inner { enabled: saved.enabled, nodes, seen: HashMap::new() }) });
         r.save();
         r.rt.spawn(monitor(r.clone()));
         Ok(r)
@@ -369,7 +370,7 @@ impl Remote {
     // ------------------------------------------------------------------ discovery and pairing
 
     /// A computer the phone's network discovery just found.
-    pub fn seen(self: &Arc<Self>, name: &str, id: &str, port: u16, addrs: &[String]) {
+    pub fn seen(self: &Arc<Self>, name: &str, id: &str, port: u16, addrs: &[String], paused: bool) {
         let addrs: Vec<SocketAddr> = addrs.iter().filter_map(|a| a.parse::<std::net::IpAddr>().ok()).filter(|a| a.is_ipv4()).map(|a| SocketAddr::new(a, port)).collect();
         if addrs.is_empty() {
             return;
@@ -379,6 +380,10 @@ impl Remote {
         for n in g.nodes.iter_mut().filter(|n| id.len() >= 16 && n.saved.fp.starts_with(id)) {
             n.saved.addrs = addrs.iter().map(|a| a.to_string()).collect();
             n.live.failed_at = None;
+            // The announcement is the quickest news there is. The next status check says the same or corrects it.
+            if let Some(st) = n.live.status.as_mut() {
+                st.paused = paused;
+            }
         }
         g.seen.insert(id.to_string(), Seen { name: name.to_string(), id: id.to_string(), addrs, at: Instant::now() });
         // A paired node that is announcing itself again is looked at right away, so work waiting for one starts sooner.
@@ -386,6 +391,21 @@ impl Remote {
         drop(g);
         if known_offline {
             self.kick();
+        }
+    }
+
+    /// A compute node said goodbye on the network (it is stopping). It shows as not reachable at once instead of at the next look.
+    pub fn gone(&self, id: &str) {
+        let mut g = self.inner.lock();
+        g.seen.remove(id);
+        if id.len() < 16 {
+            return;
+        }
+        for n in g.nodes.iter_mut().filter(|n| n.saved.fp.starts_with(id)) {
+            n.live.conn = None;
+            n.live.status = None;
+            n.live.failed_at = Some(Instant::now());
+            n.live.last_error = "Not reachable on this network".into();
         }
     }
 
@@ -532,7 +552,7 @@ impl Remote {
                 let state = if !n.saved.approved { if n.live.refused { "refused" } else { "waiting" } } else { "approved" };
                 let pending: Vec<Value> = n.live.status.as_ref().map(|s| s.pending.iter().map(|p| json!({"id": p.id, "name": p.name, "waited_s": p.waited_s})).collect()).unwrap_or_default();
                 json!({
-                    "state": state, "pending": pending,
+                    "state": state, "pending": pending, "paused": online && n.live.status.as_ref().map(|s| s.paused).unwrap_or(false),
                     "fp": n.saved.fp, "name": n.saved.name, "online": online, "rtt_ms": n.live.rtt_ms,
                     "chat": caps.chat, "embed": caps.embed, "transcribe": caps.transcribe, "transcribe_x": caps.transcribe_x, "window_max_s": node_window_s(caps.window_max_s), "chat_tok_s": caps.chat_tok_s, "embed_per_s": caps.embed_per_s,
                     "busy": n.live.status.as_ref().map(|s| s.running + s.waiting).unwrap_or(0),
@@ -623,6 +643,31 @@ impl Remote {
     }
 
     /// Looks at every paired node in the background (rate limited).
+    /// Called each time the screen asks for the list: nodes that answer are asked for a fresh status, at most every 4 seconds,
+    /// so a pause or a change of models shows within a few seconds. Nodes that do not answer are left to their announcement and
+    /// the slow check, so a stopped node is not tried again every few seconds.
+    pub fn look_again_soon(self: &Arc<Self>) {
+        let now = self.started.elapsed().as_millis() as u64;
+        if now.saturating_sub(self.last_look.load(Ordering::Relaxed)) < 4000 {
+            return;
+        }
+        let live: Vec<usize> = {
+            let g = self.inner.lock();
+            if !g.enabled {
+                return;
+            }
+            g.nodes.iter().enumerate().filter(|(_, n)| n.live.conn.as_ref().map(|c| c.close_reason().is_none()).unwrap_or(false)).map(|(i, _)| i).collect()
+        };
+        if live.is_empty() {
+            return;
+        }
+        self.last_look.store(now.max(1), Ordering::Relaxed);
+        for i in live {
+            let r = self.clone();
+            self.rt.spawn(async move { r.ensure_idx(i, true).await });
+        }
+    }
+
     fn kick(self: &Arc<Self>) {
         let now = self.started.elapsed().as_millis() as u64;
         let last = self.last_kick.load(Ordering::Relaxed);
@@ -1617,5 +1662,29 @@ pub(crate) mod tests {
         let job = TranscribeJob { total_ms: 5000, language: None, cancel: &cancel, priority: Priority::Background, prompt: None };
         let out = r.transcribe(&job, silence(5), |_, _, _| {}, |_, _, _| {}).unwrap().unwrap();
         assert!(!out.complete && out.segments.is_empty());
+    }
+
+    #[test]
+    fn the_list_shows_paused_and_a_goodbye_makes_a_node_unreachable_at_once() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let a = start_fake(&rt, 8.0, Mode::Good);
+        let r = remote_with(&[("a", &a)], "light");
+        r.refresh();
+        let state = |r: &Arc<Remote>| {
+            let l = r.list();
+            let n = &l["paired"][0];
+            (n["online"].as_bool().unwrap(), n["paused"].as_bool().unwrap(), n["problem"].as_str().unwrap().to_string())
+        };
+        assert_eq!(state(&r), (true, false, String::new()));
+        let id = &a.fp[..16];
+        let addr = vec![a.addr.ip().to_string()];
+        r.seen("a", id, a.addr.port(), &addr, true);
+        assert_eq!(state(&r), (true, true, String::new()), "the announcement says paused");
+        r.seen("a", id, a.addr.port(), &addr, false);
+        assert_eq!(state(&r), (true, false, String::new()), "and then resumed");
+        r.gone(id);
+        assert_eq!(state(&r), (false, false, "Not reachable on this network".to_string()));
+        assert!(r.list()["found"].as_array().unwrap().is_empty());
+        r.gone("short");
     }
 }

@@ -76,7 +76,9 @@ import app.marginalia.canCorrectLive
 import app.marginalia.transcribeNode
 import app.marginalia.windowLimitNote
 import app.marginalia.offerTitle
-import app.marginalia.onlineChipText
+import app.marginalia.NodeChip
+import app.marginalia.NodeLight
+import app.marginalia.nodeChip
 import app.marginalia.unpairedFound
 import kotlin.math.roundToInt
 
@@ -89,13 +91,14 @@ internal fun statusOf(c: HomeComputer): Pair<String, String?> {
     if (c.state == "refused") return "Not allowed by this compute node" to null
     val status = when {
         !c.online -> "Not reachable on this network"
+        c.paused -> "Paused on the node"
         c.chatTokPerSec >= 20.0 -> "Online, fast"
         else -> "Online"
     }
     val words = wordsPerSecond(c.chatTokPerSec)
     val detail = buildList {
-        if (c.online && words > 0) add("Answers at $words words a second")
-        if (c.online && c.busy > 0) add("Busy")
+        if (c.online && !c.paused && words > 0) add("Answers at $words words a second")
+        if (c.online && !c.paused && c.busy > 0) add("Busy")
     }.joinToString(". ").ifBlank { null }
     return status to detail
 }
@@ -223,6 +226,14 @@ fun HomeComputersSection(vm: AppVm, modifier: Modifier = Modifier) {
     }
 }
 
+/** Green running, yellow paused, red stopped or not reachable. */
+@Composable
+internal fun lightColor(light: NodeLight): Color = when (light) {
+    NodeLight.Running -> pal.success
+    NodeLight.Paused -> pal.warning
+    NodeLight.Stopped -> pal.danger
+}
+
 @Composable
 private fun ComputerRow(c: HomeComputer, onRemove: () -> Unit) {
     val p = pal
@@ -234,14 +245,14 @@ private fun ComputerRow(c: HomeComputer, onRemove: () -> Unit) {
     ) {
         val answered = c.state != "waiting" && c.state != "refused"
         if (answered) {
-            Box(Modifier.size(10.dp).clip(CircleShape).background(if (c.online) p.success else p.textFaint))
+            Box(Modifier.size(10.dp).clip(CircleShape).background(lightColor(c.light)))
             Spacer(Modifier.width(12.dp))
         }
         Column(Modifier.weight(1f)) {
             Text(c.name.ifBlank { "Compute node" }, style = type.headline, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(status, style = type.caption.copy(color = if (answered && c.online) p.success else p.textDim))
+            Text(status, style = type.caption.copy(color = if (answered) lightColor(c.light) else p.textDim))
             if (detail != null) Text(detail, style = type.caption)
-            if (c.problem.isNotBlank()) Text(plain(c.problem), style = type.caption.copy(color = p.warning))
+            if (c.problem.isNotBlank() && plain(c.problem) != status) Text(plain(c.problem), style = type.caption.copy(color = p.warning))
         }
         TextButton(onClick = onRemove) { Text("Remove", color = p.danger) }
     }
@@ -499,11 +510,11 @@ fun ConnectBanner(vm: AppVm, modifier: Modifier = Modifier) {
 fun HomeComputerChip(vm: AppVm, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val p = pal
     val nodes by vm.nodes.collectAsState()
-    val text = onlineChipText(nodes.paired)
-    var last by remember { mutableStateOf("") }
-    if (text != null) last = text
+    val chip = nodeChip(nodes.paired, nodes.enabled)
+    var last by remember { mutableStateOf(NodeChip("", NodeLight.Running)) }
+    if (chip != null) last = chip
     AnimatedVisibility(
-        visible = text != null,
+        visible = chip != null,
         enter = androidx.compose.animation.fadeIn(),
         exit = androidx.compose.animation.fadeOut(),
         modifier = modifier,
@@ -514,9 +525,9 @@ fun HomeComputerChip(vm: AppVm, onClick: () -> Unit, modifier: Modifier = Modifi
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.size(8.dp).clip(CircleShape).background(p.success))
+            Box(Modifier.size(8.dp).clip(CircleShape).background(lightColor(last.light)))
             Spacer(Modifier.width(8.dp))
-            Text(last, style = type.caption.copy(color = p.textDim), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(last.text, style = type.caption.copy(color = p.textDim), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
