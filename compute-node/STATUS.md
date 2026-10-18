@@ -145,10 +145,21 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
 
 ## Next steps (in order)
 
-1. Later: take Windows out of beta (tray clicks, a reboot, a real phone). The core features work today on Linux.
-2. Cluster, the rest: peers found by mDNS, member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
-3. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.
-4. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).
+1. Tomorrow (2026-10-18): the phone and the tray must show what state a compute node is in.
+   - Today a node paused by hand (`marginalia-node pause` or the tray) still answers status, so the phone shows it green and then
+     wastes a try on it (the node answers "paused" to the job). The tray already turns orange when paused, the phone has no paused field.
+   - Phone: pass `paused` from the status reply through `nodes.list` (`core/src/remote.rs`, `HomeComputer` in `Model.kt`). Dot and
+     words in the Meetings chip, the banner and Settings: green running, yellow paused ("Paused on the node"), red stopped or not reachable.
+     A paused node is not offered jobs, so failover does not spend a try on it. Keep the mapping a plain function with unit tests.
+   - Node: announce stop and start (mDNS goodbye and announce) so the phone changes colour within a second and not at the next
+     5 second look. Check `marginalia-node stop` followed by `run` shows red then green.
+   - Tray icon: running green, busy, paused orange (exists), stopped or node unreachable red (check what `tray/src/model.rs` shows when the
+     node does not answer), locked. One icon per state with a tooltip that says it.
+   - Check on the real phone: pause from the tray with a real click, watch the dot turn yellow, stop and watch it turn red, start and watch green.
+2. Later: take Windows out of beta (tray clicks, a reboot, a real phone). The core features work today on Linux.
+3. Cluster, the rest: peers found by mDNS, member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
+4. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.
+5. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).
 
 ## Cluster slice
 

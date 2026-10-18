@@ -53,14 +53,30 @@ On Windows use `scripts/windows/setup.ps1` (see `docs/WINDOWS-PLAN.md`). Node mo
 
 Gemma on the GPU (LiteRT-LM, OpenCL) takes the phone's graphics chip for several seconds while it sets up, and the screen is drawn by the
 same chip. Measured on the test phone: frames waited 3 s or more for the GPU (`Fence waitForever ... didn't signal in 3000 ms` in
-`adb logcat`), the app skipped up to 600 frames in a row and Android killed other apps for memory. So:
+`adb logcat`), the app skipped up to 600 frames in a row and Android killed other apps for memory. The stall is the same on a still
+screen and on an animated one (5.05 s against 5.17 s), so calming the screen does not help. What helps is choosing when it happens:
 
-- The search model (processor, quick) loads at start. Gemma loads only when the phone itself has to write something (`AppVm.ensureChat`,
-  through the stand in generator `lazyChat`). With a compute node in reach that never happens.
-- Starting a recording with no compute node in reach loads Gemma at that moment instead of in the middle of the meeting.
+- **With a compute node in reach nothing heavy loads.** Gemma loads only when the phone itself has to write something (`AppVm.ensureChat`,
+  through the stand in generator `lazyChat`). A cold start then has no stalls and keeps about 2 GB more memory free.
+- **With no compute node in reach, everything is warmed up behind a loading screen** (`AppVm.loadChatIfAlone`, `AiWarmScreen`): the search
+  model and its first embedding, the speech model run once the way live captions run it (`engine.warm_speech`), and Gemma with its image
+  reader (`LiteRtGenerator.warmUp`, the engine sets the reader up on the first conversation and that stalls the screen). The screen is a
+  still bar with a "Keep going" button. LiteRT does not report progress, so the bar follows how long the last load took. After this only
+  real work is left, which shows as caption lag of 0.6 to 1.4 s and no stalls during a meeting.
+- The loading screen is up from the first frame when the last start had no compute node (`last_alone` in the engine preferences), so the main
+  screen never shows first and then jumps away. After a start with a node in reach it is not shown first.
+- Setting "Keep the AI ready on this phone" treats the phone as alone even with a node nearby.
+- Gemma stays loaded for ten minutes after the app leaves the screen with nothing running, so background notes can be written on the phone.
 - Nothing may start a job at launch. The old vision warm-up did, and it loaded Gemma at every start.
-- To check a change: `adb logcat -v time | grep -E "Davey|Skipped [0-9]+ frames|didn't signal"` during a cold start. With a node in reach
-  there should be none. Phone alone, one stall of about 5 s remains when Gemma loads.
+- Starting a recording with no node in reach loads Gemma then only if it is not loaded yet (a fallback).
+
+To check a change: `adb logcat -v time | grep -E "Davey|Skipped [0-9]+ frames|didn't signal"` during a cold start and a recording. The caption
+lag is in the core's own log (`session::live: final t=... lag=...`). With a node in reach there should be no stalls.
+
+**Release builds rename methods.** The Rust core calls `LlmGenerator.start`, `TextEmbedder.embed` and the listener by name through JNI. A
+keep rule for each is in `app/proguard-rules.pro`, and `ProguardRulesTest` fails when one is missing. Without the `TextEmbedder` rule the
+release build renamed `embed`, every search failed with "embedder threw" whenever no compute node answered (a debug build and the unit
+tests do not show it) and the phone alone could not search or index.
 
 ## Conventions
 
