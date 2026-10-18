@@ -11,6 +11,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -78,7 +81,8 @@ import app.marginalia.windowLimitNote
 import app.marginalia.offerTitle
 import app.marginalia.NodeChip
 import app.marginalia.NodeLight
-import app.marginalia.nodeChip
+import app.marginalia.MAX_NODE_PILLS
+import app.marginalia.nodePills
 import app.marginalia.unpairedFound
 import kotlin.math.roundToInt
 
@@ -505,30 +509,44 @@ fun ConnectBanner(vm: AppVm, modifier: Modifier = Modifier) {
     }
 }
 
-/** A small calm line that says a home compute node is helping. Nothing at all when none is online. */
+/**
+ * Small calm pills that say which compute nodes are around, one for each allowed node (at most [MAX_NODE_PILLS]), with a dot for its state.
+ * They scroll sideways when they do not fit. Nothing at all when no compute node has been allowed.
+ */
 @Composable
 fun HomeComputerChip(vm: AppVm, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    val p = pal
     val nodes by vm.nodes.collectAsState()
-    val chip = nodeChip(nodes.paired, nodes.enabled)
-    var last by remember { mutableStateOf(NodeChip("", NodeLight.Running)) }
-    if (chip != null) last = chip
+    val pills = nodePills(nodes.paired, nodes.enabled)
+    var last by remember { mutableStateOf(pills) }
+    if (pills.isNotEmpty()) last = pills
     AnimatedVisibility(
-        visible = chip != null,
+        visible = pills.isNotEmpty(),
         enter = androidx.compose.animation.fadeIn(),
         exit = androidx.compose.animation.fadeOut(),
         modifier = modifier,
     ) {
-        Row(
-            Modifier.padding(horizontal = 20.dp).padding(bottom = 10.dp).height(32.dp).clip(CircleShape).background(p.surface3).border(1.dp, p.line, CircleShape)
-                .pressable(onClick = onClick).semantics { role = Role.Button }
-                .padding(horizontal = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        LazyRow(
+            Modifier.fillMaxWidth().padding(bottom = 10.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Box(Modifier.size(8.dp).clip(CircleShape).background(lightColor(last.light)))
-            Spacer(Modifier.width(8.dp))
-            Text(last.text, style = type.caption.copy(color = p.textDim), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            itemsIndexed(last, key = { i, _ -> i }) { _, pill -> NodePill(pill, onClick) }
         }
+    }
+}
+
+@Composable
+private fun NodePill(pill: NodeChip, onClick: () -> Unit) {
+    val p = pal
+    Row(
+        Modifier.height(32.dp).clip(CircleShape).background(p.surface3).border(1.dp, p.line, CircleShape)
+            .pressable(onClick = onClick).semantics { role = Role.Button }
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(lightColor(pill.light)))
+        Spacer(Modifier.width(8.dp))
+        Text(pill.text, style = type.caption.copy(color = p.textDim), maxLines = 1, softWrap = false)
     }
 }
 

@@ -152,24 +152,34 @@ class ModelParsingTest {
     private fun node(name: String, online: Boolean, state: String = "approved", paused: Boolean = false) =
         HomeComputer.from(JSONObject("""{"fp":"$name","name":"$name","online":$online,"state":"$state","paused":$paused}"""))
 
-    @Test fun chipTextForZeroOneAndSeveralRunning() {
-        assertNull(nodeChip(emptyList()))
+    @Test fun aSingleNodeIsOnePillWithItsState() {
+        assertEquals(emptyList<NodeChip>(), nodePills(emptyList()))
         // Waiting or refused nodes show nothing, and nothing shows while compute nodes are switched off.
-        assertNull(nodeChip(listOf(node("hawk", true, "waiting"), node("owl", true, "refused"))))
-        assertNull(nodeChip(listOf(node("falcon", true)), enabled = false))
-        assertEquals(NodeChip("Compute node: falcon", NodeLight.Running), nodeChip(listOf(node("falcon", true), node("hawk", false))))
-        assertEquals(NodeChip("Compute nodes: 2", NodeLight.Running), nodeChip(listOf(node("falcon", true), node("hawk", true), node("owl", false))))
-        assertEquals(NodeChip("Compute node", NodeLight.Running), nodeChip(listOf(node("", true))))
+        assertEquals(emptyList<NodeChip>(), nodePills(listOf(node("hawk", true, "waiting"), node("owl", true, "refused"))))
+        assertEquals(emptyList<NodeChip>(), nodePills(listOf(node("falcon", true)), enabled = false))
+        assertEquals(listOf(NodeChip("Compute node: falcon", NodeLight.Running)), nodePills(listOf(node("falcon", true))))
+        assertEquals(listOf(NodeChip("Compute node: falcon is paused", NodeLight.Paused)), nodePills(listOf(node("falcon", true, paused = true))))
+        assertEquals(listOf(NodeChip("Compute node: falcon is not reachable", NodeLight.Stopped)), nodePills(listOf(node("falcon", false))))
+        assertEquals(listOf(NodeChip("Compute node", NodeLight.Running)), nodePills(listOf(node("", true))))
+        assertEquals(listOf(NodeChip("Compute node is not reachable", NodeLight.Stopped)), nodePills(listOf(node("", false))))
     }
 
-    @Test fun chipIsYellowWhenEveryReachableNodeIsPausedAndRedWhenNoneAnswers() {
-        assertEquals(NodeChip("Compute node: falcon is paused", NodeLight.Paused), nodeChip(listOf(node("falcon", true, paused = true))))
-        assertEquals(NodeChip("Compute nodes: 2 paused", NodeLight.Paused), nodeChip(listOf(node("a", true, paused = true), node("b", true, paused = true), node("c", false))))
-        // One running node is enough for green.
-        assertEquals(NodeChip("Compute node: b", NodeLight.Running), nodeChip(listOf(node("a", true, paused = true), node("b", true))))
-        assertEquals(NodeChip("Compute node: falcon is not reachable", NodeLight.Stopped), nodeChip(listOf(node("falcon", false))))
-        assertEquals(NodeChip("Compute node is not reachable", NodeLight.Stopped), nodeChip(listOf(node("", false))))
-        assertEquals(NodeChip("Compute nodes: none reachable", NodeLight.Stopped), nodeChip(listOf(node("a", false), node("b", false))))
+    @Test fun severalNodesAreSeveralPillsRunningFirst() {
+        val pills = nodePills(listOf(node("owl", false), node("hawk", true, paused = true), node("falcon", true), node("kite", true), node("wren", true, "waiting")))
+        // Not allowed yet (wren) is left out. Running first, then paused, then the one that does not answer, each in list order.
+        assertEquals(
+            listOf(NodeChip("falcon", NodeLight.Running), NodeChip("kite", NodeLight.Running), NodeChip("hawk is paused", NodeLight.Paused), NodeChip("owl is not reachable", NodeLight.Stopped)),
+            pills,
+        )
+    }
+
+    @Test fun atMostFivePillsAreShown() {
+        val many = (1..8).map { node("n$it", it % 2 == 0) }
+        val pills = nodePills(many)
+        assertEquals(5, pills.size)
+        // The four that answer come first, so the one that fits after them is the first that does not.
+        assertEquals(listOf("n2", "n4", "n6", "n8", "n1 is not reachable"), pills.map { it.text })
+        assertEquals(5, MAX_NODE_PILLS)
     }
 
     @Test fun lightFollowsOnlineAndPaused() {

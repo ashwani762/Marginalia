@@ -437,25 +437,33 @@ fun computersToOffer(n: HomeComputers, dismissed: Set<String>): List<FoundComput
 /** "1 compute node found on your network", "3 compute nodes found on your network". */
 fun offerTitle(count: Int): String = if (count == 1) "1 compute node found on your network" else "$count compute nodes found on your network"
 
-/** The small status chip on the Meetings screen: its words and the colour of its dot. */
+/** One small pill on the Meetings screen: its words and the colour of its dot. */
 data class NodeChip(val text: String, val light: NodeLight)
 
+/** The most pills the Meetings screen shows. Settings lists every compute node. */
+const val MAX_NODE_PILLS = 5
+
 /**
- * What the chip says about the allowed compute nodes: how many are running, else that they are paused, else that none can be reached.
- * Null when no compute node has been allowed yet or compute nodes are switched off.
+ * The pills on the Meetings screen, one for each allowed compute node, running ones first, then paused, then the ones that do not answer.
+ * Within each group the order of the list is kept. At most [MAX_NODE_PILLS]. Empty when no compute node has been allowed yet or compute nodes are switched off.
+ * With one compute node the pill says "Compute node: falcon", with several it is just the name.
  */
-fun nodeChip(paired: List<HomeComputer>, enabled: Boolean = true): NodeChip? {
+fun nodePills(paired: List<HomeComputer>, enabled: Boolean = true): List<NodeChip> {
     val mine = paired.filter { it.approved }
-    if (!enabled || mine.isEmpty()) return null
-    fun nameOf(c: HomeComputer) = c.name.trim().takeIf { it.isNotBlank() }
-    val running = mine.filter { it.light == NodeLight.Running }
-    val paused = mine.filter { it.light == NodeLight.Paused }
-    return when {
-        running.size == 1 -> NodeChip(nameOf(running[0])?.let { "Compute node: $it" } ?: "Compute node", NodeLight.Running)
-        running.size > 1 -> NodeChip("Compute nodes: ${running.size}", NodeLight.Running)
-        paused.size == 1 -> NodeChip(nameOf(paused[0])?.let { "Compute node: $it is paused" } ?: "Compute node is paused", NodeLight.Paused)
-        paused.size > 1 -> NodeChip("Compute nodes: ${paused.size} paused", NodeLight.Paused)
-        mine.size == 1 -> NodeChip(nameOf(mine[0])?.let { "Compute node: $it is not reachable" } ?: "Compute node is not reachable", NodeLight.Stopped)
-        else -> NodeChip("Compute nodes: none reachable", NodeLight.Stopped)
+    if (!enabled || mine.isEmpty()) return emptyList()
+    return mine.sortedBy { it.light.ordinal }.take(MAX_NODE_PILLS).map { c ->
+        val name = c.name.trim()
+        val who = when {
+            mine.size == 1 && name.isNotBlank() -> "Compute node: $name"
+            mine.size == 1 -> "Compute node"
+            name.isNotBlank() -> name
+            else -> "Compute node"
+        }
+        val text = when (c.light) {
+            NodeLight.Running -> who
+            NodeLight.Paused -> "$who is paused"
+            NodeLight.Stopped -> "$who is not reachable"
+        }
+        NodeChip(text, c.light)
     }
 }
