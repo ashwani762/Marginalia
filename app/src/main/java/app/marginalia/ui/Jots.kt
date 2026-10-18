@@ -226,7 +226,7 @@ fun SwipeToKeep(onKeep: () -> Unit, modifier: Modifier = Modifier, content: @Com
  * answer"), so nothing happens out of sight. It rests on "Listening" when there is no work.
  */
 @Composable
-fun ActivityStrip(items: List<String>, recording: Boolean, modifier: Modifier = Modifier, note: String? = null) {
+fun ActivityStrip(items: List<String>, recording: Boolean, modifier: Modifier = Modifier, note: String? = null, trailing: (@Composable () -> Unit)? = null) {
     val p = pal
     val label = items.firstOrNull() ?: if (recording) "Listening" else "Working"
     val busy = items.isNotEmpty()
@@ -237,19 +237,24 @@ fun ActivityStrip(items: List<String>, recording: Boolean, modifier: Modifier = 
         Box(Modifier.size(width = markWidth, height = 12.dp), contentAlignment = Alignment.CenterStart) {
             if (busy) ThinkingDots(color = p.accentInk) else Box(Modifier.size(7.dp).clip(CircleShape).background(p.success.copy(alpha = 0.8f)))
         }
-        // The line fades and drifts in place; it must never be clipped to its own box (descenders!).
-        AnimatedContent(
-            targetState = label,
-            transitionSpec = {
-                ((fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 3 }) togetherWith (fadeOut(tween(140)) + slideOutVertically(tween(140)) { -it / 3 }))
-                    .using(androidx.compose.animation.SizeTransform(clip = false))
-            },
-            contentAlignment = Alignment.CenterStart,
-            label = "activity",
-        ) { l -> Text(l, style = type.caption.copy(color = if (busy) p.text else p.textFaint, lineHeight = 20.sp()), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) }
-        if (items.size > 1) Text("  +${items.size - 1}", style = type.caption.copy(color = p.textFaint))
+        // The label and the count take all the room that is left, so whatever follows (the folder pill) sits at the right edge.
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            // The line fades and drifts in place; it must never be clipped to its own box (descenders!).
+            AnimatedContent(
+                targetState = label,
+                transitionSpec = {
+                    ((fadeIn(tween(220)) + slideInVertically(tween(220)) { it / 3 }) togetherWith (fadeOut(tween(140)) + slideOutVertically(tween(140)) { -it / 3 }))
+                        .using(androidx.compose.animation.SizeTransform(clip = false))
+                },
+                modifier = Modifier.weight(1f, fill = false),
+                contentAlignment = Alignment.CenterStart,
+                label = "activity",
+            ) { l -> Text(l, style = type.caption.copy(color = if (busy) p.text else p.textFaint, lineHeight = 20.sp()), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) }
+            if (items.size > 1) Text("  +${items.size - 1}", style = type.caption.copy(color = p.textFaint))
+        }
+        if (trailing != null) trailing()
     }
-    // A line about what a compute node is doing (checking the captions) sits under the label, at the label's own left edge.
+    // A line about what a compute node is doing (checking the captions) sits under the label, at the label's own left edge, over the full width.
     androidx.compose.animation.AnimatedVisibility(visible = note != null, enter = fadeIn(tween(250)) + expandVertically(), exit = fadeOut(tween(200)) + shrinkVertically()) {
         Text(
             note.orEmpty(), style = type.caption.copy(color = p.textFaint), maxLines = 1,

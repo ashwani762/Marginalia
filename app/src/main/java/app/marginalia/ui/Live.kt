@@ -322,17 +322,18 @@ fun LiveScreen(vm: AppVm, onMinimize: () -> Unit, onCite: (Source) -> Unit) {
                             if (!hideChrome) {
                                 folderPill(Modifier)
                                 Spacer(Modifier.height(4.dp))
-                                ActivityStrip(s.activity, s.recording)
+                                ActivityStrip(s.activity, s.recording, note = if (showTranscript) correctionLabel(s.correctedBy, s.correctionPhase, s.workFrom, s.workTo, s.checkedUpto, prefsNow.liveCorrectionWindowS) else null)
                             }
                             bottom()
                         }
                     }
                 } else if (recording) {
                     Column(Modifier.fillMaxSize()) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Box(Modifier.weight(1f)) { ActivityStrip(s.activity, s.recording, note = if (showTranscript) correctionLabel(s.correctedBy, s.correctionPhase, s.workFrom, s.workTo, s.checkedUpto, prefsNow.liveCorrectionWindowS) else null) }
-                            folderPill(Modifier.padding(end = 16.dp))
-                        }
+                        ActivityStrip(
+                            s.activity, s.recording,
+                            note = if (showTranscript) correctionLabel(s.correctedBy, s.correctionPhase, s.workFrom, s.workTo, s.checkedUpto, prefsNow.liveCorrectionWindowS) else null,
+                            trailing = { folderPill(Modifier) },
+                        )
                         timeline(Modifier.weight(1f))
                     }
                 } else {
@@ -405,16 +406,17 @@ private fun Timeline(
             items(items, key = { it.key }) { m ->
                 when (m) {
                     // A line the compute node fixed replaces the old one on the spot. No fade in or out of its own: a row that fades out
-                    // while the new one fades in shows both on top of each other for a moment. Lines still slide when others move.
-                    is Moment.Said -> SwipeToKeep(onKeep = { onKeep(m.line) }, modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null)) {
+                    // while the new one fades in shows both on top of each other for a moment. Rows do not slide either: a row that slides
+                    // past one that was put in place at once (a card from the knowledge next to a fixed line) is drawn on top of it.
+                    is Moment.Said -> SwipeToKeep(onKeep = { onKeep(m.line) }, modifier = Modifier.animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = null)) {
                         TranscriptRow(m.line, animateIn = m.line.id !in s.freshFixes, dim = if (m.line.id == newestLine) 1f else 0.7f, fresh = m.line.id in s.freshFixes)
                     }
                     is Moment.Noted -> SwipeToDelete(
                         onDelete = { onDeleteJot(m.jot) },
-                        modifier = Modifier.animateItem().padding(horizontal = 16.dp, vertical = 6.dp),
+                        modifier = Modifier.animateItem(placementSpec = null).padding(horizontal = 16.dp, vertical = 6.dp),
                     ) { JotCard(m.jot, Modifier.padding(0.dp), onEdit = { onEdit(m.jot) }, flat = true) }
-                    is Moment.Shot -> PhotoCard(m.photo, Modifier.animateItem(), onReadNow = { onReadPhoto(m.photo) }, onOpen = { onPhoto(m.photo) })
-                    is Moment.Asked -> Column(Modifier.animateItem().padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    is Moment.Shot -> PhotoCard(m.photo, Modifier.animateItem(placementSpec = null), onReadNow = { onReadPhoto(m.photo) }, onOpen = { onPhoto(m.photo) })
+                    is Moment.Asked -> Column(Modifier.animateItem(placementSpec = null).padding(horizontal = 16.dp, vertical = 6.dp)) {
                         val label = when (m.card.kind) { "ask" -> "YOU ASKED"; "ideas" -> null; else -> "FROM YOUR KNOWLEDGE" }
                         if (label != null) Text(label, style = type.micro.copy(color = p.accentInk), modifier = Modifier.padding(start = 4.dp, bottom = 6.dp))
                         AssistCard(m.card, onCite = onCite, onPick = onPickIdea, onRemove = { onRemoveCard(m.card) })
