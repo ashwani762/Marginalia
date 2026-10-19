@@ -367,6 +367,12 @@ impl Panel {
                     });
                 }
             }
+            // Telling speakers apart is opt-in, so "off" is a normal state, shown in the quiet colour.
+            ui.horizontal(|ui| {
+                ui.add_sized([52.0, 14.0], egui::Label::new(dim("Speakers")));
+                ui.label(RichText::new(model::speakers_text(i)).size(12.0).color(if i.speakers { TEXT } else { DIM }))
+                    .on_hover_text("Opt in with: marginalia-node models download --only speakers. The helper program marginalia-node-speakers must be next to the node.");
+            });
         });
     }
 
@@ -639,14 +645,20 @@ impl Panel {
                 });
             }
             if let Some(dir) = &i.log_dir {
+                // The word and the button on one line, the folder on the line under it with the whole width, so nothing can run into the button.
+                ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     ui.add_sized([58.0, 14.0], egui::Label::new(dim("Logs")));
-                    truncated(ui, RichText::new(dir).font(FontId::monospace(11.0)).color(DIM));
+                    ui.label(dim("node.log, kept 5 files"));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if small_button(ui, "Open", "Open the folder with the node's log files. They hold events and numbers, never the text of notes, questions, recordings or photos.") {
+                        if small_button(ui, "Open", "Open the folder with the log files") {
                             open_folder(dir);
                         }
                     });
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(58.0);
+                    truncated(ui, RichText::new(dir).font(FontId::monospace(10.5)).color(DIM));
                 });
             }
         });
