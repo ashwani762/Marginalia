@@ -334,6 +334,19 @@ class AppVm(private val app: Application) {
             }
             try {
                 set("Starting", 0f)
+                // A compute node first, when one has the speaker models: they are larger there, and the phone stays free. It is asked
+                // only now, because the person asked for the speakers to be told apart. With none, or when it fails, the phone does it.
+                set("Waiting for a compute node", 0f)
+                val viaNode = runCatching {
+                    backend.obj("meeting.speakers_node", JSONObject().put("id", meetingId).put("people", people).put("threshold", threshold.toDouble()))
+                }.getOrNull()
+                if (viaNode != null && !viaNode.has("unavailable")) {
+                    openReview(meetingId)
+                    val n = viaNode.optInt("speakers")
+                    val on = viaNode.optString("node").ifBlank { "a compute node" }
+                    toast("success", if (n <= 1) "$on heard one voice." else "$on heard $n voices. Tap a name to rename it.")
+                    return@launch
+                }
                 if (!Diarizer.ready(ctx)) {
                     Diarizer.fetchModels(ctx) { f -> set("Getting the speaker model", f * 0.2f) }
                 }
@@ -689,6 +702,15 @@ class AppVm(private val app: Application) {
             }
             "card_remove" -> _live.update { s -> s?.copy(cards = s.cards.filter { it.id != e.optLong("id") }) }
             "wrap_hold" -> holdFinishing.value = e.optBoolean("waiting")
+            // How far a compute node is with telling speakers apart: real while the audio goes up, an estimate while it listens.
+            "speakers_progress" -> {
+                val id = e.optLong("id")
+                val f = e.optDouble("fraction", 0.0).toFloat().coerceIn(0f, 1f)
+                if (_separating.value.containsKey(id)) {
+                    _separating.update { it + (id to f) }
+                    Work.set(ctx, WorkItem("speakers$id", "Telling speakers apart", if (f < 0.3f) "Sending the recording to a compute node" else "A compute node is listening", f))
+                }
+            }
             "reindex" -> {
                 val done = e.optInt("done"); val total = e.optInt("total")
                 Work.set(ctx, WorkItem("reindex", "Updating search", "Reading your library again", if (total > 0) done.toFloat() / total else -1f))
