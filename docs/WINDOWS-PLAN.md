@@ -22,6 +22,15 @@ It skips what is already done (it prints the skipped steps first) and `-Force` r
 
 After a `git pull`: `.\scripts\windows\setup.ps1 -Quick` (incremental build, copy, restart, verify).
 
+Added on the Linux side and type checked for Windows only (never run there): the node writes its own `logs\node.log` under
+`%APPDATA%\marginalia-node` (replaced at 5 MB, the last 5 kept, also `marginalia-node.exe logs`), next to the launcher's `node.log` that
+`verify.ps1` reads. The tray refuses to start twice (it holds port admin port plus 1, 47617). The tray window shows live charts and a "Logs"
+row (`explorer`). The node reads graphics card use through `nvidia-smi` (no console window), and reads photos when `mmproj-*.gguf` is next to the chat model.
+
+The optional speaker helper `marginalia-node-speakers.exe` is built by `build.ps1` and `make-all.ps1` and copied next to the node by the install step (`$MN_BuiltSpeakers`).
+It links sherpa-onnx statically, which downloads a prebuilt library for `x86_64-pc-windows-msvc` while building. If it does not build, the node works without it. Not run on Windows.
+`.\scripts\windows\make-all.ps1` builds everything in one go.
+
 Features are being added on the Linux side right now (live correction windows and more). Your only duty for those is that
 the node and the tray still build and `verify.ps1` still passes after you pull. Do not implement or review them.
 

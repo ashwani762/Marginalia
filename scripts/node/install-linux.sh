@@ -23,6 +23,10 @@ fi
 
 mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user" "$HOME/.local/share/marginalia/models"
 install -m 755 "$bin" "$HOME/.local/bin/marginalia-node"
+# The optional speaker helper goes next to the node, which looks for it there. Download its models with: marginalia-node models download --only speakers
+if [[ -x "$root/target/release/marginalia-node-speakers" ]]; then
+  install -m 755 "$root/target/release/marginalia-node-speakers" "$HOME/.local/bin/marginalia-node-speakers"
+fi
 if [[ -x "$tray" ]]; then
   mkdir -p "$HOME/.config/autostart"
   install -m 755 "$tray" "$HOME/.local/bin/marginalia-node-tray"

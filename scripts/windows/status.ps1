@@ -44,3 +44,10 @@ if (Test-Path $log) {
     Write-Head 'Last lines of node.log'
     Get-Content $log -Tail 8
 }
+# The node also keeps its own log with the machine's load every minute. It is replaced at 5 MB and the last 5 are kept.
+$ownLog = Join-Path (Join-Path $MN_StateDir 'logs') 'node.log'
+if (Test-Path $ownLog) {
+    Write-Head 'The node log with the load of the machine (last lines)'
+    Step-Info $ownLog
+    Get-Content $ownLog -Tail 4
+}

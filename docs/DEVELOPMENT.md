@@ -42,6 +42,9 @@ Logs: the phone's core logs to `adb logcat` only. A node writes `logs/node.log` 
 Tests: `cd core && cargo test --lib`, `./gradlew :app:testDebugUnitTest`. Debug builds accept development intents
 (`DEBUG_CALL`, `DEBUG_FEED`) that run any core command or feed an audio file as if it were the microphone, even while the phone is locked.
 
+One command for everything on Linux: `make` (node, tray and the optional speaker helper), `make cpu`, `make test`, `make install`, `make app`. `make help` lists the
+targets. On Windows the same is `.\scripts\windows\make-all.ps1` (add `-Test`, `-Install`, `-Models speakers`).
+
 ## The compute node
 
 ```bash

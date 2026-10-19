@@ -183,7 +183,11 @@ A Pi 4 or 5 (64-bit OS) can run the node, CPU only (`scripts/node/build.sh --cpu
   5 MB and the last 5 are kept. It holds events and numbers only, never the text of notes, questions, recordings or photos. A line with the machine's
   load is added every minute. `marginalia-node logs` shows the folder and the last lines, `--follow` keeps going, `RUST_LOG=marginalia_node=debug`
   gives more detail. When something goes wrong, send the last `node.log`.
-- A node with the vision projector next to its chat model also reads photos for phones (`vision` in `status`).
+- A node with the vision projector next to its chat model also reads photos for phones (`vision` in `status`). Download it with `marginalia-node models download --only vision`.
+- **Telling speakers apart (opt-in).** After a meeting a phone can ask a node to tell the speakers apart on the kept recording. The node needs the helper program
+  `marginalia-node-speakers` next to it (`scripts/node/build.sh` and `make` build it, the install scripts copy it) and the two models
+  (`marginalia-node models download --only speakers`, about 33 MB). Without either the node does not offer it and the phone does it itself. The audio is a temporary
+  file that is removed when the job ends. `marginalia-node probe ADDRESS --speakers FILE.wav` tries it.
 
 ## Not built yet
 

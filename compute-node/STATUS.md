@@ -154,32 +154,23 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
    - Checked on the real phone and the real tray with real clicks: pause turns the chip yellow in under 1.5 s, resume green, stop red
      in under 1.5 s, start green in under 6 s (the node loads its models first). The tray shows amber for a moment while a stopping node
      finishes its jobs, then red.
-1b. Today (2026-10-19): telling speakers apart must run on a compute node, as "Improve transcript" does. Today it only runs on the phone.
-   - It is a post processing step only. It works on the kept recording after the meeting, started from the Review screen, and never during
-     recording. There is no live speaker separation and none is planned, so nothing here touches the live captions or their correction windows.
-   - Found: `Diarizer.kt` runs sherpa-onnx on the phone (a pyannote segmentation model and a speaker model, about 36 MB, fetched on first use) and
-     `AppVm.separateSpeakers` shows "Telling speakers apart" there. The wire protocol has no request for it, so a node is never asked, even when one is
-     around and much faster. The core only stores the result (`meeting.speakers_apply`).
-   - Node: add a `Diarize` request (appended as the next variant, with a node capability so a phone knows which nodes can). The phone sends the kept
-     audio the way `Transcribe` does (16 kHz mono frames, cancel by closing the stream) and gets back who spoke when as spans with progress events.
-     Nothing is kept on the node. Run sherpa-onnx there (check the `sherpa-rs` crate or the C API first, and that it builds on Linux CUDA, CPU and Windows).
-     Models: `marginalia-node models download --only speakers`, the same two files as the phone. Show "speakers" next to chat, search and speech in
-     `status`, `peers` and the tray.
-   - Phone: `separateSpeakers` asks a node first (core `remote.rs` picks one like it does for `Transcribe`, paused nodes are skipped, a failed node falls
-     over to the next and then to the phone) and falls back to the phone when none can. The progress label says where it runs (for example "Listening on falcon").
-     Keep the choice of how many people spoke and the threshold. Keep the 3 hour limit.
-   - Check: does "Improve transcript" on a node drop the speaker labels that were already set? The segments are replaced, so the order matters.
-     Decide whether separating speakers runs after the node transcript (labels follow the new segments) and make that the one order.
-   - Check on a real phone with a real recording: a two voice talk with falcon (labels match the phone's result), falcon stopped mid-job (falls back
-     to the phone), a paused node (not asked), and a meeting with one voice. Tests: spans mapping, request framing in the proto crate, fallback in `remote.rs`.
-   - Models, from a look at what is current (2026-10-19). The phone keeps the small pipeline (pyannote segmentation 3.0 and a CAM++ speaker model,
-     36 MB). A node has room for a better one. Candidates, best first for us: (1) pyannote Community-1, released 2025, weights CC-BY-4.0 and code MIT,
-     clearly fewer speaker mix ups than 3.1 and no limit on the number of speakers, check that it exports to ONNX and runs in sherpa-onnx or `ort`.
-     (2) The same sherpa-onnx pipeline with a larger speaker embedding (WeSpeaker ResNet293 or a 3D-Speaker model), a cheap first step that needs no new
-     runtime. (3) NVIDIA Sortformer streaming v2, good but at most 4 speakers, so only an option for small meetings. (4) DiariZen (WavLM and Conformer),
-     accurate but slow and its weights may be non commercial, so not for shipping. Decide with a test set: 5 to 10 real recordings with hand labelled
-     speakers, score each choice with the same collar, and keep the phone's result as the baseline.
-   - Also open from today: swipe-away background test, Windows beta, cluster remainder (member lists, standby, roles).
+1b. Done (2026-10-19): telling speakers apart can run on a compute node. It is a post processing step only (the kept recording, after the meeting, started
+   from the Review screen) and opt-in twice: the node needs the helper program `marginalia-node-speakers` next to it and the two models from
+   `marginalia-node models download --only speakers` (about 33 MB). Without them the node does not offer it and the phone does it, as before.
+   - Why a separate program: sherpa-onnx brings its own ONNX Runtime, built with the other C++ string layout than llama.cpp, and linking both into
+     one program corrupts memory the moment ONNX Runtime starts (`free(): invalid pointer`, found with gdb). Apart they are fine, the models are only
+     in memory while a job runs, and a crash cannot take the node down. `compute-node/speakers/`, started with `--segmentation --voices --audio`.
+   - Protocol: `Request::Diarize` (variant 12), `DiarizeEvent`, `speakers` in the status, shown in `status`, `peers`, the tray window and `marginalia-node probe --speakers FILE`.
+   - Models, measured on the same audio (4 minutes of a public four speaker sample): WeSpeaker ResNet34 with a half window step takes 3.4 s, ResNet293 with the
+     library step 59 s, and they agree on 93% of the speech. The phone's old CAM++ model agreed on 73% and split one voice into 8. So the node and the phone
+     both use ResNet34 (26 MB) and a window step of half, 24 times faster on a real 19 minute talk (545 s to 23 s on the node). ResNet is only a network design:
+     this one is trained on voices (VoxCeleb), it reads a spectrogram and outputs a voice fingerprint. Candidates for later: pyannote Community-1 (check ONNX),
+     Sortformer (at most 4 speakers), DiariZen (slow, weights likely non commercial).
+   - The phone asks a node first (`meeting.speakers_node`), falls back to itself, and shows a percent: real while the audio goes up, an estimate while the node
+     listens (a node gives no steps), 100% with the answer. The phone alone takes 132 s for the same 19 minutes, with its own real percent.
+   - Nothing is kept on the node: the audio is a temporary file removed after the job (also on failure), and a start of the node removes leftovers older than a minute.
+   - Still to check with more recordings: accuracy on real two and three voice meetings against hand labels (the public sample is Chinese and 4 voices, the node found 2).
+   - Also open: swipe-away background test, Windows beta, cluster remainder (member lists, standby, roles).
 2. Later: take Windows out of beta (tray clicks, a reboot, a real phone). The core features work today on Linux.
 3. Cluster, the rest: member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
 4. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.

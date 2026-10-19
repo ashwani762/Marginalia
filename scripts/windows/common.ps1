@@ -18,6 +18,9 @@ $MN_BuiltTray = Join-Path $MN_RepoRoot 'target\release\marginalia-node-tray.exe'
 $MN_BuildStamp = Join-Path $MN_RepoRoot 'target\release\mn-backend.txt'
 $MN_InstNode  = Join-Path $MN_InstallDir 'marginalia-node.exe'
 $MN_InstTray  = Join-Path $MN_InstallDir 'marginalia-node-tray.exe'
+# The optional helper that tells speakers apart. The node looks for it next to itself. A node without it works as before.
+$MN_BuiltSpeakers = Join-Path $MN_RepoRoot 'target\release\marginalia-node-speakers.exe'
+$MN_InstSpeakers  = Join-Path $MN_InstallDir 'marginalia-node-speakers.exe'
 $MN_Launcher  = Join-Path $MN_InstallDir 'start-node.vbs'
 $MN_LogFile   = Join-Path $MN_InstallDir 'node.log'
 # The model files the node serves and their exact sizes (same as compute-node/node/src/models_dl.rs).
@@ -26,7 +29,8 @@ $MN_Models = @(
     @{ Role = 'search'; File = 'embeddinggemma-2-Q8_0.gguf'; Size = 309855456 },
     @{ Role = 'speech'; File = 'ggml-large-v3-turbo-q5_0.bin'; Size = 574041195 }
 )
-# The larger chat model. Setup downloads it so the tray menu can switch to it. Not part of verify.ps1.
+
+# The larger chat model. Setup downloads it so the tray menu can switch to it. Not part of verify.ps1.
 $MN_ChatLarge = @{ Role = 'chat'; File = 'gemma-4-E4B-it-Q4_0.gguf'; Size = 4590807392 }
 
 # ---- Output: one line per step ------------------------------------------------------------------
@@ -432,6 +436,8 @@ function Install-MnPrograms([string]$which = 'both') {
         New-Item -ItemType Directory -Force -Path $MN_InstallDir | Out-Null
         if ($which -ne 'tray') { Copy-Item -Force $MN_BuiltNode $MN_InstNode -ErrorAction Stop }
         if ($which -ne 'node') { Copy-Item -Force $MN_BuiltTray $MN_InstTray -ErrorAction Stop }
+        # The speaker helper is optional: copied when it was built, never a reason to stop.
+        if (($which -ne 'tray') -and (Test-Path $MN_BuiltSpeakers)) { Copy-Item -Force $MN_BuiltSpeakers $MN_InstSpeakers -ErrorAction SilentlyContinue }
         return $true
     } catch {
         Step-Fail ('Could not copy the programs: ' + $_.Exception.Message + '  Close any window running marginalia-node and try again.')
@@ -507,6 +513,10 @@ function Invoke-MnBuild {
                 return $false
             }
             Step-Ok 'Built marginalia-node.exe'
+            # The optional speaker helper (a separate program, see compute-node\speakers\src\main.rs). If it does not build, the node works without it.
+            Step-Info 'cargo build --release -p marginalia-node-speakers   (optional)'
+            & cargo build --release -p marginalia-node-speakers | Out-Host
+            if ($LASTEXITCODE -eq 0) { Step-Ok 'Built marginalia-node-speakers.exe' } else { Step-Warn 'The speaker helper did not build. The node works without it and the phone tells speakers apart by itself.' }
             $f = $gpu.Feature
             if (-not $f) { $f = 'cpu' }
             try { Set-Content -Path $MN_BuildStamp -Value ($f + '|' + $gpu.Archs) -Encoding ASCII } catch { }
