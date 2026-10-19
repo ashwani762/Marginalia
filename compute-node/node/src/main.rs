@@ -8,7 +8,9 @@ mod engine;
 mod host;
 mod metrics;
 mod models_dl;
+mod logfile;
 mod peers;
+mod resources;
 mod place;
 mod probe;
 mod records;
@@ -106,6 +108,15 @@ enum Cmd {
     },
     /// List the compute nodes this one has joined and whether they answer.
     Peers,
+    /// Show where the node keeps its log and the last lines of it.
+    Logs {
+        /// How many lines to show.
+        #[arg(long, default_value_t = 40)]
+        lines: usize,
+        /// Keep showing new lines as they are written (Ctrl-C to stop).
+        #[arg(long)]
+        follow: bool,
+    },
     /// Stop being a peer of a compute node (its id from `peers`, or its name).
     Unjoin { who: String },
     /// Show how much work the running node has done: jobs, speed, errors. Never any content.
@@ -232,11 +243,32 @@ fn state_dir(cli: &Cli) -> PathBuf {
     cli.state_dir.clone().or_else(|| dirs::config_dir().map(|d| d.join("marginalia-node"))).unwrap_or_else(|| PathBuf::from("marginalia-node-state"))
 }
 
+/// Logging goes to the screen, and for a running node also to `logs/node.log` in the state folder (see `logfile.rs`).
+/// The other commands only print.
+fn init_logging(cli: &Cli, dir: &std::path::Path) {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let filter = || tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "marginalia_node=info".into());
+    let screen = tracing_subscriber::fmt::layer();
+    let file = if matches!(cli.cmd, Cmd::Run { .. }) {
+        match logfile::LogFile::open(&logfile::dir_of(dir)) {
+            Ok(f) => Some(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(f)),
+            Err(e) => {
+                eprintln!("The log file could not be opened, logging to the screen only: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    tracing_subscriber::registry().with(filter()).with(screen).with(file).init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "marginalia_node=info".into())).init();
     let cli = Cli::parse();
     let dir = state_dir(&cli);
+    init_logging(&cli, &dir);
     match &cli.cmd {
         Cmd::Models { cmd } => match cmd {
             ModelsCmd::List { dir } => models_dl::list(dir.clone())?,
@@ -257,6 +289,28 @@ async fn main() -> Result<()> {
                 anyhow::bail!("{e}");
             }
             println!("Joined {} ({}) at {}. Phones paired with either compute node now work with both, and each sends jobs to the other when it is busy.", r["joined"].as_str().unwrap_or(""), r["id"].as_str().unwrap_or(""), r["addr"].as_str().unwrap_or(""));
+        }
+        Cmd::Logs { lines, follow } => {
+            let logs = logfile::dir_of(&dir);
+            println!("Log folder: {}", logs.display());
+            println!("Current file: {} (replaced at 5 MB, the last 5 are kept as node.log.1 to node.log.5)\n", logs.join(logfile::FILE).display());
+            for l in logfile::tail(&logs, *lines) {
+                println!("{l}");
+            }
+            if *follow {
+                let path = logs.join(logfile::FILE);
+                let mut seen = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let Ok(text) = std::fs::read(&path) else { continue };
+                    // A shorter file means it was replaced: start again from the top.
+                    if (text.len() as u64) < seen {
+                        seen = 0;
+                    }
+                    print!("{}", String::from_utf8_lossy(&text[seen as usize..]));
+                    seen = text.len() as u64;
+                }
+            }
         }
         Cmd::Peers => print!("{}", peers_text(&admin::ask(cli.admin_port, json!({"cmd": "peers"})).await?)),
         Cmd::Unjoin { who } => {
@@ -299,6 +353,7 @@ async fn main() -> Result<()> {
         Cmd::Revoke { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "revoke", "who": who})).await?),
         Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, window, prompt, hang_up_after, only, long } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *window, prompt.clone(), *hang_up_after, *only, *long).await?,
         Cmd::Run { port, name, models, chat_model, chat, embed_model, speech_model, no_speech, cpu, ctx, lock, window_max_seconds } => {
+            tracing::info!("marginalia-node {} starting on {} {}, state folder {}, log folder {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, dir.display(), logfile::dir_of(&dir).display());
             let store = Arc::new(state::Store::open(dir.clone())?);
             let identity = store.identity()?;
             if *lock {
@@ -330,7 +385,11 @@ async fn main() -> Result<()> {
             let host = Arc::new(tokio::task::spawn_blocking(move || host::Host::start(&opts)).await??);
             let peers = peers::Peers::open(&dir)?;
             let cluster = cluster::Cluster::new(store.clone(), peers, identity.clone(), name.clone(), *port)?;
-            let shared = Arc::new(server::Shared { cluster: cluster.clone(), store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), announce: Default::default(), nearby: Default::default(), stop: Default::default() });
+            let shared = Arc::new(server::Shared { cluster: cluster.clone(), store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), announce: Default::default(), resources: resources::Resources::new(), nearby: Default::default(), stop: Default::default() });
+            {
+                let counted = shared.clone();
+                shared.resources.start(move || counted.in_flight() as u32);
+            }
             let ep = server::endpoint(&shared, *port)?;
             match discovery::advertise(&name, *port, &identity.fingerprint()) {
                 Ok(a) => {

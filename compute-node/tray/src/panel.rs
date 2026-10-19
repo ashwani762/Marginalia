@@ -3,8 +3,10 @@
 //! local admin channel every 1.5 seconds while it is open and shows counts, names and timings only.
 //! Everything it can do goes through the same admin commands as the command line.
 
+use crate::charts::{self, Line};
 use crate::control::{Controller, Pairing};
 use crate::model::{self, Action, Activity, Info, Phone, Poll, State, View, Waiting};
+use crate::usage::{self, History, Load, Reading};
 use eframe::egui::{self, Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -24,6 +26,8 @@ const AMBER: Color32 = Color32::from_rgb(240, 165, 30);
 const BLUE: Color32 = Color32::from_rgb(96, 156, 255);
 const VIOLET: Color32 = Color32::from_rgb(170, 125, 230);
 const GREY: Color32 = Color32::from_rgb(130, 134, 142);
+const TEAL: Color32 = Color32::from_rgb(70, 200, 200);
+const ORANGE: Color32 = Color32::from_rgb(255, 150, 80);
 const RED: Color32 = Color32::from_rgb(240, 100, 95);
 const GREEN_BTN: Color32 = Color32::from_rgb(38, 120, 66);
 const RED_BTN: Color32 = Color32::from_rgb(110, 42, 44);
@@ -48,8 +52,34 @@ enum Cmd {
 
 enum Msg {
     View(View),
+    /// New readings of processor, memory, graphics card and network, and the name of the graphics card.
+    Usage(Vec<Reading>, Option<String>),
     Pairing(Pairing),
     Notice(String),
+}
+
+/// Asks the node for its readings once a second while the window is open: the last 2.5 minutes at first, then only the newest few.
+/// A node that does not know the question (an older one) or does not answer is asked again every few seconds.
+fn usage_worker(port: u16, ctx: egui::Context, tx: Sender<Msg>) {
+    let mut first = true;
+    loop {
+        let n = if first { 150 } else { 8 };
+        match crate::admin::ask_with(port, &serde_json::json!({"cmd": "resources", "n": n})) {
+            Ok(v) => {
+                let list: Vec<Reading> = v["samples"].as_array().into_iter().flatten().filter_map(Reading::from_json).collect();
+                first = false;
+                if tx.send(Msg::Usage(list, v["gpu_name"].as_str().map(String::from))).is_err() {
+                    return;
+                }
+                ctx.request_repaint();
+                std::thread::sleep(Duration::from_millis(1000));
+            }
+            Err(_) => {
+                first = true;
+                std::thread::sleep(Duration::from_secs(3));
+            }
+        }
+    }
 }
 
 fn worker(port: u16, ctx: egui::Context, tx: Sender<Msg>, rx: Receiver<Cmd>) {
@@ -91,6 +121,7 @@ struct Panel {
     rx: Receiver<Msg>,
     cmds: Sender<Cmd>,
     view: Option<View>,
+    history: History,
     activity: Activity,
     started: Instant,
     /// The code on show and when it stops being valid.
@@ -110,8 +141,12 @@ impl Panel {
     fn new(port: u16, keep_open: bool, ctx: egui::Context) -> Panel {
         let (tx, rx) = channel();
         let (cmds, cmd_rx) = channel();
+        {
+            let (ctx, tx) = (ctx.clone(), tx.clone());
+            std::thread::spawn(move || usage_worker(port, ctx, tx));
+        }
         std::thread::spawn(move || worker(port, ctx, tx, cmd_rx));
-        Panel { rx, cmds, view: None, activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, was_focused: false, placed: false, keep_open }
+        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, was_focused: false, placed: false, keep_open }
     }
 
     fn send(&self, c: Cmd) {
@@ -124,9 +159,18 @@ impl Panel {
                 Msg::View(v) => {
                     match &v.poll {
                         Poll::Up(i) => self.activity.push(self.started.elapsed().as_secs_f64(), (i.running_jobs + i.waiting_jobs) as u32, i.served),
-                        Poll::Down => self.activity.clear(),
+                        Poll::Down => {
+                            self.activity.clear();
+                            self.history.clear();
+                        }
                     }
                     self.view = Some(v);
+                }
+                Msg::Usage(list, gpu) => {
+                    self.history.merge(list);
+                    if gpu.is_some() {
+                        self.history.gpu_name = gpu;
+                    }
                 }
                 Msg::Pairing(p) => {
                     let until = Instant::now() + Duration::from_secs(p.minutes * 60);
@@ -153,6 +197,17 @@ impl Panel {
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2((m.x - WIDTH - 12.0).max(0.0), y.max(0.0))));
         }
     }
+}
+
+/// Opens a folder in the file manager.
+fn open_folder(dir: &str) {
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let program = "xdg-open";
+    let _ = std::process::Command::new(program).arg(dir).spawn();
 }
 
 fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
@@ -298,7 +353,126 @@ impl Panel {
                     truncated(ui, RichText::new(model.clone().unwrap_or_else(|| "not served".into())).size(11.0).color(DIM));
                 });
             }
+            // Reading photos has no speed to show: it is either set up or not.
+            if i.chat_model.is_some() {
+                ui.horizontal(|ui| {
+                    // The same label width as the rows above, so this text and the model name under it line up with theirs.
+                    ui.add_sized([52.0, 14.0], egui::Label::new(dim("Photos")));
+                    ui.label(RichText::new(model::photos_text(i)).size(12.0).color(if i.vision_model.is_some() { TEXT } else { DIM }));
+                });
+                if let Some(m) = &i.vision_model {
+                    ui.horizontal(|ui| {
+                        ui.add_space(58.0);
+                        truncated(ui, RichText::new(m).size(11.0).color(DIM));
+                    });
+                }
+            }
         });
+    }
+
+    /// The four live charts: processor, memory, graphics card and network, the last two minutes of each.
+    fn live_charts(&self, ui: &mut Ui) {
+        const WINDOW_MS: f64 = 120_000.0;
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
+        let display_ms = now_ms - charts::DELAY_MS;
+        let h = &self.history;
+        let Some(last) = h.latest().cloned() else { return };
+        let bands = h.busy_spans();
+        let band = BLUE.gamma_multiply(0.13);
+        let grid = Color32::from_white_alpha(14);
+        let back = Color32::from_rgb(26, 28, 34);
+        // A line turns amber and then red as the thing it shows fills up.
+        let by_load = |base: Color32, fraction: f32| match usage::load_of(fraction) {
+            Load::Calm => base,
+            Load::Busy => AMBER,
+            Load::Hot => RED,
+        };
+        let ctx = ui.ctx().clone();
+        let smooth = |id: &str, v: f32| ctx.animate_value_with_time(egui::Id::unique(("live", id)), v, 0.45);
+        let head = |ui: &mut Ui, colour: Color32, name: &str, main: String, sub: String| {
+            ui.horizontal(|ui| {
+                dot(ui, colour, 3.0);
+                ui.label(RichText::new(name).size(11.0).color(DIM));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(sub).size(10.5).color(DIM));
+                    ui.label(RichText::new(main).size(12.0).color(TEXT).strong());
+                });
+            });
+        };
+        let size = Vec2::new(ui.available_width(), 30.0);
+        let hover_text = |t: f64, parts: Vec<String>| {
+            let ago = ((now_ms - charts::DELAY_MS - t) / 1000.0).max(0.0);
+            format!("{ago:.0} s ago: {}", parts.join(", "))
+        };
+
+        // Processor
+        let cpu = smooth("cpu", last.cpu);
+        head(ui, by_load(BLUE, last.cpu / 100.0), "Processor", format!("{cpu:.0}%"), format!("this node {:.0}%", smooth("node_cpu", last.node_cpu)));
+        let (cpu_l, node_l) = (h.series(|r| Some(r.cpu / 100.0)), h.series(|r| Some(r.node_cpu / 100.0)));
+        let lines = [Line { points: cpu_l.clone(), colour: by_load(BLUE, last.cpu / 100.0), fill: true, width: 1.6, head: true }, Line { points: node_l, colour: Color32::WHITE.gamma_multiply(0.85), fill: false, width: 1.1, head: false }];
+        let hit = charts::chart(ui, size, display_ms, WINDOW_MS, &bands, band, &lines, back, grid);
+        if let Some(t) = hit.at_ms {
+            let at = |s: &Vec<(u64, f32)>| usage::value_at(s, t).map(|v| v * 100.0).unwrap_or(0.0);
+            hit.response.on_hover_ui_at_pointer(|ui| {
+                ui.label(hover_text(t, vec![format!("processor {:.0}%", at(&cpu_l)), format!("this node {:.0}%", at(&lines[1].points))]));
+            });
+        }
+        ui.add_space(5.0);
+
+        // Memory
+        head(ui, by_load(VIOLET, last.mem_fraction()), "Memory", format!("{} of {}", usage::size_text(last.mem_used), usage::size_text(last.mem_total)), format!("this node {}", usage::size_text(last.node_rss)));
+        let (mem_l, node_m) = (h.series(|r| Some(r.mem_fraction())), h.series(|r| Some(r.node_mem_fraction())));
+        let lines = [Line { points: mem_l.clone(), colour: by_load(VIOLET, last.mem_fraction()), fill: true, width: 1.6, head: true }, Line { points: node_m, colour: Color32::WHITE.gamma_multiply(0.85), fill: false, width: 1.1, head: false }];
+        let hit = charts::chart(ui, size, display_ms, WINDOW_MS, &bands, band, &lines, back, grid);
+        if let Some(t) = hit.at_ms {
+            let total = last.mem_total as f32;
+            hit.response.on_hover_ui_at_pointer(|ui| {
+                ui.label(hover_text(t, vec![format!("memory {}", usage::size_text((usage::value_at(&mem_l, t).unwrap_or(0.0) * total) as u64)), format!("this node {}", usage::size_text((usage::value_at(&lines[1].points, t).unwrap_or(0.0) * total) as u64))]));
+            });
+        }
+        ui.add_space(5.0);
+
+        // Graphics card, when the node can read one
+        if h.has_gpu() {
+            let gpu_pct = last.gpu.unwrap_or(0.0);
+            let name = h.gpu_name.clone().unwrap_or_else(|| "Graphics card".into());
+            let vram = match (last.vram_used, last.vram_total) {
+                (Some(u), Some(t)) => format!("{} of {}", usage::size_text(u), usage::size_text(t)),
+                _ => String::new(),
+            };
+            let temp = last.gpu_temp.map(|c| format!("{c:.0} C")).unwrap_or_default();
+            head(ui, by_load(GREEN, gpu_pct / 100.0), "Graphics", format!("{:.0}%", smooth("gpu", gpu_pct)), [vram, temp].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(", "));
+            let (gpu_l, vram_l) = (h.series(|r| r.gpu.map(|g| g / 100.0)), h.series(|r| r.vram_fraction()));
+            let lines = [Line { points: gpu_l.clone(), colour: by_load(GREEN, gpu_pct / 100.0), fill: true, width: 1.6, head: true }, Line { points: vram_l, colour: AMBER.gamma_multiply(0.9), fill: false, width: 1.1, head: false }];
+            let hit = charts::chart(ui, size, display_ms, WINDOW_MS, &bands, band, &lines, back, grid);
+                if let Some(t) = hit.at_ms {
+                    hit.response.on_hover_ui_at_pointer(|ui| {
+                    ui.label(hover_text(t, vec![name.clone(), format!("busy {:.0}%", usage::value_at(&gpu_l, t).unwrap_or(0.0) * 100.0), format!("memory {:.0}%", usage::value_at(&lines[1].points, t).unwrap_or(0.0) * 100.0)]));
+                    });
+            }
+            ui.add_space(5.0);
+        }
+
+        // Network, both ways on one scale that grows and shrinks with the traffic
+        let peak = h.readings.iter().map(|r| r.net_rx.max(r.net_tx) as f32).fold(0.0, f32::max);
+        let top = usage::nice_max(peak, 20_000.0);
+        head(ui, TEAL, "Network", format!("in {}", usage::rate_text(smooth("rx", last.net_rx as f32))), format!("out {}", usage::rate_text(smooth("tx", last.net_tx as f32))));
+        let (rx_l, tx_l) = (h.series(|r| Some(r.net_rx as f32 / top)), h.series(|r| Some(r.net_tx as f32 / top)));
+        let lines = [Line { points: rx_l.clone(), colour: TEAL, fill: true, width: 1.6, head: true }, Line { points: tx_l, colour: ORANGE, fill: false, width: 1.3, head: true }];
+        let hit = charts::chart(ui, size, display_ms, WINDOW_MS, &bands, band, &lines, back, grid);
+            if let Some(t) = hit.at_ms {
+                hit.response.on_hover_ui_at_pointer(|ui| {
+                ui.label(hover_text(t, vec![format!("in {}", usage::rate_text(usage::value_at(&rx_l, t).unwrap_or(0.0) * top)), format!("out {}", usage::rate_text(usage::value_at(&lines[1].points, t).unwrap_or(0.0) * top))]));
+                });
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("2 min ago").size(10.0).color(DIM));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(format!("scale up to {}", usage::rate_text(top))).size(10.0).color(DIM));
+            });
+        });
+        // Keeps the charts gliding.
+        ui.ctx().request_repaint_after(Duration::from_millis(33));
     }
 
     fn activity(&self, ui: &mut Ui, i: &Info) {
@@ -316,15 +490,20 @@ impl Panel {
                     ui.label(RichText::new(format!("{} failed", i.failed)).size(12.0).color(if i.failed > 0 { RED } else { DIM }));
                 });
             });
-            let now = self.started.elapsed().as_secs_f64();
-            let bars = self.activity.bars(SPARK_COLUMNS, now);
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
-            let step = rect.width() / SPARK_COLUMNS as f32;
-            for (k, f) in bars.iter().enumerate() {
-                let h = if *f > 0.0 { (rect.height() * f).max(3.0) } else { 1.5 };
-                let x = rect.left() + k as f32 * step;
-                let r = egui::Rect::from_min_max(egui::pos2(x + 0.5, rect.bottom() - h), egui::pos2(x + step - 0.5, rect.bottom()));
-                ui.painter().rect_filled(r, CornerRadius::same(1), if *f > 0.0 { BLUE } else { TRACK });
+            if self.history.readings.len() >= 3 {
+                self.live_charts(ui);
+            } else {
+                // A node that sends no readings (an older one): the bars of finished jobs.
+                let now = self.started.elapsed().as_secs_f64();
+                let bars = self.activity.bars(SPARK_COLUMNS, now);
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
+                let step = rect.width() / SPARK_COLUMNS as f32;
+                for (k, f) in bars.iter().enumerate() {
+                    let h = if *f > 0.0 { (rect.height() * f).max(3.0) } else { 1.5 };
+                    let x = rect.left() + k as f32 * step;
+                    let r = egui::Rect::from_min_max(egui::pos2(x + 0.5, rect.bottom() - h), egui::pos2(x + step - 0.5, rect.bottom()));
+                    ui.painter().rect_filled(r, CornerRadius::same(1), if *f > 0.0 { BLUE } else { TRACK });
+                }
             }
             let n = self.activity.finished();
             ui.horizontal(|ui| {
@@ -457,6 +636,17 @@ impl Panel {
                 ui.horizontal(|ui| {
                     ui.add_sized([58.0, 14.0], egui::Label::new(dim("Address")));
                     ui.label(RichText::new(a).font(FontId::monospace(12.0)).color(TEXT));
+                });
+            }
+            if let Some(dir) = &i.log_dir {
+                ui.horizontal(|ui| {
+                    ui.add_sized([58.0, 14.0], egui::Label::new(dim("Logs")));
+                    truncated(ui, RichText::new(dir).font(FontId::monospace(11.0)).color(DIM));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if small_button(ui, "Open", "Open the folder with the node's log files. They hold events and numbers, never the text of notes, questions, recordings or photos.") {
+                            open_folder(dir);
+                        }
+                    });
                 });
             }
         });

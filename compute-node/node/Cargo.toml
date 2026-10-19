@@ -36,6 +36,8 @@ hostname = "0.4"
 # Model downloads (`marginalia-node models download`). Same version and TLS backend as the phone core.
 ureq = { version = "3", features = ["rustls"] }
 if-addrs = "0.13"
+# Processor, memory and network figures for the live graphs in the tray window.
+sysinfo = { version = "0.31", default-features = false, features = ["system", "network"] }
 
 [build-dependencies]
 # Builds whisper.cpp (speech to text) against the ggml that llama-cpp-sys-2 already compiles.

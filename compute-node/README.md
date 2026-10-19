@@ -174,6 +174,17 @@ A Pi 4 or 5 (64-bit OS) can run the node, CPU only (`scripts/node/build.sh --cpu
 
 `PROTO_VERSION` (currently 1) and the ALPN string `marginalia/1` identify the wire format. The version is part of the TLS handshake through ALPN, so a phone and a node that disagree refuse each other cleanly instead of misreading messages. The version also appears in status and in the mDNS announcement. Changes that old peers can read keep the number; changes they cannot read bump it, and the phone and node need to be updated together. There is no negotiation of older versions yet.
 
+## Graphs and logs
+
+- The tray window draws the last two minutes of processor, memory, graphics card and network use. The node reads them once a second (`resources.rs`,
+  the graphics card through `nvidia-smi` when it is installed, so there is no graphics line on other cards) and keeps 15 minutes in memory. The admin
+  channel answers `{"cmd": "resources", "n": 120}`.
+- Everything the node says is also written to `logs/node.log` in the state folder (`~/.config/marginalia-node/logs` on Linux). The file is replaced at
+  5 MB and the last 5 are kept. It holds events and numbers only, never the text of notes, questions, recordings or photos. A line with the machine's
+  load is added every minute. `marginalia-node logs` shows the folder and the last lines, `--follow` keeps going, `RUST_LOG=marginalia_node=debug`
+  gives more detail. When something goes wrong, send the last `node.log`.
+- A node with the vision projector next to its chat model also reads photos for phones (`vision` in `status`).
+
 ## Not built yet
 
 These are plans, not features:

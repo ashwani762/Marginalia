@@ -172,11 +172,31 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
      Decide whether separating speakers runs after the node transcript (labels follow the new segments) and make that the one order.
    - Check on a real phone with a real recording: a two voice talk with falcon (labels match the phone's result), falcon stopped mid-job (falls back
      to the phone), a paused node (not asked), and a meeting with one voice. Tests: spans mapping, request framing in the proto crate, fallback in `remote.rs`.
+   - Models, from a look at what is current (2026-10-19). The phone keeps the small pipeline (pyannote segmentation 3.0 and a CAM++ speaker model,
+     36 MB). A node has room for a better one. Candidates, best first for us: (1) pyannote Community-1, released 2025, weights CC-BY-4.0 and code MIT,
+     clearly fewer speaker mix ups than 3.1 and no limit on the number of speakers, check that it exports to ONNX and runs in sherpa-onnx or `ort`.
+     (2) The same sherpa-onnx pipeline with a larger speaker embedding (WeSpeaker ResNet293 or a 3D-Speaker model), a cheap first step that needs no new
+     runtime. (3) NVIDIA Sortformer streaming v2, good but at most 4 speakers, so only an option for small meetings. (4) DiariZen (WavLM and Conformer),
+     accurate but slow and its weights may be non commercial, so not for shipping. Decide with a test set: 5 to 10 real recordings with hand labelled
+     speakers, score each choice with the same collar, and keep the phone's result as the baseline.
    - Also open from today: swipe-away background test, Windows beta, cluster remainder (member lists, standby, roles).
 2. Later: take Windows out of beta (tray clicks, a reboot, a real phone). The core features work today on Linux.
 3. Cluster, the rest: member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
 4. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.
 5. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).
+
+## Photos, graphs and logs (2026-10-19)
+
+- Photos: a photo taken while recording used to be read at once by Gemma on the phone's GPU, which froze the screen for about 4.5 seconds (535 skipped
+  frames, measured on the phone). Now a compute node reads it when one can (the new `Describe` request, a node says it can with `vision` in its status
+  and needs the vision projector `mmproj-<model>-*.gguf` next to the chat model, `find_projector` in `host.rs`). When none can, the photo waits and is read
+  after the meeting, or at once with "Read now". A node that fails falls back to waiting, never to the phone's GPU during a recording. Measured with a
+  real photo during a recording: 14 janky frames of 951 and no stall with a node, 26 of 811 and no stall without one.
+- The tray window shows a "Photos" row, a live card with processor, memory, graphics card and network (smooth two minute charts, busy stretches tinted,
+  lines turn amber and red when full, a read out under the pointer) and a "Logs" row with the folder.
+- Logs: a running node writes `logs/node.log` in its state folder (replaced at 5 MB, the last 5 kept) with events and numbers only, never the text of notes,
+  questions, recordings or photos, plus a line every minute with processor, memory, graphics card, network and jobs. `marginalia-node logs [--lines N] [--follow]`
+  shows the folder and the tail. Not done: the tray's own log, and a log file on the phone (today it only goes to `adb logcat`).
 
 ## Several nodes and failures (checked on a real phone, 2026-10-18)
 

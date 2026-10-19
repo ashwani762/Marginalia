@@ -40,6 +40,11 @@ fn now_ms() -> u64 {
 }
 
 impl Store {
+    /// The state folder (identity, paired phones, logs).
+    pub fn dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
     pub fn open(dir: PathBuf) -> Result<Store> {
         std::fs::create_dir_all(&dir)?;
         let mut records = Records::from_list(std::fs::read(dir.join("records.json")).ok().and_then(|b| serde_json::from_slice::<Vec<PhoneRecord>>(&b).ok()).unwrap_or_default());

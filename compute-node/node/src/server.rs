@@ -49,6 +49,8 @@ pub struct Shared {
     pub paused: AtomicBool,
     /// The network announcement, set once it is up. Pausing and resuming announce again so phones see it at once.
     pub announce: std::sync::OnceLock<crate::discovery::Advertiser>,
+    /// Processor, memory, graphics card and network, once a second, for the tray window and the log.
+    pub resources: Arc<crate::resources::Resources>,
     /// Other nodes seen on the network, for showing in `peers`, `status` and the tray. Nothing is joined from this.
     pub nearby: Arc<crate::discovery::NearbyList>,
     /// Woken by the `shutdown` command to make the node stop.
@@ -141,6 +143,7 @@ impl Shared {
             uptime_s: self.metrics.uptime_s(),
             pending: self.pending_list(),
             paused: self.paused.load(Ordering::Relaxed),
+            vision: self.host.vision,
         }
     }
 }
@@ -253,6 +256,7 @@ async fn request(sh: Arc<Shared>, conn: quinn::Connection, fp: String, mut send:
         }
         (Request::Status, Some(_)) => wire::write_frame(&mut send, &sh.status()).await?,
         (Request::Chat(r), Some(c)) => chat(&sh, r, &mut send, c, peer.is_some()).await?,
+        (Request::Describe(r), Some(c)) => describe(&sh, r, &mut send, c).await?,
         (Request::Embed(r), Some(c)) => embed(&sh, r, &mut send, c, peer.is_some()).await?,
         (Request::Transcribe(r), Some(c)) => transcribe(&sh, &conn, r, &mut send, recv, c).await?,
     }
@@ -296,6 +300,45 @@ fn try_pair(sh: &Shared, conn: &quinn::Connection, fp: &str, name: String, proof
 }
 
 async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut quinn::SendStream, client: crate::state::Client, from_peer: bool) -> Result<()> {
+    chat_with_images(sh, r, Vec::new(), send, client, from_peer).await
+}
+
+/// Reads a photo for a phone. The picture is written to a temporary file for the model and removed again, nothing is kept.
+/// It is answered like a chat job: the description arrives as tokens and then `Done`. It is never passed on to a peer.
+async fn describe(sh: &Arc<Shared>, r: marginalia_proto::DescribeRequest, send: &mut quinn::SendStream, client: crate::state::Client) -> Result<()> {
+    if !sh.host.vision {
+        wire::write_frame(send, &ChatEvent::Error("This compute node does not read photos.".into())).await?;
+        return Ok(());
+    }
+    // A small job: a JPEG from a phone is a few hundred kilobytes, and a huge one is not a photo.
+    if r.jpeg.len() < 100 || r.jpeg.len() > 16 * 1024 * 1024 {
+        wire::write_frame(send, &ChatEvent::Error("That does not look like a photo.".into())).await?;
+        return Ok(());
+    }
+    let path = std::env::temp_dir().join(format!("marginalia-photo-{}-{}.jpg", std::process::id(), sh.metrics.chat_jobs.load(Ordering::Relaxed) + rand_suffix()));
+    if let Err(e) = std::fs::write(&path, &r.jpeg) {
+        wire::write_frame(send, &ChatEvent::Error(format!("Could not use the photo: {e}"))).await?;
+        return Ok(());
+    }
+    let prompt = format!("{}\n{}", crate::engine::llm::image_marker(), r.prompt);
+    let req = marginalia_proto::ChatRequest {
+        messages: vec![marginalia_proto::ChatMsg { role: marginalia_proto::Role::User, content: prompt }],
+        max_tokens: r.max_tokens,
+        temperature: 0.2,
+        top_p: 0.95,
+        top_k: 64,
+        priority: r.priority,
+    };
+    let out = chat_with_images(sh, req, vec![path.clone()], send, client, true).await;
+    let _ = std::fs::remove_file(&path);
+    out
+}
+
+fn rand_suffix() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos() as u64).unwrap_or(0)
+}
+
+async fn chat_with_images(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, images: Vec<std::path::PathBuf>, send: &mut quinn::SendStream, client: crate::state::Client, from_peer: bool) -> Result<()> {
     // A job from a phone goes to a peer when this node is clearly the worse choice. A job from a peer stays here,
     // so a job is never passed on twice.
     // The words a peer wrote before it stopped. This node carries on from them, so the phone sees one answer.
@@ -348,7 +391,7 @@ async fn chat(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, send: &mut qui
     let (sh2, cl) = (sh.clone(), client);
     llm.generate(GenRequest {
         messages,
-        images: vec![],
+        images,
         params: GenParams { max_tokens: r.max_tokens as usize, temperature: r.temperature, top_p: r.top_p, top_k: r.top_k, repeat_penalty: 1.05 },
         priority: if r.priority == Priority::Interactive { engine::Priority::High } else { engine::Priority::Low },
         cancel: cancel.clone(),

@@ -91,6 +91,8 @@ pub struct Info {
     /// The speech model, if this node transcribes recordings, and how many times faster than real time it is.
     pub speech_model: Option<String>,
     pub speech_x: f64,
+    /// The vision projector, if this node reads photos for phones.
+    pub vision_model: Option<String>,
     pub chat_jobs: u64,
     pub search_jobs: u64,
     pub failed: u64,
@@ -99,6 +101,8 @@ pub struct Info {
     pub peers: Vec<Peer>,
     pub nearby: Vec<Nearby>,
     pub addresses: Vec<String>,
+    /// Where the node keeps its log files.
+    pub log_dir: Option<String>,
 }
 
 /// What the last poll found.
@@ -201,6 +205,7 @@ pub fn parse(status: &Value, stats: Option<&Value>) -> Info {
         search_per_s: status["embed_per_s"].as_f64().unwrap_or(0.0),
         speech_model: text(&status["speech"]),
         speech_x: status["speech_x"].as_f64().unwrap_or(0.0),
+        vision_model: if status["vision"].as_bool() == Some(true) { Some(text(&status["vision_model"]).unwrap_or_else(|| "vision".into())) } else { None },
         chat_jobs: jobs("chat", "jobs"),
         search_jobs: jobs("search", "jobs"),
         failed: jobs("chat", "errors") + jobs("search", "errors") + jobs("speech", "errors"),
@@ -209,11 +214,21 @@ pub fn parse(status: &Value, stats: Option<&Value>) -> Info {
         peers,
         nearby,
         addresses: status["addresses"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect(),
+        log_dir: text(&status["log_dir"]),
     }
 }
 
 fn plural(count: u64, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// The Photos line of the panel: whether this node reads photos for phones.
+pub fn photos_text(i: &Info) -> String {
+    if i.vision_model.is_some() {
+        "Reads photos for phones".into()
+    } else {
+        "Not set up, the vision file is missing".into()
+    }
 }
 
 /// What a peer is doing, for the panel: "Not answering", "Paused", "Idle" or "Working on 2 jobs".
@@ -574,6 +589,21 @@ mod tests {
 
     fn model_peer_idle() -> String {
         peer_line(&Peer { name: "x".into(), addr: String::new(), reachable: true, paused: false, load: 0 })
+    }
+
+    #[test]
+    fn the_vision_model_is_read_from_the_status() {
+        let mut st = status();
+        assert_eq!(parse(&st, None).vision_model, None);
+        assert_eq!(photos_text(&parse(&st, None)), "Not set up, the vision file is missing");
+        st["vision"] = json!(true);
+        st["vision_model"] = json!("mmproj-gemma-4-E2B-it-Q8_0");
+        let i = parse(&st, None);
+        assert_eq!(i.vision_model.as_deref(), Some("mmproj-gemma-4-E2B-it-Q8_0"));
+        assert_eq!(photos_text(&i), "Reads photos for phones");
+        // A node that says it reads photos without naming the file still shows as ready.
+        st["vision_model"] = json!(null);
+        assert_eq!(parse(&st, None).vision_model.as_deref(), Some("vision"));
     }
 
     #[test]

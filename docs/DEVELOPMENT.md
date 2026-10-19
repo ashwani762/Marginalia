@@ -33,6 +33,12 @@ Models (never committed, see `.gitignore`): `gemma-4-E2B-it.litertlm`, `embeddin
 
 Always set `ANDROID_SERIAL` before `adb` or `gradlew` when more than one device is attached.
 
+Photos during a recording are never read on the phone's GPU (it froze the screen for about 4.5 seconds and lagged the live transcript): a compute node
+reads them when one can, otherwise they wait for the end of the meeting. Check a change to this with `adb shell dumpsys gfxinfo app.marginalia reset`, a real
+photo, and `dumpsys gfxinfo` and `logcat | grep Davey` afterwards.
+
+Logs: the phone's core logs to `adb logcat` only. A node writes `logs/node.log` in its state folder (`marginalia-node logs`).
+
 Tests: `cd core && cargo test --lib`, `./gradlew :app:testDebugUnitTest`. Debug builds accept development intents
 (`DEBUG_CALL`, `DEBUG_FEED`) that run any core command or feed an audio file as if it were the microphone, even while the phone is locked.
 

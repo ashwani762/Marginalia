@@ -31,6 +31,10 @@ pub struct Host {
     /// Speech to text, if the model file was there.
     pub whisper: Option<Arc<Whisper>>,
     pub caps: parking_lot::Mutex<Capabilities>,
+    /// The chat model has its vision projector next to it, so this node can read photos.
+    pub vision: bool,
+    /// The vision projector's name, for the status and the tray.
+    pub vision_model: Option<String>,
     /// Jobs that have been accepted and not yet finished.
     pub chat_jobs: Arc<AtomicU32>,
     pub embed_jobs: Arc<AtomicU32>,
@@ -46,6 +50,20 @@ pub struct Host {
     pub window_gate: Arc<tokio::sync::Semaphore>,
     /// Windows in flight per phone (certificate fingerprint), so one phone cannot fill the lane.
     pub window_by_phone: parking_lot::Mutex<std::collections::HashMap<String, u32>>,
+}
+
+/// The vision projector that goes with a chat model: `mmproj-<model family>-*.gguf` in the same folder, for example
+/// `mmproj-gemma-4-E2B-it-Q8_0.gguf` for `gemma-4-E2B-it-Q4_0.gguf`. None when it was not downloaded.
+pub fn find_projector(chat_model: &std::path::Path) -> Option<PathBuf> {
+    let stem = chat_model.file_stem()?.to_string_lossy().to_string();
+    let family = stem.rsplit_once('-').map(|(f, _)| f.to_string()).unwrap_or(stem);
+    let prefix = format!("mmproj-{family}-");
+    let mut found: Vec<PathBuf> = std::fs::read_dir(chat_model.parent()?).ok()?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| {
+        let n = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        n.starts_with(&prefix) && n.ends_with(".gguf")
+    }).collect();
+    found.sort();
+    found.into_iter().next()
 }
 
 pub const SPEECH_FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
@@ -108,10 +126,15 @@ impl Host {
         };
 
         let chat_path = opts.chat_model.clone().unwrap_or_else(|| default_chat_path(&opts.models_dir));
+        let projector = if chat_path.is_file() { find_projector(&chat_path) } else { None };
         let llm = if chat_path.is_file() {
             let mut found = None;
+            match &projector {
+                Some(p) => tracing::info!("vision projector {} found, this node can read photos", p.display()),
+                None => tracing::info!("no vision projector next to the chat model, this node does not read photos"),
+            }
             for layers in tiers(opts.cpu_only) {
-                let cfg = crate::engine::llm::LlmConfig { model_path: chat_path.clone(), mmproj_path: None, gpu_layers: layers, use_gpu: layers > 0, n_ctx: opts.ctx, threads: threads() };
+                let cfg = crate::engine::llm::LlmConfig { model_path: chat_path.clone(), mmproj_path: projector.clone(), gpu_layers: layers, use_gpu: layers > 0, n_ctx: opts.ctx, threads: threads() };
                 match crate::engine::llm::spawn(backend.clone(), cfg) {
                     Ok(h) => {
                         tracing::info!("chat model loaded ({} GPU layers)", layers);
@@ -163,6 +186,8 @@ impl Host {
         let window_gate = if whisper.as_ref().map(|w| w.on_gpu()).unwrap_or(false) { Arc::new(tokio::sync::Semaphore::new(1)) } else { speech_gate.clone() };
         let host = Host {
             _backend: backend,
+            vision: llm.is_some() && projector.is_some(),
+            vision_model: projector.as_ref().filter(|_| llm.is_some()).and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()),
             llm,
             embed,
             whisper,

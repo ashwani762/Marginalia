@@ -7,8 +7,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod admin;
+mod charts;
 mod control;
 mod icon;
+mod usage;
 mod model;
 mod os;
 mod panel;
@@ -19,6 +21,23 @@ mod linux;
 mod windows;
 
 use clap::Parser;
+
+#[cfg(test)]
+mod single_tests {
+    use super::single_instance;
+
+    #[test]
+    fn a_second_tray_for_the_same_node_does_not_start_and_the_port_is_free_again_afterwards() {
+        let port = 47_981;
+        let first = single_instance(port).unwrap();
+        assert!(first.is_some());
+        assert!(single_instance(port).is_err(), "the second one must be turned away");
+        // A tray for another node is not affected.
+        assert!(single_instance(port + 10).unwrap().is_some());
+        drop(first);
+        assert!(single_instance(port).unwrap().is_some(), "closing the first frees the place");
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "marginalia-node-tray", version, about = "A tray icon to watch and control marginalia-node")]
@@ -37,8 +56,31 @@ struct Cli {
     keep_open: bool,
 }
 
+/// Only one tray icon per node: the first one holds a port on this machine for as long as it runs (the node's control port plus one),
+/// and a second one finds it taken and does not start. Nothing is held for the panel or `--print`. Any other problem with the
+/// port is no reason to stop the tray, so it carries on.
+fn single_instance(admin_port: u16) -> Result<Option<std::net::TcpListener>, ()> {
+    match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, admin_port.wrapping_add(1))) {
+        Ok(l) => Ok(Some(l)),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(()),
+        Err(_) => Ok(None),
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
+    // Held until the program ends.
+    let _only_one = if cli.panel || cli.print {
+        None
+    } else {
+        match single_instance(cli.admin_port) {
+            Ok(l) => l,
+            Err(()) => {
+                eprintln!("The tray icon is already running.");
+                return;
+            }
+        }
+    };
     if cli.panel {
         panel::run(cli.admin_port, cli.keep_open);
         return;

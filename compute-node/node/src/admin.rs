@@ -39,7 +39,7 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                         "port": node_port, "addresses": addrs,
                         "name": sh.name, "fingerprint": sh.identity.fingerprint(), "locked": sh.locked.load(Ordering::Relaxed),
                         "chat": caps.chat, "embed": caps.embed, "chat_tok_s": caps.chat_tok_s, "embed_per_s": caps.embed_per_s,
-                        "speech": caps.transcribe, "speech_x": caps.transcribe_x, "window_max_s": caps.window_max_s,
+                        "speech": caps.transcribe, "speech_x": caps.transcribe_x, "vision": sh.host.vision, "log_dir": crate::logfile::dir_of(sh.store.dir()), "vision_model": sh.host.vision_model, "window_max_s": caps.window_max_s,
                         "blocked": sh.store.blocked_list().iter().map(|b| json!({"name": b.name, "id": &b.fp[..16], "at": b.at})).collect::<Vec<_>>(),
                         "waiting": sh.pending_list().iter().map(|p| json!({"id": p.id, "name": p.name, "waited_s": p.waited_s})).collect::<Vec<_>>(),
                         "peers": sh.cluster.snapshot(), "nearby": nearby_not_joined(&sh), "forwarded": sh.cluster.forwarded.load(Ordering::Relaxed),
@@ -47,6 +47,11 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                     })
                 }
                 "peers" => json!({"peers": sh.cluster.snapshot(), "nearby": nearby_not_joined(&sh)}),
+                // The last `n` seconds (default 120, at most 900) of processor, memory, graphics card and network readings.
+                "resources" => {
+                    let n = req["n"].as_u64().unwrap_or(120).clamp(1, 900) as usize;
+                    json!({"samples": sh.resources.last(n).iter().map(|s| s.to_json()).collect::<Vec<_>>(), "gpu_name": sh.resources.gpu_name()})
+                }
                 "join" => match sh.cluster.join(&resolve_nearby(&sh, req["addr"].as_str().unwrap_or("")), req["code"].as_str().unwrap_or("")).await {
                     Ok(p) => json!({"joined": p.name, "id": &p.fp[..16], "addr": p.addr}),
                     Err(e) => json!({"error": format!("{e:#}")}),
