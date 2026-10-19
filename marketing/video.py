@@ -112,9 +112,9 @@ def scene_hook(cv,t):
             _,head=notebook_base(int(pw*100));pen=rot(pen_layer(),-28);lay.paste(pen,(int(head[0]-10),int(head[1]-pen.height+22)),pen)
         lay=rot(lay,-3)
         put(cv,lay,540,1180+(1-nin)*700+nout*900)
-    mblock(cv,t,2.45,4.55,[('l','I write it'),('l','all down.')],150)
-    mblock(cv,t,4.8,6.4,[('l','And still lose'),('la','the context.')],150)
-    mline(cv,t,6.95,8.25,'So I built',"m",700)
+    mblock(cv,t,2.45,4.55,[('l','Notes pile up.')],150)
+    mblock(cv,t,4.8,6.4,[('l','Context'),('la','slips away.')],150)
+    mline(cv,t,6.95,8.25,'Meet',"m",700)
     mline(cv,t,7.1,8.3,'Marginalia','w',860)
 CAP=[(a,'It listens.','Live captions as people talk.'),(b,'Tag what matters.','Note, Action, Decision, Question.'),
      (b2,'The AI tidies it.','Using what was just said.'),(c,'It remembers.','Old meetings chime in.'),
