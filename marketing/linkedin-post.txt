@@ -1,0 +1,29 @@
+𝗜'𝗺 𝗮 𝗱𝗲𝘃𝗲𝗹𝗼𝗽𝗲𝗿. 𝗔 𝗯𝗶𝗴 𝗽𝗮𝗿𝘁 𝗼𝗳 𝗺𝘆 𝘄𝗲𝗲𝗸 𝗶𝘀 𝗺𝗲𝗲𝘁𝗶𝗻𝗴𝘀. 𝗔𝗻𝗱 𝗜 𝗸𝗲𝗽𝘁 𝗹𝗼𝘀𝗶𝗻𝗴 𝘁𝗵𝗲 𝗰𝗼𝗻𝘁𝗲𝘅𝘁.
+
+Standups. Sprint planning. Design reviews. Syncs about the syncs.
+
+My system was a notebook. I'd write while people talked, and by the time I finished a line, the discussion had moved on. A week later I'd find a note that made perfect sense when I wrote it and none at all now. Who said it? Why? What did we actually decide?
+
+The notes were there. The context was gone.
+
+I didn't want AI to attend meetings for me. I wanted it to work like an extension of my own memory, so I could listen and think, and still have everything later.
+
+So I built Marginalia for myself. It's an Android app that sits on the table and does the listening:
+
+• Captions appear live while people talk
+• I tap Note, Action, Decision or Question and type a few words. The AI turns them into a proper note using what was just said
+• Related bits from older meetings show up while I'm still in the room
+• Afterwards I ask "what did we decide about X?" and get the answer with the exact moment it was said
+
+One rule from day one: it runs on the phone. No account, no cloud, no recording on someone else's server. A lot of what we discuss at work isn't something I'm allowed to upload.
+
+When the phone needs more power, it can borrow my own PC on the local network. The PC does the heavy work and keeps nothing.
+
+For the developers wondering what's inside:
+Gemma 4 E2B on LiteRT-LM writes notes and answers, EmbeddingGemma powers search, and whisper.cpp (Whisper small) does live captions. On the PC: llama.cpp, Whisper large-v3 turbo, and pyannote with WeSpeaker to tell speakers apart. Core in Rust, app in Kotlin.
+
+The best part isn't any single feature. It's that I put the pen down, look at whoever is speaking, and trust that the context will still be there next week.
+
+How do you keep track of everything said in your meetings?
+
+#SoftwareEngineering #Productivity #OnDeviceAI #Android #BuildInPublic
