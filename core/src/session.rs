@@ -245,8 +245,6 @@ pub struct Core {
     line_gate: Mutex<()>,
     /// Photos still being described, per meeting (a finishing meeting waits for its own).
     describing_by: Mutex<HashMap<i64, usize>>,
-    /// Gemma runs on the GPU, so reading a photo during a recording does not slow the transcript.
-    llm_on_gpu: AtomicBool,
     /// Folder to file an ingested document under, by ingest job; and documents that finished
     /// before their folder was recorded (the two events can arrive in either order).
     job_folder: Mutex<HashMap<u64, Option<i64>>>,
@@ -360,7 +358,6 @@ impl Core {
             rescanning: Mutex::new(()),
             line_gate: Mutex::new(()),
             describing_by: Mutex::new(HashMap::new()),
-            llm_on_gpu: AtomicBool::new(false),
             engine_state: Mutex::new(json!({"type": "engine", "state": "loading", "label": "Starting"})),
             tz: FixedOffset::east_opt(tz_offset_secs).unwrap_or_else(|| FixedOffset::east_opt(0).unwrap()),
         }))
@@ -621,10 +618,6 @@ impl Core {
                 if let Some(w) = self.engine.whisper() {
                     w.warm();
                 }
-                Ok(json!({}))
-            }
-            "engine.gpu" => {
-                self.llm_on_gpu.store(args.get("gpu").and_then(Value::as_bool).unwrap_or(false), Ordering::Relaxed);
                 Ok(json!({}))
             }
             m if m.starts_with("nodes.") => self.nodes_call(m, args),

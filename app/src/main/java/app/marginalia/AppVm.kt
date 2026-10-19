@@ -260,8 +260,6 @@ class AppVm(private val app: Application) {
         withContext(loaderThread) { runCatching { emb.embed(arrayOf("warm up")) } }
         Native.setEmbedder(emb)
         Native.setGenerator(lazyChat)
-        val gpuPlanned = prefs.getString("chat", "auto") != "litert-cpu" && !prefs.getBoolean("gpu_failed", false)
-        runCatching { backend.call("engine.gpu", JSONObject().put("gpu", gpuPlanned)) }
         embedModel = emb
         modelsLoaded = true
         modelInfo.value = "Gemma 4 ${if (gemmaFile() == ModelDownload.E4B_FILE) "E4B" else "E2B"} loads when the phone needs it · EmbeddingGemma 2 on ${emb.label} · Whisper small · ${Native.variant}"
@@ -285,7 +283,6 @@ class AppVm(private val app: Application) {
             if (gpu) prefs.edit().putBoolean("gpu_failed", true).apply()
         }
         if (chat == null) { failure = "The AI could not start.\n" + notes.joinToString("\n"); publishBoot(); return }
-        runCatching { backend.call("engine.gpu", JSONObject().put("gpu", chat.label.contains("GPU"))) }
         // The first conversation sets up the image reader, which stalls the screen. Do it now, behind the loading screen.
         kotlinLabel = "Getting the AI ready"
         publishBoot()

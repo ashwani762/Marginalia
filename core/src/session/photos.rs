@@ -36,21 +36,24 @@ impl Core {
         };
         let aid = self.kb.store.add_attachment(meeting_id, "photo", &path, t)?;
         let recording = self.live.lock().as_ref().map(|l| l.recording && l.meeting_id == meeting_id).unwrap_or(false);
-        if live && recording && !self.llm_on_gpu.load(Ordering::Relaxed) {
-            // Saved at once. Gemma reads it after the meeting (or now, if the person asks), so the
-            // live transcript keeps all the processor it needs.
-            if let Some(l) = self.live.lock().as_mut() {
-                l.photos.push((aid, t.unwrap_or(0.0), String::new()));
-                l.queued_photos.push((aid, path.clone()));
-            }
-            self.emit(json!({"type": "photo", "meeting_id": meeting_id, "photo": {"id": aid, "path": path, "t": t, "caption": "", "state": "queued"}}));
-            return Ok(json!({"id": aid, "queued": true}));
-        }
-        // On the GPU a photo is read at once on its own thread, even while recording.
         if live && recording {
             if let Some(l) = self.live.lock().as_mut() {
                 l.photos.push((aid, t.unwrap_or(0.0), String::new()));
             }
+            // A compute node reads it at once when one can: the phone stays free for the live transcript.
+            if crate::remote::get().map(|r| r.vision_node_available()).unwrap_or(false) {
+                self.emit(json!({"type": "photo", "meeting_id": meeting_id, "photo": {"id": aid, "path": path, "t": t, "caption": "", "state": "describing"}}));
+                self.describe_during_recording_on_node(meeting_id, aid, path, t);
+                return Ok(json!({"id": aid}));
+            }
+            // Otherwise it is saved and read after the meeting (or now, if the person asks with "Read now"). Reading it on the
+            // phone during the recording keeps the graphics chip busy for several seconds: the screen freezes and the live
+            // transcript lags, on the GPU as much as on the processor.
+            if let Some(l) = self.live.lock().as_mut() {
+                l.queued_photos.push((aid, path.clone()));
+            }
+            self.emit(json!({"type": "photo", "meeting_id": meeting_id, "photo": {"id": aid, "path": path, "t": t, "caption": "", "state": "queued"}}));
+            return Ok(json!({"id": aid, "queued": true}));
         }
         self.emit(json!({"type": "photo", "meeting_id": meeting_id, "photo": {"id": aid, "path": path, "t": t, "caption": "", "state": "describing"}}));
         self.start_describing(meeting_id, aid, path, t, live);
@@ -103,12 +106,29 @@ impl Core {
         }
     }
 
+    /// What the model is asked about a photo (the picture itself goes in front of it).
+    const PHOTO_ASK: &'static str = "This photo was taken during a meeting. In 2 to 4 sentences describe what it shows. If it contains writing (whiteboard, slide, document, screen, sticky notes), transcribe the important text exactly. Plain prose, no preamble.";
+
+    /// A compute node reads the photo when one can. None when none can or none did.
+    fn describe_photo_on_node(&self, path: &str) -> Option<String> {
+        let r = crate::remote::get()?;
+        if !r.vision_node_available() {
+            return None;
+        }
+        let jpeg = std::fs::read(path).ok()?;
+        r.describe(jpeg, Self::PHOTO_ASK, 170)
+    }
+
+    /// A compute node reads it when one can, else this phone does.
     pub(super) fn describe_photo(&self, path: &str) -> String {
+        self.describe_photo_on_node(path).unwrap_or_else(|| self.describe_photo_here(path))
+    }
+
+    /// Reads the photo with the model on this phone. During a recording this is never done on its own: it keeps the graphics
+    /// chip busy for seconds, the screen freezes and the live transcript lags.
+    fn describe_photo_here(&self, path: &str) -> String {
         let Some(llm) = self.engine.llm() else { return String::new() };
-        let prompt = format!(
-            "{}\nThis photo was taken during a meeting. In 2 to 4 sentences describe what it shows. If it contains writing (whiteboard, slide, document, screen, sticky notes), transcribe the important text exactly. Plain prose, no preamble.",
-            image_marker()
-        );
+        let prompt = format!("{}\n{}", image_marker(), Self::PHOTO_ASK);
         match llm.complete_with_images(
             vec![ChatMessage::user(prompt)],
             vec![std::path::PathBuf::from(path)],
@@ -121,5 +141,41 @@ impl Core {
                 String::new()
             }
         }
+    }
+
+    /// During a recording: a compute node reads the photo now. If none does, the photo waits for the end of the meeting like
+    /// the others (or is read on the phone at once when the meeting has already ended).
+    fn describe_during_recording_on_node(self: &Arc<Self>, meeting_id: i64, aid: i64, path: String, t: Option<f64>) {
+        self.describing.fetch_add(1, Ordering::Relaxed);
+        *self.describing_by.lock().entry(meeting_id).or_insert(0) += 1;
+        let core = self.clone();
+        std::thread::Builder::new()
+            .name("photo".into())
+            .spawn(move || match core.describe_photo_on_node(&path) {
+                Some(caption) => core.finish_photo(meeting_id, aid, &path, t, &caption, true),
+                None => {
+                    core.describing.fetch_sub(1, Ordering::Relaxed);
+                    if let Some(n) = core.describing_by.lock().get_mut(&meeting_id) {
+                        *n = n.saturating_sub(1);
+                    }
+                    let still_recording = core.live.lock().as_mut().map(|l| {
+                        let rec = l.recording && l.meeting_id == meeting_id;
+                        if rec {
+                            l.queued_photos.push((aid, path.clone()));
+                        }
+                        rec
+                    });
+                    if still_recording == Some(true) {
+                        core.emit(json!({"type": "photo", "meeting_id": meeting_id, "photo": {"id": aid, "path": path, "t": t, "caption": "", "state": "queued"}}));
+                    } else {
+                        // The meeting ended while the node was trying: nothing is recording any more, so the phone can read it.
+                        core.describing.fetch_add(1, Ordering::Relaxed);
+                        *core.describing_by.lock().entry(meeting_id).or_insert(0) += 1;
+                        let caption = core.describe_photo_here(&path);
+                        core.finish_photo(meeting_id, aid, &path, t, &caption, false);
+                    }
+                }
+            })
+            .expect("spawn photo");
     }
 }

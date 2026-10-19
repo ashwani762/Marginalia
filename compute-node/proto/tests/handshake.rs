@@ -592,8 +592,21 @@ async fn pair_and_status_replies_round_trip() {
         uptime_s: 3600,
         pending: vec![PendingPhone { id: "0123456789abcdef".into(), name: "Pixel".into(), waited_s: 7 }],
         paused: true,
+        vision: true,
     }, StatusReply::default()]))
     .await;
+}
+
+#[tokio::test]
+async fn a_photo_request_round_trips() {
+    // A photo is a few hundred kilobytes: it must cross the wire in one piece, byte for byte.
+    let jpeg: Vec<u8> = (0..400_000u32).map(|i| (i.wrapping_mul(31) % 251) as u8).collect();
+    let req = DescribeRequest { prompt: "What does it show?".into(), jpeg: jpeg.clone(), max_tokens: 170, priority: Priority::Background };
+    let bytes = postcard::to_stdvec(&Request::Describe(req)).unwrap();
+    match postcard::from_bytes::<Request>(&bytes).unwrap() {
+        Request::Describe(r) => assert_eq!((r.prompt.as_str(), r.jpeg, r.max_tokens), ("What does it show?", jpeg, 170)),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]

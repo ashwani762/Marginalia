@@ -51,6 +51,19 @@ pub enum Request {
     Records { port: u16, records: Vec<PhoneRecord> },
     /// A peer says it leaves the cluster and asks to be forgotten. Only answered for peers. Answered with [`PeerReply`].
     Leave,
+    /// Reads a photo and says what it shows. Only sent to a node whose status says `vision`. Answered with [`ChatEvent`]s
+    /// (the description arrives as tokens, then `Done`). Nothing is kept on the node.
+    Describe(DescribeRequest),
+}
+
+/// A photo to read. The picture is sent as a JPEG, already scaled down on the phone.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DescribeRequest {
+    /// What to ask about the picture. The node puts the picture in front of it.
+    pub prompt: String,
+    pub jpeg: Vec<u8>,
+    pub max_tokens: u32,
+    pub priority: Priority,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -186,6 +199,8 @@ pub struct StatusReply {
     /// The node keeps its models loaded but turns new chat and search jobs away. Last on purpose:
     /// a reader of the older layout ignores the extra byte.
     pub paused: bool,
+    /// The node can read photos ([`Request::Describe`]). After `paused` for the same reason.
+    pub vision: bool,
 }
 
 /// What a record says about a phone. Allow and Revoke are one register (the later one wins), Block and Unblock
@@ -250,6 +265,7 @@ mod tests {
         assert_eq!(first(&Request::Join { name: String::new(), port: 1, proof: [0; 32] }), 8);
         assert_eq!(first(&Request::Records { port: 1, records: vec![] }), 9);
         assert_eq!(first(&Request::Leave), 10);
+        assert_eq!(first(&Request::Describe(DescribeRequest { prompt: String::new(), jpeg: vec![], max_tokens: 1, priority: Priority::Bulk })), 11);
     }
 
     #[test]

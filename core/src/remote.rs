@@ -8,7 +8,7 @@
 use crate::engine::llm::{GenEvent, GenRequest, GenStats, Role};
 use anyhow::{anyhow, bail, Result};
 use marginalia_proto::tls::Identity;
-use marginalia_proto::{client, wire, AudioFrame, ChatEvent, ChatMsg, ChatRequest, EmbedReply, EmbedRequest, KnockReply, Priority, Request, StatusReply, TranscribeEvent, TranscribeRequest};
+use marginalia_proto::{client, wire, AudioFrame, ChatEvent, ChatMsg, ChatRequest, DescribeRequest, EmbedReply, EmbedRequest, KnockReply, Priority, Request, StatusReply, TranscribeEvent, TranscribeRequest};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -779,6 +779,56 @@ impl Remote {
         None
     }
 
+    /// True when a compute node could read a photo right now, from what was last seen.
+    pub fn vision_node_available(&self) -> bool {
+        let g = self.inner.lock();
+        g.enabled
+            && g.nodes.iter().any(|n| {
+                n.saved.approved && n.live.conn.as_ref().map(|c| c.close_reason().is_none()).unwrap_or(false) && n.live.status.as_ref().map(|st| !st.paused && st.vision && st.caps.chat.is_some()).unwrap_or(false)
+            })
+    }
+
+    /// Has a compute node read a photo. `jpeg` is the picture, `prompt` what to ask about it. Nodes are tried best first and a
+    /// failure moves on to the next. None when no node could, and then the caller decides where the photo is read.
+    pub fn describe(self: &Arc<Self>, jpeg: Vec<u8>, prompt: &str, max_tokens: u32) -> Option<String> {
+        if !self.enabled() || jpeg.is_empty() {
+            return None;
+        }
+        for cand in self.rt.block_on(self.pick_all(Kind::Describe)) {
+            let _out = Out::new(self, &cand.fp);
+            let started = Instant::now();
+            let r: Result<String> = self.rt.block_on(async {
+                let req = Request::Describe(DescribeRequest { prompt: prompt.to_string(), jpeg: jpeg.clone(), max_tokens, priority: Priority::Background });
+                let (mut send, mut recv) = client::open(&cand.conn, &req).await?;
+                let _ = send.finish();
+                let mut text = String::new();
+                loop {
+                    match tokio::time::timeout(STALL, wire::read_frame::<ChatEvent>(&mut recv)).await {
+                        Err(_) => bail!("the computer took too long"),
+                        Ok(r) => match r?.ok_or_else(|| anyhow!("the computer stopped answering"))? {
+                            ChatEvent::Queued { .. } | ChatEvent::Working => {}
+                            ChatEvent::Token(t) => text.push_str(&t),
+                            ChatEvent::Done { .. } => return Ok(text),
+                            ChatEvent::Error(e) => bail!(e),
+                        },
+                    }
+                }
+            });
+            match r {
+                Ok(t) if !t.trim().is_empty() => {
+                    tracing::info!("photo read on {} in {:.1}s", cand.name, started.elapsed().as_secs_f32());
+                    return Some(t.trim().to_string());
+                }
+                Ok(_) => tracing::warn!("{} gave an empty description, trying the next one", cand.name),
+                Err(e) => {
+                    tracing::warn!("{} could not read the photo ({e:#}), trying the next one", cand.name);
+                    self.mark_failed(&cand.fp, &e);
+                }
+            }
+        }
+        None
+    }
+
     /// The name of a compute node that could transcribe recorded audio right now, from what was last seen
     /// (the fastest one when several can).
     pub fn transcribe_node_available(&self) -> Option<String> {
@@ -1086,6 +1136,7 @@ impl Remote {
                 Kind::Chat => st.caps.chat.is_some() && (st.caps.chat_tok_s == 0.0 || st.caps.chat_tok_s >= MIN_CHAT_TOK_S),
                 Kind::Embed => st.caps.embed.is_some() && st.caps.embed_dim == 768 && (st.caps.embed_per_s == 0.0 || st.caps.embed_per_s >= MIN_EMBED_PER_S),
                 Kind::Transcribe => can_transcribe(st),
+                Kind::Describe => st.vision && st.caps.chat.is_some(),
             };
             if !ok {
                 continue;
@@ -1099,6 +1150,7 @@ impl Remote {
                 Kind::Chat => st.caps.chat_tok_s,
                 Kind::Embed => st.caps.embed_per_s,
                 Kind::Transcribe => st.caps.transcribe_x,
+                Kind::Describe => st.caps.chat_tok_s,
             };
             let speed = if speed > 0.0 { speed } else if matches!(kind, Kind::Transcribe) { UNMEASURED_TRANSCRIBE_X } else { 10.0 };
             let ours = self.inflight.lock().get(&n.saved.fp).copied().unwrap_or(0);
@@ -1116,6 +1168,8 @@ enum Kind {
     Chat,
     Embed,
     Transcribe,
+    /// Reading a photo (needs a node with the vision projector).
+    Describe,
 }
 
 struct Picked {
@@ -1397,8 +1451,10 @@ pub(crate) mod tests {
         Good,
         /// Answers this many segments, then the connection dies.
         DropAfter(usize),
-        /// Says it failed.
+        /// Says it failed. It also says it reads photos, and then fails at that too.
         Broken,
+        /// Listens to everything and reads photos.
+        Reads,
     }
 
     pub(crate) struct Fake {
@@ -1435,7 +1491,23 @@ pub(crate) mod tests {
                                     let mut st = status(Some("large-test"), x, false);
                                     st.caps.window_max_s = 90;
                                     st.node_name = "fake".into();
+                                    if matches!(mode, Mode::Broken | Mode::Reads) {
+                                        st.vision = true;
+                                        st.caps.chat = Some("fake-chat".into());
+                                    }
                                     let _ = wire::write_frame(&mut send, &st).await;
+                                    let _ = send.finish();
+                                    let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
+                                }
+                                Request::Describe(d) => {
+                                    if matches!(mode, Mode::Broken) {
+                                        let _ = wire::write_frame(&mut send, &ChatEvent::Error("no projector".into())).await;
+                                    } else {
+                                        let _ = wire::write_frame(&mut send, &ChatEvent::Working).await;
+                                        let _ = wire::write_frame(&mut send, &ChatEvent::Token("A whiteboard, ".into())).await;
+                                        let _ = wire::write_frame(&mut send, &ChatEvent::Token(format!("{} bytes.", d.jpeg.len()))).await;
+                                        let _ = wire::write_frame(&mut send, &ChatEvent::Done { prompt_tokens: 1, generated_tokens: 2, elapsed_ms: 3 }).await;
+                                    }
                                     let _ = send.finish();
                                     let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
                                 }
@@ -1621,5 +1693,36 @@ pub(crate) mod tests {
         assert_eq!(state(&r), (false, false, "Not reachable on this network".to_string()));
         assert!(r.list()["found"].as_array().unwrap().is_empty());
         r.gone("short");
+    }
+
+    #[test]
+    fn a_photo_is_read_by_a_node_that_can_and_the_next_one_is_tried_after_a_failure() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let good = start_fake(&rt, 8.0, Mode::Reads);
+        let bad = start_fake(&rt, 8.0, Mode::Broken);
+        let r = remote_with(&[("bad", &bad), ("good", &good)], "photo");
+        r.refresh();
+        assert!(r.vision_node_available());
+        let text = r.describe(vec![7; 500], "What is on it?", 170).expect("a node reads it");
+        assert_eq!(text, "A whiteboard, 500 bytes.");
+
+        // The only node that says it reads photos fails at it: nobody read it, and the caller decides what to do.
+        let r = remote_with(&[("bad", &bad)], "photo-bad");
+        r.refresh();
+        assert!(r.vision_node_available());
+        assert!(r.describe(vec![7; 500], "What is on it?", 170).is_none());
+
+        // A node without the projector is never asked.
+        let plain = start_fake(&rt, 8.0, Mode::Good);
+        let r = remote_with(&[("plain", &plain)], "photo-plain");
+        r.refresh();
+        assert!(!r.vision_node_available());
+        assert!(r.describe(vec![7; 500], "What is on it?", 170).is_none());
+        // And nothing is sent when compute nodes are switched off or the picture is empty.
+        let r = remote_with(&[("good", &good)], "photo-off");
+        r.refresh();
+        assert!(r.describe(vec![], "x", 10).is_none());
+        r.set_enabled(false);
+        assert!(!r.vision_node_available() && r.describe(vec![7; 500], "x", 10).is_none());
     }
 }
