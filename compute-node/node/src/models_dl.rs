@@ -16,24 +16,40 @@ pub struct ModelFile {
     /// `chat`, `search` or `speech`, as shown by `models list`.
     pub role: &'static str,
     pub repo: &'static str,
+    /// The name the file has in the models folder.
     pub file: &'static str,
+    /// The name on Hugging Face when it is not the same, else empty.
+    pub remote: &'static str,
     /// Expected size in bytes, 0 when not known. Used to skip finished files.
     pub bytes: u64,
     /// Not needed for the node to start (only used with `--chat-model`).
     pub optional: bool,
 }
 
-pub const CHAT_E2B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E2B-it-GGUF", file: crate::host::CHAT_FILE, bytes: 2_841_481_184, optional: false };
-pub const CHAT_E4B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E4B-it-GGUF", file: crate::host::CHAT_FILE_E4B, bytes: 4_590_807_392, optional: true };
-pub const SEARCH: ModelFile = ModelFile { role: "search", repo: "ggml-org/embeddinggemma-2-GGUF", file: crate::host::EMBED_FILE, bytes: 309_855_456, optional: false };
+pub const CHAT_E2B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E2B-it-GGUF", file: crate::host::CHAT_FILE, remote: "", bytes: 2_841_481_184, optional: false };
+pub const CHAT_E4B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E4B-it-GGUF", file: crate::host::CHAT_FILE_E4B, remote: "", bytes: 4_590_807_392, optional: true };
+pub const SEARCH: ModelFile = ModelFile { role: "search", repo: "ggml-org/embeddinggemma-2-GGUF", file: crate::host::EMBED_FILE, remote: "", bytes: 309_855_456, optional: false };
 
-pub const SPEECH: ModelFile = ModelFile { role: "speech", repo: "ggerganov/whisper.cpp", file: crate::host::SPEECH_FILE, bytes: 574_041_195, optional: false };
+pub const SPEECH: ModelFile = ModelFile { role: "speech", repo: "ggerganov/whisper.cpp", file: crate::host::SPEECH_FILE, remote: "", bytes: 574_041_195, optional: false };
+
+/// The vision projector that lets the chat model read photos. Optional: a node without it simply does not read photos.
+pub const VISION_E2B: ModelFile = ModelFile { role: "vision", repo: "ggml-org/gemma-4-E2B-it-GGUF", file: "mmproj-gemma-4-E2B-it-Q8_0.gguf", remote: "", bytes: 557_368_064, optional: true };
+pub const VISION_E4B: ModelFile = ModelFile { role: "vision", repo: "ggml-org/gemma-4-E4B-it-GGUF", file: "mmproj-gemma-4-E4B-it-Q8_0.gguf", remote: "", bytes: 559_874_816, optional: true };
+
+/// The two models for telling speakers apart (sherpa-onnx): who talks when (pyannote segmentation 3.0) and which voice is which
+/// (WeSpeaker ResNet34, 26 MB. Measured against the larger ResNet293 on the same audio it agrees on 93% of the speech and is 4 times faster, and the CAM++ model of the phone splits one voice into several). Optional: asked for with `--only speakers`.
+pub const SPEAKER_SEGMENTATION: ModelFile = ModelFile { role: "speakers", repo: "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0", file: "pyannote-segmentation-3-0.onnx", remote: "model.onnx", bytes: 5_992_913, optional: true };
+pub const SPEAKER_VOICES: ModelFile = ModelFile { role: "speakers", repo: "csukuangfj/speaker-embedding-models", file: "wespeaker-resnet34.onnx", remote: "wespeaker_en_voxceleb_resnet34_LM.onnx", bytes: 26_530_550, optional: true };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Only {
     Chat,
     Search,
     Speech,
+    /// The vision projector, so the node can read photos for phones (about 0.56 GB, follows `--chat`).
+    Vision,
+    /// The models for telling speakers apart for phones that ask (about 0.03 GB).
+    Speakers,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -86,6 +102,8 @@ pub fn wanted(only: Option<Only>, chat: ChatChoice, skip_speech: bool) -> Vec<Mo
         Some(Only::Chat) => vec![chat_file],
         Some(Only::Search) => vec![SEARCH],
         Some(Only::Speech) => vec![SPEECH],
+        Some(Only::Vision) => vec![if chat == ChatChoice::E4b { VISION_E4B } else { VISION_E2B }],
+        Some(Only::Speakers) => vec![SPEAKER_SEGMENTATION, SPEAKER_VOICES],
         None if skip_speech => vec![chat_file, SEARCH],
         None => vec![chat_file, SEARCH, SPEECH],
     }
@@ -96,7 +114,7 @@ pub fn wanted(only: Option<Only>, chat: ChatChoice, skip_speech: bool) -> Vec<Mo
 // ---------------------------------------------------------------------------------------------
 
 pub fn url_for(m: &ModelFile) -> String {
-    format!("https://huggingface.co/{}/resolve/main/{}", m.repo, m.file)
+    format!("https://huggingface.co/{}/resolve/main/{}", m.repo, if m.remote.is_empty() { m.file } else { m.remote })
 }
 
 /// The `.part` file next to the final file.
@@ -293,10 +311,15 @@ pub fn list(dir: Option<PathBuf>) -> Result<()> {
     let dir = dir.unwrap_or_else(default_dir);
     println!("Models folder: {}\n", dir.display());
     let mut missing_needed = false;
-    for m in [CHAT_E2B, SEARCH, SPEECH, CHAT_E4B] {
+    for m in [CHAT_E2B, SEARCH, SPEECH, CHAT_E4B, VISION_E2B, VISION_E4B, SPEAKER_SEGMENTATION, SPEAKER_VOICES] {
         let len = std::fs::metadata(dir.join(m.file)).ok().filter(|x| x.is_file()).map(|x| x.len());
         let part = std::fs::metadata(part_path(&dir, &m)).ok().map(|x| x.len()).filter(|l| *l > 0);
-        let role = if m.optional { format!("{} (optional, larger)", m.role) } else { m.role.to_string() };
+        let role = match (m.optional, m.role) {
+            (true, "vision") => "vision (optional, lets the node read photos: models download --only vision)".to_string(),
+            (true, "speakers") => "speakers (optional, lets the node tell speakers apart: models download --only speakers)".to_string(),
+            (true, _) => format!("{} (optional, larger)", m.role),
+            _ => m.role.to_string(),
+        };
         match len {
             Some(l) => {
                 let note = if m.bytes > 0 && l != m.bytes { "  (size differs from the expected one, download again to repair)" } else { "" };
@@ -573,6 +596,22 @@ mod tests {
         assert_eq!(url_for(&SEARCH), "https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/embeddinggemma-2-Q8_0.gguf");
         assert_eq!(url_for(&SPEECH), "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin");
         assert_eq!(part_path(Path::new("m"), &SEARCH), Path::new("m").join("embeddinggemma-2-Q8_0.gguf.part"));
+    }
+
+    #[test]
+    fn photos_and_speakers_are_opt_in_downloads_and_use_their_hugging_face_names() {
+        let names = |o| wanted(o, ChatChoice::E2b, false).iter().map(|m| m.file).collect::<Vec<_>>();
+        // A plain download never fetches them.
+        assert!(!names(None).iter().any(|f| f.starts_with("mmproj") || f.contains("pyannote") || f.contains("wespeaker")));
+        assert_eq!(names(Some(Only::Vision)), ["mmproj-gemma-4-E2B-it-Q8_0.gguf"]);
+        assert_eq!(wanted(Some(Only::Vision), ChatChoice::E4b, false)[0].file, "mmproj-gemma-4-E4B-it-Q8_0.gguf");
+        assert_eq!(names(Some(Only::Speakers)), ["pyannote-segmentation-3-0.onnx", "wespeaker-resnet34.onnx"]);
+        // The file in the folder has its own name, the address has the name on Hugging Face.
+        assert_eq!(url_for(&SPEAKER_SEGMENTATION), "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx");
+        assert_eq!(url_for(&SPEAKER_VOICES), "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/wespeaker_en_voxceleb_resnet34_LM.onnx");
+        assert_eq!(url_for(&VISION_E2B), "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf");
+        // A node can start without them.
+        assert!(missing_for_run(Path::new("/nonexistent"), true, true, true).is_empty());
     }
 
     #[test]

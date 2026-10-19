@@ -35,6 +35,8 @@ pub struct Host {
     pub vision: bool,
     /// The vision projector's name, for the status and the tray.
     pub vision_model: Option<String>,
+    /// Telling speakers apart, opt-in (see `speakers.rs`).
+    pub speakers: crate::speakers::Speakers,
     /// Jobs that have been accepted and not yet finished.
     pub chat_jobs: Arc<AtomicU32>,
     pub embed_jobs: Arc<AtomicU32>,
@@ -186,6 +188,7 @@ impl Host {
         let window_gate = if whisper.as_ref().map(|w| w.on_gpu()).unwrap_or(false) { Arc::new(tokio::sync::Semaphore::new(1)) } else { speech_gate.clone() };
         let host = Host {
             _backend: backend,
+            speakers: crate::speakers::Speakers::new(opts.models_dir.clone()),
             vision: llm.is_some() && projector.is_some(),
             vision_model: projector.as_ref().filter(|_| llm.is_some()).and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()),
             llm,
@@ -201,6 +204,14 @@ impl Host {
             window_by_phone: parking_lot::Mutex::new(Default::default()),
         };
         host.benchmark();
+        let cleared = crate::speakers::clear_leftovers(&std::env::temp_dir());
+        if cleared > 0 {
+            tracing::info!("removed {cleared} audio or photo file(s) that an earlier run left in the temporary folder");
+        }
+        match host.speakers.why_not() {
+            None => tracing::info!("this node can tell speakers apart for phones"),
+            Some(why) => tracing::info!("this node does not tell speakers apart: {why}"),
+        }
         Ok(host)
     }
 

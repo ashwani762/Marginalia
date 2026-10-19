@@ -144,6 +144,7 @@ impl Shared {
             pending: self.pending_list(),
             paused: self.paused.load(Ordering::Relaxed),
             vision: self.host.vision,
+            speakers: self.host.speakers.available(),
         }
     }
 }
@@ -257,6 +258,7 @@ async fn request(sh: Arc<Shared>, conn: quinn::Connection, fp: String, mut send:
         (Request::Status, Some(_)) => wire::write_frame(&mut send, &sh.status()).await?,
         (Request::Chat(r), Some(c)) => chat(&sh, r, &mut send, c, peer.is_some()).await?,
         (Request::Describe(r), Some(c)) => describe(&sh, r, &mut send, c).await?,
+        (Request::Diarize(r), Some(c)) => diarize(&sh, &conn, r, &mut send, recv, c).await?,
         (Request::Embed(r), Some(c)) => embed(&sh, r, &mut send, c, peer.is_some()).await?,
         (Request::Transcribe(r), Some(c)) => transcribe(&sh, &conn, r, &mut send, recv, c).await?,
     }
@@ -575,6 +577,110 @@ async fn read_audio(mut recv: quinn::RecvStream, expected_ms: u64, max_ms: u64) 
 /// Anything longer goes the long way, even when it is interactive. Shorter windows are fine.
 fn is_window(priority: Priority, total_ms: u64, window_max_s: u32) -> bool {
     priority == Priority::Interactive && window_max_s > 0 && total_ms <= window_max_s as u64 * 1000
+}
+
+/// Tells speakers apart on a recording a phone sends, after the meeting. It shares the lane of whole recordings with `transcribe`:
+/// one at a time, the others wait their turn. The answer is the whole list of who spoke when, once.
+async fn diarize(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_proto::DiarizeRequest, send: &mut quinn::SendStream, recv: quinn::RecvStream, client: crate::state::Client) -> Result<()> {
+    use marginalia_proto::DiarizeEvent;
+    if sh.paused.load(Ordering::Relaxed) {
+        wire::write_frame(send, &DiarizeEvent::Error("paused".into())).await?;
+        return Ok(());
+    }
+    if !sh.host.speakers.available() {
+        wire::write_frame(send, &DiarizeEvent::Error("This compute node does not tell speakers apart.".into())).await?;
+        return Ok(());
+    }
+    if r.total_ms > MAX_AUDIO_MS {
+        wire::write_frame(send, &DiarizeEvent::Error("The recording is longer than 3 hours, which is the most a compute node takes.".into())).await?;
+        return Ok(());
+    }
+    let jobs = sh.host.speech_jobs.clone();
+    let ahead = jobs.fetch_add(1, Ordering::Relaxed);
+    let job = SpeechJob { jobs: jobs.clone(), window_of: None };
+    if ahead > MAX_WAITING {
+        wire::write_frame(send, &DiarizeEvent::Error("busy".into())).await?;
+        return Ok(());
+    }
+    if ahead > 0 {
+        wire::write_frame(send, &DiarizeEvent::Queued { ahead }).await?;
+    }
+    let mut beat = tokio::time::interval(Duration::from_secs(2));
+    let mut reader = tokio::spawn(read_audio(recv, r.total_ms, MAX_AUDIO_MS));
+    let pcm = loop {
+        tokio::select! {
+            res = &mut reader => break res,
+            _ = beat.tick() => {
+                if wire::write_frame(send, &DiarizeEvent::Working).await.is_err() {
+                    reader.abort();
+                    return Ok(());
+                }
+            }
+            _ = conn.closed() => {
+                reader.abort();
+                return Ok(());
+            }
+        }
+    };
+    let pcm = match pcm {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            wire::write_frame(send, &DiarizeEvent::Error(format!("{e:#}"))).await?;
+            return Ok(());
+        }
+        Err(_) => return Ok(()),
+    };
+    let audio_s = pcm.len() as f32 / 16_000.0;
+    let mut wait = Box::pin(sh.host.speech_gate.clone().acquire_owned());
+    let permit = loop {
+        tokio::select! {
+            p = &mut wait => match p {
+                Ok(p) => break p,
+                Err(_) => return Ok(()),
+            },
+            _ = beat.tick() => {
+                let ahead = jobs.load(Ordering::Relaxed).saturating_sub(1);
+                if wire::write_frame(send, &DiarizeEvent::Queued { ahead }).await.is_err() {
+                    return Ok(());
+                }
+            }
+            _ = conn.closed() => return Ok(()),
+        }
+    };
+    let started = Instant::now();
+    let host = sh.host.clone();
+    let (people, threshold) = (r.people, r.threshold);
+    let mut work = tokio::task::spawn_blocking(move || {
+        let _held = (permit, job);
+        host.speakers.run(&pcm, people, threshold)
+    });
+    let outcome = loop {
+        tokio::select! {
+            res = &mut work => break res,
+            _ = beat.tick() => {
+                if wire::write_frame(send, &DiarizeEvent::Working).await.is_err() {
+                    // The phone went away. The work cannot be stopped half way, it ends by itself and its answer is dropped.
+                    return Ok(());
+                }
+            }
+        }
+    };
+    match outcome {
+        Ok(Ok(spans)) => {
+            let voices = spans.iter().map(|s| s.speaker).max().map(|m| m + 1).unwrap_or(0);
+            tracing::info!("speakers: {:.0} s of audio for {}, {} {} found in {:.1} s", audio_s, client.name, voices, if voices == 1 { "voice" } else { "voices" }, started.elapsed().as_secs_f32());
+            wire::write_frame(send, &DiarizeEvent::Spans { spans, elapsed_ms: started.elapsed().as_millis().min(u32::MAX as u128) as u32 }).await?;
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("speakers failed for {}: {e:#}", client.name);
+            wire::write_frame(send, &DiarizeEvent::Error(format!("{e:#}"))).await?;
+        }
+        Err(e) => {
+            tracing::warn!("speakers job crashed: {e}");
+            wire::write_frame(send, &DiarizeEvent::Error("The speaker work stopped unexpectedly.".into())).await?;
+        }
+    }
+    Ok(())
 }
 
 async fn transcribe(sh: &Arc<Shared>, conn: &quinn::Connection, r: marginalia_proto::TranscribeRequest, send: &mut quinn::SendStream, recv: quinn::RecvStream, client: crate::state::Client) -> Result<()> {

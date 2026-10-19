@@ -14,7 +14,7 @@ pub enum Only {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>, knock: bool, decide: Option<String>, deny: bool, transcribe: Option<PathBuf>, language: Option<String>, window: bool, prompt: Option<String>, hang_up_after: Option<f32>, only: Option<Only>, long: bool) -> Result<()> {
+pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>, knock: bool, decide: Option<String>, deny: bool, transcribe: Option<PathBuf>, language: Option<String>, window: bool, prompt: Option<String>, hang_up_after: Option<f32>, only: Option<Only>, long: bool, speakers: Option<PathBuf>, people: u32) -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     let id_path = dir.join("probe-identity.json");
     let id: Identity = match std::fs::read(&id_path).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
@@ -67,6 +67,9 @@ pub async fn run(addr: std::net::SocketAddr, dir: PathBuf, code: Option<String>,
     let (conn, _) = client::connect(&ep, &id, addr, Some(pin.trim().to_string()), Duration::from_secs(5)).await?;
     let st = client::status(&conn).await?;
     println!("status: {st:#?}");
+    if let Some(file) = speakers {
+        return speakers_file(&conn, &file, people).await;
+    }
     if let Some(file) = transcribe {
         return transcribe_file(&conn, &file, language, window, prompt, hang_up_after).await;
     }
@@ -155,6 +158,41 @@ pub fn read_pcm(path: &std::path::Path) -> Result<Vec<u8>> {
         at = body + len + (len & 1);
     }
     anyhow::bail!("the wav file has no data chunk")
+}
+
+/// Sends a recording to be told apart by speaker and prints who spoke when, one line per stretch.
+async fn speakers_file(conn: &quinn::Connection, file: &std::path::Path, people: u32) -> Result<()> {
+    use marginalia_proto::DiarizeEvent;
+    let pcm = read_pcm(file)?;
+    let total_ms = pcm.len() as u64 / 32;
+    println!("sending {:.1} s of audio from {}", total_ms as f64 / 1000.0, file.display());
+    let t = Instant::now();
+    let (mut send, mut recv) = client::open(conn, &Request::Diarize(marginalia_proto::DiarizeRequest { people, threshold: 0.0, total_ms, priority: Priority::Background })).await?;
+    tokio::spawn(async move {
+        for chunk in pcm.chunks(1_000_000) {
+            if wire::write_frame(&mut send, &AudioFrame::Pcm(chunk.to_vec())).await.is_err() {
+                return;
+            }
+        }
+        let _ = wire::write_frame(&mut send, &AudioFrame::End).await;
+        let _ = send.finish();
+    });
+    let mut beats = 0u32;
+    loop {
+        match wire::read_frame::<DiarizeEvent>(&mut recv).await?.context("the node closed without an answer")? {
+            DiarizeEvent::Queued { ahead } => println!("[{:6.1}s] queued behind {ahead}", t.elapsed().as_secs_f32()),
+            DiarizeEvent::Working => beats += 1,
+            DiarizeEvent::Spans { spans, elapsed_ms } => {
+                for s in &spans {
+                    println!("{} -> {}  voice {}", stamp(s.start_ms), stamp(s.end_ms), s.speaker + 1);
+                }
+                let voices = spans.iter().map(|s| s.speaker).max().map(|m| m + 1).unwrap_or(0);
+                println!("\ndone: {voices} voices, {} stretches, node worked {:.2} s ({:.1} times faster than real time), {:.2} s from start to end, {beats} heartbeats", spans.len(), elapsed_ms as f64 / 1000.0, total_ms as f64 / elapsed_ms.max(1) as f64, t.elapsed().as_secs_f32());
+                return Ok(());
+            }
+            DiarizeEvent::Error(e) => anyhow::bail!(e),
+        }
+    }
 }
 
 async fn transcribe_file(conn: &quinn::Connection, file: &std::path::Path, language: Option<String>, window: bool, prompt: Option<String>, hang_up_after: Option<f32>) -> Result<()> {

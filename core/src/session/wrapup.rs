@@ -604,30 +604,11 @@ impl Core {
         if remote.transcribe_node_available().is_none() {
             return skip("no compute node can listen to the recording right now");
         }
-        let meeting = self.kb.store.list_meetings()?.into_iter().find(|m| m.id == mid).ok_or_else(|| anyhow!("meeting not found"))?;
+        let plan = match self.kept_audio_plan(mid)? {
+            Ok(p) => p,
+            Err(why) => return skip(&why),
+        };
         let old: Vec<(f64, f64, String)> = self.kb.store.segments(mid)?.into_iter().map(|s| (s.t0, s.t1, s.text)).collect();
-        let last_spoken = old.iter().map(|s| s.1).fold(0.0f64, f64::max);
-        // The kept files, with their lengths: from the file itself, else up to where the next one starts, else up to the end of the meeting.
-        let kept: Vec<(String, f64)> = self.kb.store.audios(mid)?.into_iter().filter(|(p, _)| Path::new(p).is_file()).collect();
-        if kept.is_empty() {
-            return skip("the recording was not kept");
-        }
-        let meeting_end = (meeting.duration_secs.max(0) as f64).max(last_spoken);
-        let files: Vec<(String, f64, f64)> = kept
-            .iter()
-            .enumerate()
-            .map(|(i, (path, offset))| {
-                let secs = crate::audio::decode::probe_duration_secs(Path::new(path))
-                    .or_else(|| kept.get(i + 1).map(|n| n.1 - offset))
-                    .unwrap_or(meeting_end - offset)
-                    .max(1.0);
-                (path.clone(), *offset, secs)
-            })
-            .collect();
-        let plan = AudioPlan::new(&files);
-        if plan.is_empty() {
-            return skip("the recording is empty");
-        }
         // A recording being made has the phone to itself.
         let mut told = false;
         while self.live.lock().as_ref().map(|l| l.recording).unwrap_or(false) {
@@ -674,6 +655,59 @@ impl Core {
         }
         tracing::info!("transcript of meeting {mid}: {} new segments from {} in {:.0}s, {} stored", new.len(), outcome.node, started.elapsed().as_secs_f32(), stored);
         Ok(Improved::Done { segments: new.len(), node: outcome.node.clone(), partial: !outcome.complete })
+    }
+
+    /// The kept recording of a meeting laid out as one stretch of sound, or why there is none (the recording was not kept, it is empty).
+    pub(super) fn kept_audio_plan(&self, mid: i64) -> Result<std::result::Result<AudioPlan, String>> {
+        let meeting = self.kb.store.list_meetings()?.into_iter().find(|m| m.id == mid).ok_or_else(|| anyhow!("meeting not found"))?;
+        let last_spoken = self.kb.store.segments(mid)?.iter().map(|s| s.t1).fold(0.0f64, f64::max);
+        // The kept files, with their lengths: from the file itself, else up to where the next one starts, else up to the end of the meeting.
+        let kept: Vec<(String, f64)> = self.kb.store.audios(mid)?.into_iter().filter(|(p, _)| Path::new(p).is_file()).collect();
+        if kept.is_empty() {
+            return Ok(Err("the recording was not kept".to_string()));
+        }
+        let meeting_end = (meeting.duration_secs.max(0) as f64).max(last_spoken);
+        let files: Vec<(String, f64, f64)> = kept
+            .iter()
+            .enumerate()
+            .map(|(i, (path, offset))| {
+                let secs = crate::audio::decode::probe_duration_secs(Path::new(path))
+                    .or_else(|| kept.get(i + 1).map(|n| n.1 - offset))
+                    .unwrap_or(meeting_end - offset)
+                    .max(1.0);
+                (path.clone(), *offset, secs)
+            })
+            .collect();
+        let plan = AudioPlan::new(&files);
+        if plan.is_empty() {
+            return Ok(Err("the recording is empty".to_string()));
+        }
+        Ok(Ok(plan))
+    }
+
+    /// Tells the speakers of a meeting apart on a compute node from its kept recording and labels the transcript with the answer.
+    /// `{"unavailable": why}` when no node could, and then the phone does it itself. Blocks until the node is done.
+    pub(super) fn speakers_on_node(&self, mid: i64, people: u32, threshold: f32) -> Result<Value> {
+        let unavailable = |why: &str| Ok(json!({"unavailable": why}));
+        let Some(remote) = crate::remote::get() else { return unavailable("no compute node") };
+        if remote.speakers_node_available().is_none() {
+            return unavailable("no compute node can tell speakers apart right now");
+        }
+        let plan = match self.kept_audio_plan(mid)? {
+            Ok(p) => p,
+            Err(why) => return unavailable(&why),
+        };
+        let cancel = AtomicBool::new(false);
+        match remote.diarize(plan.total_ms(), || Ok(open_frames(&plan, 0)), people, threshold, &cancel, &|f| self.emit(json!({"type": "speakers_progress", "id": mid, "fraction": f}))) {
+            None => unavailable("no compute node can tell speakers apart right now"),
+            Some(Err(e)) => unavailable(&format!("{e:#}")),
+            Some(Ok((spans, node))) => {
+                let diar: Vec<(f64, f64, i64)> = spans.iter().map(|s| (plan.to_meeting(s.start_ms as f64 / 1000.0), plan.to_meeting(s.end_ms as f64 / 1000.0), s.speaker as i64)).collect();
+                let mut r = self.apply_speakers(mid, diar)?;
+                r["node"] = json!(node);
+                Ok(r)
+            }
+        }
     }
 
     /// The Review screen's "Improve transcript": listens again on a compute node, then writes the notes and the summary

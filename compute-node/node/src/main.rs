@@ -11,6 +11,7 @@ mod models_dl;
 mod logfile;
 mod peers;
 mod resources;
+mod speakers;
 mod place;
 mod probe;
 mod records;
@@ -162,6 +163,12 @@ enum Cmd {
         /// Send only this job (status, embed or chat) instead of all of them.
         #[arg(long, value_enum)]
         only: Option<probe::Only>,
+        /// Send this recording (16 kHz mono 16 bit `.wav` or `.pcm`) to be told apart by speaker, and print who spoke when.
+        #[arg(long)]
+        speakers: Option<PathBuf>,
+        /// With `--speakers`: how many people spoke (leave out to let the node decide).
+        #[arg(long, default_value_t = 0)]
+        people: u32,
         /// Ask the chat job for a long answer (about 300 tokens), to have time to stop a node while it writes.
         #[arg(long)]
         long: bool,
@@ -351,7 +358,7 @@ async fn main() -> Result<()> {
         Cmd::Approve { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "approve", "who": who})).await?),
         Cmd::Deny { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "deny", "who": who})).await?),
         Cmd::Revoke { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "revoke", "who": who})).await?),
-        Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, window, prompt, hang_up_after, only, long } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *window, prompt.clone(), *hang_up_after, *only, *long).await?,
+        Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, window, prompt, hang_up_after, only, long, speakers, people } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *window, prompt.clone(), *hang_up_after, *only, *long, speakers.clone(), *people).await?,
         Cmd::Run { port, name, models, chat_model, chat, embed_model, speech_model, no_speech, cpu, ctx, lock, window_max_seconds } => {
             tracing::info!("marginalia-node {} starting on {} {}, state folder {}, log folder {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, dir.display(), logfile::dir_of(&dir).display());
             let store = Arc::new(state::Store::open(dir.clone())?);

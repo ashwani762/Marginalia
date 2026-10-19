@@ -8,7 +8,7 @@
 use crate::engine::llm::{GenEvent, GenRequest, GenStats, Role};
 use anyhow::{anyhow, bail, Result};
 use marginalia_proto::tls::Identity;
-use marginalia_proto::{client, wire, AudioFrame, ChatEvent, ChatMsg, ChatRequest, DescribeRequest, EmbedReply, EmbedRequest, KnockReply, Priority, Request, StatusReply, TranscribeEvent, TranscribeRequest};
+use marginalia_proto::{client, wire, AudioFrame, ChatEvent, ChatMsg, ChatRequest, DescribeRequest, DiarizeEvent, DiarizeRequest, SpeakerSpan, EmbedReply, EmbedRequest, KnockReply, Priority, Request, StatusReply, TranscribeEvent, TranscribeRequest};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -161,6 +161,22 @@ pub fn node_window_s(stated: u32) -> u32 {
 /// Whether a node's last status says it can take recorded audio.
 pub fn can_transcribe(st: &StatusReply) -> bool {
     !st.paused && st.caps.transcribe.is_some() && (st.caps.transcribe_x == 0.0 || st.caps.transcribe_x >= MIN_TRANSCRIBE_X)
+}
+
+/// How long a node usually takes to tell speakers apart on `total_ms` of audio, in seconds. Measured on a real node: 1182 s of audio in
+/// 23 s, so about 50 times faster than real time. 30 is used so the estimate is on the slow side and the bar waits for the answer
+/// near the end instead of reaching 100% early. Never less than 5 seconds (the models are loaded for each job).
+pub fn speakers_expected_s(total_ms: u64) -> f32 {
+    (total_ms as f32 / 1000.0 / 30.0).max(5.0)
+}
+
+/// The percent of a speaker job as a fraction: the first 30% is the audio going up (`upload` 0 to 1, real), the next 65% is the wait
+/// for the node (`waited` is the time since the upload ended divided by the expected time, None until then), and the last 5% is the answer.
+pub fn speakers_fraction(upload: f32, waited: Option<f32>) -> f32 {
+    match waited {
+        None => 0.30 * upload.clamp(0.0, 1.0),
+        Some(w) => 0.30 + 0.65 * w.clamp(0.0, 1.0),
+    }
 }
 
 /// How long a new listening job would wait on a node, in milliseconds: the jobs ahead plus this one,
@@ -779,6 +795,160 @@ impl Remote {
         None
     }
 
+    /// The name of a compute node that could tell speakers apart on a recording right now, from what was last seen.
+    pub fn speakers_node_available(&self) -> Option<String> {
+        let g = self.inner.lock();
+        if !g.enabled {
+            return None;
+        }
+        g.nodes
+            .iter()
+            .find(|n| n.saved.approved && n.live.conn.as_ref().map(|c| c.close_reason().is_none()).unwrap_or(false) && n.live.status.as_ref().map(|st| !st.paused && st.speakers).unwrap_or(false))
+            .map(|n| n.saved.name.clone())
+    }
+
+    /// Has a compute node tell the speakers apart on a recording. `open_audio` gives the audio (16 kHz, 16 bit, mono) as pieces,
+    /// `total_ms` is how long it is. `people` is how many spoke, or 0 to let the node decide. The spans are in milliseconds from the start of
+    /// the audio sent. Nodes are tried best first and a failure moves on to the next. None when no node can, and then the caller carries on
+    /// by itself. Blocks until the node is done, which takes minutes for a long recording.
+    pub fn diarize(self: &Arc<Self>, total_ms: u64, open_audio: impl Fn() -> Result<PcmFrames>, people: u32, threshold: f32, cancel: &std::sync::atomic::AtomicBool, on_progress: &dyn Fn(f32)) -> Option<Result<(Vec<SpeakerSpan>, String)>> {
+        if !self.enabled() || total_ms == 0 {
+            return None;
+        }
+        let candidates = self.rt.block_on(self.pick_all(Kind::Speakers));
+        if candidates.is_empty() {
+            return None;
+        }
+        let mut last: Option<anyhow::Error> = None;
+        for cand in candidates {
+            if cancel.load(Ordering::Relaxed) {
+                return Some(Err(anyhow!("cancelled")));
+            }
+            let _out = Out::new(self, &cand.fp);
+            let frames = match open_audio() {
+                Ok(f) => f,
+                Err(e) => return Some(Err(e)),
+            };
+            let started = Instant::now();
+            match self.rt.block_on(self.diarize_on(&cand, total_ms, frames, people, threshold, cancel, on_progress)) {
+                Ok(spans) => {
+                    tracing::info!("speakers told apart on {} in {:.0}s: {} stretches", cand.name, started.elapsed().as_secs_f32(), spans.len());
+                    return Some(Ok((spans, cand.name.clone())));
+                }
+                Err(e) => {
+                    tracing::warn!("{} could not tell the speakers apart ({e:#}), trying the next one", cand.name);
+                    self.mark_failed(&cand.fp, &e);
+                    last = Some(e);
+                }
+            }
+        }
+        last.map(Err)
+    }
+
+    /// One attempt on one node: the audio goes up while the node's heartbeats come down, then the answer.
+    async fn diarize_on(&self, node: &Picked, total_ms: u64, frames: PcmFrames, people: u32, threshold: f32, cancel: &std::sync::atomic::AtomicBool, on_progress: &dyn Fn(f32)) -> Result<Vec<SpeakerSpan>> {
+        let req = DiarizeRequest { people, threshold, total_ms, priority: Priority::Background };
+        let (mut send, recv) = client::open(&node.conn, &Request::Diarize(req)).await?;
+        let (ftx, mut frx) = tokio::sync::mpsc::channel::<Vec<u8>>(3);
+        let producer = tokio::task::spawn_blocking(move || {
+            for f in frames {
+                if ftx.blocking_send(f).is_err() {
+                    break;
+                }
+            }
+        });
+        let (etx, mut erx) = tokio::sync::mpsc::channel::<Result<Option<DiarizeEvent>>>(16);
+        let reader = tokio::spawn(async move {
+            let mut recv = recv;
+            loop {
+                let r = wire::read_frame::<DiarizeEvent>(&mut recv).await;
+                let last = !matches!(r, Ok(Some(_)));
+                if etx.send(r).await.is_err() || last {
+                    break;
+                }
+            }
+        });
+        let last_up = std::cell::Cell::new(Instant::now());
+        // What the person sees. The node reports no steps, only that it is working, so the percent is made of what is known:
+        // the audio that has gone up (real) and then the time spent waiting against the time a job of this length usually takes.
+        let sent = std::cell::Cell::new(0u64);
+        let uploaded_at = std::cell::Cell::new(None::<Instant>);
+        let expected = Duration::from_secs_f32(speakers_expected_s(total_ms));
+        let total_bytes = (total_ms * 32).max(1);
+        on_progress(speakers_fraction(0.0, None));
+        // The most a job may take: the recording again and then ten minutes, which is far more than any node needs.
+        let limit = Duration::from_millis(total_ms + total_ms / 2) + Duration::from_secs(600);
+        let started = Instant::now();
+        let result: Result<Vec<SpeakerSpan>> = {
+            let upload = async {
+                while let Some(f) = frx.recv().await {
+                    for part in f.chunks(AUDIO_FRAME_MAX) {
+                        wire::write_frame(&mut send, &AudioFrame::Pcm(part.to_vec())).await?;
+                        last_up.set(Instant::now());
+                        sent.set(sent.get() + part.len() as u64);
+                    }
+                }
+                wire::write_frame(&mut send, &AudioFrame::End).await?;
+                let _ = send.finish();
+                last_up.set(Instant::now());
+                uploaded_at.set(Some(Instant::now()));
+                Ok::<(), anyhow::Error>(())
+            };
+            tokio::pin!(upload);
+            let mut uploaded = false;
+            let mut tick = tokio::time::interval(Duration::from_millis(100));
+            let mut last_event = Instant::now();
+            let mut shown = 0.0f32;
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        if cancel.load(Ordering::Relaxed) {
+                            break Err(anyhow!("cancelled"));
+                        }
+                        let f = speakers_fraction((sent.get() as f32 / total_bytes as f32).clamp(0.0, 1.0), uploaded_at.get().map(|t| t.elapsed().as_secs_f32() / expected.as_secs_f32().max(0.1)));
+                        // Only moves forward, and only tells the screen when it moved by a whole percent.
+                        if f >= shown + 0.01 {
+                            shown = f;
+                            on_progress(f);
+                        }
+                        if link_is_lost(last_event.elapsed(), last_up.get().elapsed()) {
+                            break Err(anyhow!("the computer took too long"));
+                        }
+                        if started.elapsed() > limit {
+                            break Err(anyhow!("the computer took far longer than the recording"));
+                        }
+                    }
+                    r = &mut upload, if !uploaded => match r {
+                        Ok(()) => uploaded = true,
+                        Err(e) => break Err(e),
+                    },
+                    ev = erx.recv() => {
+                        let ev = match ev {
+                            Some(Ok(Some(e))) => e,
+                            Some(Ok(None)) | None => break Err(anyhow!("the computer stopped answering")),
+                            Some(Err(e)) => break Err(e),
+                        };
+                        last_event = Instant::now();
+                        match ev {
+                            DiarizeEvent::Queued { .. } | DiarizeEvent::Working => {}
+                            DiarizeEvent::Spans { spans, .. } => {
+                                on_progress(1.0);
+                                break Ok(spans);
+                            }
+                            DiarizeEvent::Error(e) => break Err(anyhow!(e)),
+                        }
+                    }
+                }
+            }
+        };
+        reader.abort();
+        let _ = producer;
+        if result.is_err() {
+            let _ = send.reset(0u32.into());
+        }
+        result
+    }
+
     /// True when a compute node could read a photo right now, from what was last seen.
     pub fn vision_node_available(&self) -> bool {
         let g = self.inner.lock();
@@ -1137,6 +1307,7 @@ impl Remote {
                 Kind::Embed => st.caps.embed.is_some() && st.caps.embed_dim == 768 && (st.caps.embed_per_s == 0.0 || st.caps.embed_per_s >= MIN_EMBED_PER_S),
                 Kind::Transcribe => can_transcribe(st),
                 Kind::Describe => st.vision && st.caps.chat.is_some(),
+                Kind::Speakers => st.speakers,
             };
             if !ok {
                 continue;
@@ -1151,6 +1322,8 @@ impl Remote {
                 Kind::Embed => st.caps.embed_per_s,
                 Kind::Transcribe => st.caps.transcribe_x,
                 Kind::Describe => st.caps.chat_tok_s,
+                // Nobody measures this, so the nodes are told apart by their queue and their round trip.
+                Kind::Speakers => 0.0,
             };
             let speed = if speed > 0.0 { speed } else if matches!(kind, Kind::Transcribe) { UNMEASURED_TRANSCRIBE_X } else { 10.0 };
             let ours = self.inflight.lock().get(&n.saved.fp).copied().unwrap_or(0);
@@ -1170,6 +1343,8 @@ enum Kind {
     Transcribe,
     /// Reading a photo (needs a node with the vision projector).
     Describe,
+    /// Telling speakers apart on a recording (needs a node with the speaker models).
+    Speakers,
 }
 
 struct Picked {
@@ -1492,10 +1667,32 @@ pub(crate) mod tests {
                                     st.caps.window_max_s = 90;
                                     st.node_name = "fake".into();
                                     if matches!(mode, Mode::Broken | Mode::Reads) {
+                                        st.speakers = true;
                                         st.vision = true;
                                         st.caps.chat = Some("fake-chat".into());
                                     }
                                     let _ = wire::write_frame(&mut send, &st).await;
+                                    let _ = send.finish();
+                                    let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
+                                }
+                                Request::Diarize(d) => {
+                                    // The audio comes first, then the answer: one stretch per whole 10 seconds, alternating two voices.
+                                    let mut bytes = 0usize;
+                                    loop {
+                                        match wire::read_frame::<AudioFrame>(&mut recv).await {
+                                            Ok(Some(AudioFrame::Pcm(p))) => bytes += p.len(),
+                                            _ => break,
+                                        }
+                                    }
+                                    if matches!(mode, Mode::Broken) {
+                                        let _ = wire::write_frame(&mut send, &DiarizeEvent::Error("no models".into())).await;
+                                    } else {
+                                        let _ = wire::write_frame(&mut send, &DiarizeEvent::Working).await;
+                                        let n = (bytes / 320_000) as u64;
+                                        let spans: Vec<SpeakerSpan> = (0..n).map(|i| SpeakerSpan { start_ms: i * 10_000, end_ms: (i + 1) * 10_000, speaker: (i % 2) as u32 }).collect();
+                                        let _ = wire::write_frame(&mut send, &DiarizeEvent::Spans { spans, elapsed_ms: 5 }).await;
+                                    }
+                                    let _ = (d.people, d.total_ms);
                                     let _ = send.finish();
                                     let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
                                 }
@@ -1724,5 +1921,50 @@ pub(crate) mod tests {
         assert!(r.describe(vec![], "x", 10).is_none());
         r.set_enabled(false);
         assert!(!r.vision_node_available() && r.describe(vec![7; 500], "x", 10).is_none());
+    }
+
+    #[test]
+    fn speakers_are_told_apart_by_a_node_that_can_and_the_rest_are_left_alone() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let good = start_fake(&rt, 8.0, Mode::Reads);
+        let bad = start_fake(&rt, 8.0, Mode::Broken);
+        let plain = start_fake(&rt, 8.0, Mode::Good);
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let audio = |secs: u64| move || -> Result<PcmFrames> { Ok(Box::new((0..secs).map(|_| vec![0u8; 32_000])) as PcmFrames) };
+
+        // The node that can answers, and a node that fails before it is passed over.
+        let r = remote_with(&[("bad", &bad), ("good", &good)], "speakers");
+        r.refresh();
+        assert_eq!(r.speakers_node_available().as_deref().map(|n| n == "good" || n == "bad"), Some(true));
+        let (spans, node) = r.diarize(30_000, audio(30), 0, 0.0, &cancel, &|_| {}).expect("a node can").expect("it answers");
+        assert_eq!(node, "good");
+        assert_eq!(spans.iter().map(|s| (s.start_ms, s.end_ms, s.speaker)).collect::<Vec<_>>(), [(0, 10_000, 0), (10_000, 20_000, 1), (20_000, 30_000, 0)]);
+
+        // Only a node that fails: it was tried, so the caller hears about the failure and does it itself.
+        let r = remote_with(&[("bad", &bad)], "speakers-bad");
+        r.refresh();
+        assert!(r.diarize(30_000, audio(30), 0, 0.0, &cancel, &|_| {}).expect("tried").is_err());
+
+        // A node without the speaker models is never asked.
+        let r = remote_with(&[("plain", &plain)], "speakers-plain");
+        r.refresh();
+        assert!(r.speakers_node_available().is_none() && r.diarize(30_000, audio(30), 0, 0.0, &cancel, &|_| {}).is_none());
+        // Nothing is sent when compute nodes are off or there is no audio.
+        let r = remote_with(&[("good", &good)], "speakers-off");
+        r.refresh();
+        assert!(r.diarize(0, audio(0), 0, 0.0, &cancel, &|_| {}).is_none());
+        r.set_enabled(false);
+        assert!(r.speakers_node_available().is_none() && r.diarize(30_000, audio(30), 0, 0.0, &cancel, &|_| {}).is_none());
+    }
+
+    #[test]
+    fn the_percent_of_a_speaker_job_goes_up_with_the_upload_then_with_the_wait_and_never_ends_early() {
+        assert_eq!((speakers_fraction(0.0, None), speakers_fraction(1.0, None)), (0.0, 0.30));
+        assert!((speakers_fraction(0.5, None) - 0.15).abs() < 1e-6);
+        assert!((speakers_fraction(1.0, Some(0.0)) - 0.30).abs() < 1e-6);
+        assert!((speakers_fraction(1.0, Some(0.5)) - 0.625).abs() < 1e-6);
+        // Waiting longer than expected stops at 95%, the last 5% is the answer.
+        assert!((speakers_fraction(1.0, Some(7.0)) - 0.95).abs() < 1e-6);
+        assert_eq!((speakers_expected_s(1_182_000), speakers_expected_s(10_000)), (39.4, 5.0));
     }
 }

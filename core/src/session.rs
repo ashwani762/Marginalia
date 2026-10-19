@@ -326,6 +326,27 @@ fn keep_original(data_dir: &Path, doc_id: i64, from: &Path) -> Option<(String, S
 }
 
 impl Core {
+    /// Labels the transcript of a meeting with who spoke when (`diar`: start, end in meeting seconds and a speaker number, from the phone's
+    /// own diarizer or from a compute node). Speakers are numbered by who spoke first, so "Speaker 1" is stable and readable.
+    fn apply_speakers(&self, id: i64, diar: Vec<(f64, f64, i64)>) -> Result<Value> {
+        let segs: Vec<(i64, f64, f64)> = self.kb.store.segments(id)?.into_iter().map(|s| (s.id, s.t0, s.t1)).collect();
+        let labels = assign_speakers(&segs, &diar);
+        let mut order: Vec<i64> = Vec::new();
+        let mut by_seg: HashMap<i64, i64> = HashMap::new();
+        for (seg, spk) in &labels {
+            if !order.contains(spk) {
+                order.push(*spk);
+            }
+            by_seg.insert(*seg, order.iter().position(|x| x == spk).unwrap() as i64);
+        }
+        let renumbered: Vec<(i64, i64)> = segs.iter().filter_map(|(sid, _, _)| by_seg.get(sid).map(|n| (*sid, *n))).collect();
+        self.kb.store.set_segment_speakers(id, &renumbered)?;
+        let _ = self.kb.store.sync_meeting_doc_folder(id);
+        self.reindex_meeting(id);
+        self.emit(json!({"type": "meetings_changed"}));
+        Ok(json!({"speakers": order.len(), "labelled": renumbered.len()}))
+    }
+
     pub fn new(paths: Paths, tz_offset_secs: i32) -> Result<Arc<Self>> {
         let settings = Settings::load(&paths);
         // Live speech has first call on the processor; the language model works in the gaps.
@@ -627,30 +648,15 @@ impl Core {
             }
             "meeting.speakers_apply" => {
                 // args.segments: [{"start": s, "end": s, "speaker": n}, ...] from the diarizer, in meeting seconds.
-                let id = i("id");
                 let diar: Vec<(f64, f64, i64)> = args
                     .get("segments")
                     .and_then(Value::as_array)
                     .map(|a| a.iter().filter_map(|x| Some((x.get("start")?.as_f64()?, x.get("end")?.as_f64()?, x.get("speaker")?.as_i64()?))).collect())
                     .unwrap_or_default();
-                let segs: Vec<(i64, f64, f64)> = self.kb.store.segments(id)?.into_iter().map(|s| (s.id, s.t0, s.t1)).collect();
-                let labels = assign_speakers(&segs, &diar);
-                // Speakers are numbered by who spoke first, so "Speaker 1" is stable and readable.
-                let mut order: Vec<i64> = Vec::new();
-                let mut by_seg: HashMap<i64, i64> = HashMap::new();
-                for (seg, spk) in &labels {
-                    if !order.contains(spk) {
-                        order.push(*spk);
-                    }
-                    by_seg.insert(*seg, order.iter().position(|x| x == spk).unwrap() as i64);
-                }
-                let renumbered: Vec<(i64, i64)> = segs.iter().filter_map(|(sid, _, _)| by_seg.get(sid).map(|n| (*sid, *n))).collect();
-                self.kb.store.set_segment_speakers(id, &renumbered)?;
-                let _ = self.kb.store.sync_meeting_doc_folder(id);
-                self.reindex_meeting(id);
-                self.emit(json!({"type": "meetings_changed"}));
-                Ok(json!({"speakers": order.len(), "labelled": renumbered.len()}))
+                self.apply_speakers(i("id"), diar)
             }
+            // Telling speakers apart on a compute node: {"id", "people" (0 = decide), "threshold" (0 = default)}.
+            "meeting.speakers_node" => self.speakers_on_node(i("id"), args.get("people").and_then(Value::as_u64).unwrap_or(0) as u32, args.get("threshold").and_then(Value::as_f64).unwrap_or(0.0) as f32),
             "meeting.speaker_rename" => {
                 self.kb.store.set_speaker_name(i("id"), i("speaker"), &s("name"))?;
                 Ok(json!({}))

@@ -593,6 +593,7 @@ async fn pair_and_status_replies_round_trip() {
         pending: vec![PendingPhone { id: "0123456789abcdef".into(), name: "Pixel".into(), waited_s: 7 }],
         paused: true,
         vision: true,
+        speakers: true,
     }, StatusReply::default()]))
     .await;
 }
@@ -605,6 +606,23 @@ async fn a_photo_request_round_trips() {
     let bytes = postcard::to_stdvec(&Request::Describe(req)).unwrap();
     match postcard::from_bytes::<Request>(&bytes).unwrap() {
         Request::Describe(r) => assert_eq!((r.prompt.as_str(), r.jpeg, r.max_tokens), ("What does it show?", jpeg, 170)),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn speaker_messages_round_trip() {
+    let spans = vec![SpeakerSpan { start_ms: 0, end_ms: 4_200, speaker: 0 }, SpeakerSpan { start_ms: 4_500, end_ms: 9_100, speaker: 1 }];
+    let ev = DiarizeEvent::Spans { spans: spans.clone(), elapsed_ms: 1234 };
+    let bytes = postcard::to_stdvec(&ev).unwrap();
+    match postcard::from_bytes::<DiarizeEvent>(&bytes).unwrap() {
+        DiarizeEvent::Spans { spans: s, elapsed_ms } => assert_eq!((s, elapsed_ms), (spans, 1234)),
+        other => panic!("{other:?}"),
+    }
+    let req = Request::Diarize(DiarizeRequest { people: 3, threshold: 0.45, total_ms: 3_600_000, priority: Priority::Background });
+    let bytes = postcard::to_stdvec(&req).unwrap();
+    match postcard::from_bytes::<Request>(&bytes).unwrap() {
+        Request::Diarize(r) => assert_eq!((r.people, r.threshold, r.total_ms), (3, 0.45, 3_600_000)),
         other => panic!("{other:?}"),
     }
 }

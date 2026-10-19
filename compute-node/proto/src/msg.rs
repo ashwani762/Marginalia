@@ -54,6 +54,38 @@ pub enum Request {
     /// Reads a photo and says what it shows. Only sent to a node whose status says `vision`. Answered with [`ChatEvent`]s
     /// (the description arrives as tokens, then `Done`). Nothing is kept on the node.
     Describe(DescribeRequest),
+    /// Tells speakers apart on a recording. After this frame the phone sends [`AudioFrame`]s on the same stream
+    /// until [`AudioFrame::End`], and the node answers with [`DiarizeEvent`]s. Only sent to a node whose status says `speakers`.
+    Diarize(DiarizeRequest),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiarizeRequest {
+    /// How many people spoke, or 0 to let the node decide.
+    pub people: u32,
+    /// How different two voices must be to count as two people when `people` is 0. Higher merges more. 0 means the node's own choice.
+    pub threshold: f32,
+    /// Length of the audio that follows, in milliseconds.
+    pub total_ms: u64,
+    pub priority: Priority,
+}
+
+/// Who spoke when, in milliseconds from the start of the audio. `speaker` starts at 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeakerSpan {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub speaker: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DiarizeEvent {
+    Queued { ahead: u32 },
+    /// Heartbeat while the node works. Telling speakers apart has no steps to report, the node is busy until it is done.
+    Working,
+    /// The whole answer, once.
+    Spans { spans: Vec<SpeakerSpan>, elapsed_ms: u32 },
+    Error(String),
 }
 
 /// A photo to read. The picture is sent as a JPEG, already scaled down on the phone.
@@ -201,6 +233,8 @@ pub struct StatusReply {
     pub paused: bool,
     /// The node can read photos ([`Request::Describe`]). After `paused` for the same reason.
     pub vision: bool,
+    /// The node can tell speakers apart ([`Request::Diarize`]): built with it and the speaker models were downloaded.
+    pub speakers: bool,
 }
 
 /// What a record says about a phone. Allow and Revoke are one register (the later one wins), Block and Unblock
@@ -266,6 +300,7 @@ mod tests {
         assert_eq!(first(&Request::Records { port: 1, records: vec![] }), 9);
         assert_eq!(first(&Request::Leave), 10);
         assert_eq!(first(&Request::Describe(DescribeRequest { prompt: String::new(), jpeg: vec![], max_tokens: 1, priority: Priority::Bulk })), 11);
+        assert_eq!(first(&Request::Diarize(DiarizeRequest { people: 0, threshold: 0.0, total_ms: 0, priority: Priority::Bulk })), 12);
     }
 
     #[test]
