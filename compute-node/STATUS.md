@@ -154,7 +154,9 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
    - Checked on the real phone and the real tray with real clicks: pause turns the chip yellow in under 1.5 s, resume green, stop red
      in under 1.5 s, start green in under 6 s (the node loads its models first). The tray shows amber for a moment while a stopping node
      finishes its jobs, then red.
-1b. Tomorrow (2026-10-19): telling speakers apart must run on a compute node, as "Improve transcript" does. Today it only runs on the phone.
+1b. Today (2026-10-19): telling speakers apart must run on a compute node, as "Improve transcript" does. Today it only runs on the phone.
+   - It is a post processing step only. It works on the kept recording after the meeting, started from the Review screen, and never during
+     recording. There is no live speaker separation and none is planned, so nothing here touches the live captions or their correction windows.
    - Found: `Diarizer.kt` runs sherpa-onnx on the phone (a pyannote segmentation model and a speaker model, about 36 MB, fetched on first use) and
      `AppVm.separateSpeakers` shows "Telling speakers apart" there. The wire protocol has no request for it, so a node is never asked, even when one is
      around and much faster. The core only stores the result (`meeting.speakers_apply`).
