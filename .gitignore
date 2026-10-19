@@ -24,5 +24,7 @@ models-stage/
 *.gguf
 *.litertlm
 *.bin
+*.onnx
+*.pcm
 *.sqlite3*
 *.log

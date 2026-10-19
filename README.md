@@ -1,8 +1,12 @@
 # Marginalia
 
-**Record a meeting, jot as it happens, and get the notes, a summary and answers from your own documents. Everything runs on the phone.**
+### Notes in the margin of your meetings.
 
-Optional *compute nodes* on your network make the AI faster while you are near them, and the phone carries on by itself when they are not.
+Marginalia sits in your pocket while people talk. It listens, you jot a few words, and when the meeting ends it hands you clean notes,
+a summary, who said what, and answers from everything you have ever kept. Photos of the whiteboard included.
+
+**It all runs on your phone. No accounts, no cloud, no analytics.** And when a PC on your Wi-Fi is willing to help, the AI simply gets
+a lot faster. Walk out of the house and the phone carries on alone. Nothing breaks.
 
 <p align="center">
   <img src="docs/images/meetings.png" width="24%" alt="Meetings list with a compute node banner">
@@ -13,33 +17,44 @@ Optional *compute nodes* on your network make the AI faster while you are near t
 
 ## Contents
 
-- [Features](#features)
+- [A meeting in 60 seconds](#a-meeting-in-60-seconds)
+- [What it can do](#what-it-can-do)
+- [Meet the compute node](#meet-the-compute-node)
 - [How it fits together](#how-it-fits-together)
 - [Quick start](#quick-start)
 - [Everyday commands](#everyday-commands)
+- [Build everything with one command](#build-everything-with-one-command)
 - [Repository map](#repository-map)
 - [Tests](#tests)
-- [Conventions](#conventions)
+- [House rules](#house-rules)
 - [Documentation](#documentation)
 - [Status](#status)
 - [License](#license)
 
-## Features
+## A meeting in 60 seconds
 
-- **Live captions** in many languages, on the phone (whisper.cpp). Nothing is uploaded.
-- **Jots**: type a few words while people talk. The AI finds what was said around it and writes it up properly. Four kinds: note, action, decision, question.
-- **Notes after the meeting**: a summary and clean notes, also for meetings of two hours. Notes are written once the meeting ends, so recording stays light.
-- **Ask** your meetings and documents. Answers carry their sources. Add PDFs, pictures, web pages and text.
-- **Photos** of a whiteboard are read and added to the meeting.
-- **Speaker separation** after the meeting, with rename and merge. Tap a transcript line to hear it.
-- **Better transcripts**: the small model on the phone gives instant captions. After the meeting a compute node listens to the kept
-  recording again with a large Whisper model (about 60 to 100 times faster than real time on a GPU). The corrected transcript replaces
-  the live one before the notes are written. It is also a button on the Review screen, and an optional switch corrects the captions
-  while recording, in short windows of audio. By default the corrected text runs about 12 seconds behind the speech.
-- **Compute nodes** (optional): a small daemon on a PC does the heavy AI work for the phone. It is found automatically on the Wi-Fi and
-  connected with one tap. Notes, answers and search run about six times faster. If a node is lost in the middle of an answer, another
-  node or the phone finishes it.
-- **Private by design**: no accounts, no cloud, no analytics. Nodes keep nothing and show only counts.
+1. **Tap the mic.** Captions appear as people talk, in many languages, made on the phone itself.
+2. **Jot.** Type a few words: a note, an action, a decision, a question. The AI finds what was said around it and writes it up properly.
+3. **Snap the whiteboard.** The photo is read and joins the meeting. If a compute node is around it reads the photo on the spot, if not
+   the phone waits until the meeting is over so the live captions never stutter.
+4. **Glance at the cards.** When someone asks a question out loud, a card appears with an answer from your own documents and what was
+   said earlier, with its sources. Close it with the X if you do not want it.
+5. **Stop.** The summary, the notes and the search index are ready in moments, even for a two hour meeting.
+6. **Ask anything later.** "What did we decide about the deadline?" Answers carry their sources, and they include what the photos showed.
+
+## What it can do
+
+- **Live captions** in many languages (whisper.cpp). Nothing is uploaded.
+- **Jots** in four kinds, polished against the transcript.
+- **Notes and a summary** once the meeting ends, so recording stays light.
+- **Ask** your meetings and documents. Add PDFs, pictures, web pages and text.
+- **Photos** read and searchable, so the whiteboard is part of the answer.
+- **Who said what**: speaker separation after the meeting, with rename and merge. Tap a line to hear it. It is opt-in, a button you press
+  only when you want it. A compute node can do it about 24 times faster than before (a 19 minute talk in 23 seconds), the phone can do it alone.
+- **Better transcripts**: the phone's small model gives instant captions. After the meeting a compute node listens again with a large
+  Whisper model and the improved text replaces the live one before the notes are written. An optional switch even corrects the captions
+  while you record, about 12 seconds behind the speech.
+- **Private by design**: nodes keep nothing and show only counts, never what was said. Their logs hold events and numbers only.
 
 <p align="center">
   <img src="docs/images/nodes.png" width="24%" alt="Compute nodes in Settings">
@@ -47,9 +62,29 @@ Optional *compute nodes* on your network make the AI faster while you are near t
   <img src="docs/images/knowledge.png" width="24%" alt="Knowledge">
 </p>
 
+## Meet the compute node
+
+A compute node is a small program on a PC, a mini server or a Raspberry Pi. Marginalia calls it a *compute node* and so does everything below.
+It is optional, it is stateless and it never decides anything. It borrows its speed to the phone.
+
+- **Found by itself.** It announces itself on the Wi-Fi and the phone offers a **Connect** button. One tap and you are paired.
+- **Traffic lights.** On the phone each node is a small pill on the Meetings screen: **green** running, **yellow** paused, **red** off or out of reach.
+  Up to five pills, scrolling sideways, and Settings lists every node. Pause it from the tray and the pill turns yellow in about a second.
+- **Never leaves you hanging.** Every AI job goes to the node with the shortest wait. If a node drops out in the middle of an answer, the next node
+  or the phone carries on from the words already shown. If a node that passed a job to a friend loses that friend, it finishes the answer itself.
+- **Nodes make friends.** They see each other on the network, you join them with a code, and from then on they share the list of allowed phones
+  and pass work to whichever of them is less busy.
+- **A tray icon that tells the truth.** One icon per state: green ready, blue busy, amber paused, violet locked, red not running. Click it for the details window.
+
 <p align="center">
   <img src="docs/images/tray.png" width="200" alt="Details panel of the compute node tray icon">
 </p>
+
+- **Live graphs.** The details window draws the last two minutes of processor, memory, graphics card and network use, gliding along with the busy
+  stretches tinted in, and a line turns amber and then red as the thing fills up. Hover a chart to read that moment.
+- **A log you can send.** `marginalia-node logs` shows a rotating log (5 MB at a time, 5 kept) with a load line every minute, for debugging. Never the text of a note, a question, a recording or a photo.
+- **Opt-in extras.** Reading photos needs one extra model file and telling speakers apart needs a small helper program and two more files.
+  Both are a single command (`marginalia-node models download --only vision` and `--only speakers`) and a node that has not got them simply does not offer the work.
 
 <p align="center">
   <img src="docs/images/topbar.png" width="45%" alt="The compute node tray icon in the Ubuntu top bar">
@@ -65,16 +100,16 @@ Optional *compute nodes* on your network make the AI faster while you are near t
 │ Rust core   (core/)          │      │   Rust, tokio, QUIC         │
 │   SQLite, vector index,      │◄────►│   llama.cpp (CUDA, Vulkan)  │
 │   write-up pipeline          │      │   whisper.cpp               │
-│       |                      │      │       ^                     │
-│ LiteRT-LM (Gemma)            │      │       | local admin channel │
-│ whisper.cpp                  │      │ tray icon, details panel    │
+│       |                      │      │   speaker helper (optional) │
+│ LiteRT-LM (Gemma)            │      │       ^                     │
+│ whisper.cpp                  │      │       | local admin channel │
+│ sherpa-onnx (speakers)       │      │ tray icon, details window   │
 └──────────────────────────────┘      └─────────────────────────────┘
                      QUIC, pinned certificates
 ```
 
-Every AI job is offered to the compute nodes first, ranked by expected wait, and runs on the phone only when no node can take it.
-A job that fails moves to the next node and an answer cut off halfway carries on from the words already shown.
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the diagrams and the full story.
+The one rule: **every AI job is offered to the compute nodes first and runs on the phone only when no node can take it.**
+Jobs are ranked by expected wait. A job that fails moves to the next node. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the diagrams and the full story.
 
 | Part | Technology | Folder |
 | --- | --- | --- |
@@ -82,8 +117,9 @@ A job that fails moves to the next node and an answer cut off halfway carries on
 | Meetings, notes, search, chat logic | Rust, SQLite with FTS5, a vector index | `core/` |
 | AI on the phone | Gemma 4 E2B and EmbeddingGemma 2 on Google LiteRT-LM (GPU first), whisper.cpp for speech, sherpa-onnx for speakers | `app/`, `core/`, `vendor/` |
 | Wire protocol and trust | Rust, QUIC (quinn), pinned certificates, pairing codes | `compute-node/proto/` |
-| Compute node | Rust, tokio, llama.cpp with CUDA or Vulkan | `compute-node/node/` |
-| Tray icon | Rust, `ksni` on Linux, `tray-icon` on Windows (beta), `egui` details panel | `compute-node/tray/` |
+| Compute node | Rust, tokio, llama.cpp with CUDA or Vulkan, whisper.cpp | `compute-node/node/` |
+| Speaker helper (optional) | Rust, sherpa-onnx with pyannote segmentation and WeSpeaker ResNet34 | `compute-node/speakers/` |
+| Tray icon and window | Rust, `ksni` on Linux, `tray-icon` on Windows (beta), `egui` for the window | `compute-node/tray/` |
 
 ## Quick start
 
@@ -118,16 +154,17 @@ scripts/app/push-models.sh
 You need Rust, CMake and a C++ toolchain. For an NVIDIA card also the CUDA toolkit.
 
 ```bash
-scripts/node/build.sh                 # CUDA build, or add --cpu-only
+make                                          # node, tray icon and speaker helper (make cpu for no CUDA)
 target/release/marginalia-node models download
-scripts/node/install-linux.sh         # user service and tray icon at login
+make install                                  # user service and tray icon at login
 ```
 
 Then check it:
 
 ```bash
 marginalia-node status     # what the node serves and which phones are paired
-marginalia-node stats      # jobs, speed, errors (counts only, never content)
+marginalia-node peers      # friends you joined and nodes seen on the network
+marginalia-node logs       # where the log lives and its last lines
 ```
 
 ### A compute node on Windows (beta)
@@ -146,19 +183,32 @@ Use `marginalia-node lock` if you want to approve every new phone yourself, or `
 | Run the node in the foreground | `target/release/marginalia-node run` |
 | Run on the processor only | `target/release/marginalia-node run --cpu` |
 | Build with Vulkan (AMD, Intel) | `cargo build --release -p marginalia-node --features vulkan` |
-| Build the tray icon | `cargo build --release -p marginalia-node-tray` |
 | Show or fetch model files | `marginalia-node models list` and `marginalia-node models download` |
+| Let the node read photos | `marginalia-node models download --only vision` |
+| Let the node tell speakers apart | `marginalia-node models download --only speakers` (the helper program must sit next to the node) |
 | Choose the chat model (E2B is smaller and faster, E4B answers better) | `marginalia-node chat-model e4b`, then restart the node. The tray menu does the same |
 | Pause or resume new jobs | `marginalia-node pause` and `marginalia-node resume` |
 | Let a waiting phone in | `marginalia-node approve` |
 | Block or forget a phone | `marginalia-node block <id or name>` and `marginalia-node revoke <id or name>` |
-| Join another compute node (it shows a code with `pair`) | `marginalia-node join <address> <code>`, list with `marginalia-node peers`, leave with `marginalia-node unjoin <name>` |
-| Try every job type like a phone would | `marginalia-node probe <address>` |
-| Service log (Linux) | `journalctl --user -u marginalia-node -f` |
+| Join another compute node (it shows a code with `pair`) | `marginalia-node join <name or address> <code>`, list with `marginalia-node peers`, leave with `marginalia-node unjoin <name>` |
+| Try every job type like a phone would | `marginalia-node probe <address>` (add `--speakers FILE.wav` to try speaker separation) |
+| Read the log | `marginalia-node logs --follow` |
 
 `marginalia-node --help` lists everything. The node listens on UDP 47615 and its local admin channel on TCP 127.0.0.1:47616.
-It keeps its identity and paired phones in `~/.config/marginalia-node` and looks for models in `~/.local/share/marginalia/models`.
+It keeps its identity, paired phones and logs in `~/.config/marginalia-node` and looks for models in `~/.local/share/marginalia/models`.
 Set `HF_TOKEN` if a Hugging Face repository asks for a login. The token is never printed or stored.
+
+## Build everything with one command
+
+| System | Command | What it does |
+| --- | --- | --- |
+| Linux | `make` | node, tray icon and speaker helper |
+| Linux | `make cpu` | the same without CUDA |
+| Linux | `make test` | every test that needs no phone |
+| Linux | `make install` | build, install for this user and start |
+| Linux | `make app` | the phone app (needs the Android tools) |
+| Linux | `make help` | all the targets |
+| Windows | `.\scripts\windows\make-all.ps1` | node, tray icon and speaker helper (add `-Test`, `-Install`, `-Models speakers`) |
 
 ## Repository map
 
@@ -168,13 +218,15 @@ core/           Rust core for the phone (JNI library), whisper.cpp and RAG
 compute-node/
   proto/        wire protocol, certificates, pairing, framing
   node/         the daemon
-  tray/         tray icon and details panel
+  speakers/     the optional helper that tells speakers apart (a separate program on purpose)
+  tray/         tray icon and details window
   packaging/    systemd unit, tray autostart entry, Docker file for a processor build, Windows notes
   vendor/       patched llama.cpp bindings
 scripts/        every script, grouped by use
   app/          build the phone core, fetch libraries, stage and push models (bash)
   node/         build and install the compute node on Linux (bash)
-  windows/      setup, verify, dev, build, status and uninstall for the compute node (PowerShell, beta)
+  windows/      setup, verify, dev, build, make-all, status and uninstall for the compute node (PowerShell, beta)
+Makefile        build everything on Linux with one command
 vendor/         ggml and whisper.cpp used by core/
 docs/           architecture, development, plans, screenshots
 ```
@@ -185,20 +237,24 @@ The phone core is built for Android by `scripts/app/build-native.sh`.
 ## Tests
 
 ```bash
+make test                               # all of it
 cargo test -p marginalia-proto          # pairing, pinning, man in the middle, framing
-cargo test -p marginalia-node-tray      # tray icon logic
+cargo test -p marginalia-node           # the node, including the log files and speaker helper plumbing
+cargo test -p marginalia-node-tray      # tray icon and chart logic
 (cd core && cargo test --lib)           # phone core
 ./gradlew :app:testDebugUnitTest        # Kotlin unit tests
+compute-node/node/tests/cluster.sh      # three real nodes on one machine, joining, forwarding, failing (a few minutes)
 ```
 
-## Conventions
+## House rules
 
 - **Commit messages** look like `[area] short subject`, then a short body saying why. Areas in use: `repo`, `app`, `core`, `compute-node`.
-- **User-visible text** (app, node, tray, scripts) uses plain wording with no semicolons and no em dashes.
+- **Words on screen** (app, node, tray, scripts) are plain, with no semicolons and no em dashes.
   The chat model is "the AI" and the feature is always called "compute node".
-- **Nothing private is committed**: no models, no databases, no tokens. `.gitignore` covers `*.gguf`, `*.litertlm`, `*.bin`, `*.sqlite3*` and `*.log`.
-- **Nodes are stateless**: never write job content to disk or to a log on a node.
+- **Nothing private is committed**: no models, no databases, no tokens. `.gitignore` covers `*.gguf`, `*.litertlm`, `*.bin`, `*.onnx`, `*.sqlite3*` and `*.log`.
+- **Nodes are stateless**: never write job content anywhere on a node except a temporary file that is removed when the job ends.
 - **Every feature must work on the phone alone.** A compute node only makes it faster.
+- **Opt-in beats always-on.** Anything heavy, like telling speakers apart, runs only when someone asks for it.
 
 ## Documentation
 
@@ -209,12 +265,13 @@ cargo test -p marginalia-node-tray      # tray icon logic
 | [docs/WINDOWS-PLAN.md](docs/WINDOWS-PLAN.md) | Start here when working on Windows (beta) |
 | [compute-node/README.md](compute-node/README.md) | Using and running a node |
 | [compute-node/DESIGN.md](compute-node/DESIGN.md) | Protocol and the cluster of nodes (what exists, what is planned) |
-| [compute-node/STATUS.md](compute-node/STATUS.md) | What is checked, what is not, next steps |
+| [compute-node/STATUS.md](compute-node/STATUS.md) | What is checked, what is not, measurements, next steps |
 
 ## Status
 
-Working and tested on an Android phone and Ubuntu: everything above. The compute node on Windows is **beta**. It builds, runs and passes its script checks on Windows 11, and the rest of the Windows testing comes later (see [compute-node/STATUS.md](compute-node/STATUS.md)). Compute nodes can join each other (shared allowed and blocked phones, jobs forwarded to a less busy node), checked on one machine.
-Planned: nodes finding each other by themselves, standby mode and roles.
+Working and tested on an Android phone and Ubuntu: everything above. The compute node on Windows is **beta**. It builds, runs and passes its script checks on Windows 11, and the rest of the Windows testing comes later (see [compute-node/STATUS.md](compute-node/STATUS.md)). The new Windows pieces (the speaker helper, the log file, the one-tray rule and `make-all.ps1`) type check for Windows but have not been run there.
+Compute nodes can find and join each other, share allowed and blocked phones and hand work to a less busy node, checked on one machine.
+Planned: nodes sharing their member lists, standby mode and roles.
 
 ## License
 
