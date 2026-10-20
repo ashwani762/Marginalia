@@ -1,14 +1,13 @@
 # Marketing video and slides
 
-Scripts that make the LinkedIn video and photo slides for Marginalia, plus the post text.
+Scripts that make the demo video and photo slides for Marginalia.
 
 | File | What it is |
 |------|------------|
-| `video.py` | The 56 second, 60 fps, 1080x1920 demo video (calm mask reveals, phone to close-up morphs) |
-| `base.py` | Shared drawing helpers (text, cards, notebook, phone) used by `video.py` |
+| `video.py` | The 56 second, 60 fps, 1080x1920 demo video |
+| `base.py` | Shared drawing helpers (fonts, text, cards, notebook, pen, phone recordings) used by `video.py` and an older version of the video (`base.py full`) |
 | `slides.py` | Four 1080x1350 photo slides |
-| `motion-philosophy.md` | The motion rules |
-| `linkedin-post.txt` | The post |
+| `motion-philosophy.md` | The motion rules the video follows |
 
 ## Inputs
 
