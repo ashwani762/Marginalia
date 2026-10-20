@@ -5,7 +5,7 @@
 //! llama.cpp, and linking both into one program corrupts memory the moment ONNX Runtime starts (`free(): invalid pointer`). Apart,
 //! each is fine. It also means the speaker models are in memory only while a job runs, and a crash here cannot take the node down.
 //!
-//! Usage: `marginalia-node-speakers --segmentation FILE --voices FILE --audio FILE [--people N] [--threshold T] [--threads N]`
+//! Usage: `marginalia-node-speakers --segmentation FILE --voices FILE --audio FILE [--people N] [--threshold T] [--threads N] [--provider cpu|cuda]`
 //! where the audio is raw PCM, 16 bit little endian, mono, 16 kHz. It prints one JSON line:
 //! `{"voices": 2, "spans": [{"start": 0.32, "end": 6.83, "speaker": 0}, ...]}` (seconds), or an error on stderr and exit code 1.
 
@@ -23,10 +23,12 @@ struct Args {
     threads: i32,
     /// How far the segmentation window moves each step, as a share of the window (0 means the library default, 0.1).
     shift: f32,
+    /// `cpu` (the default) or `cuda`. `cuda` needs the GPU build of sherpa-onnx, otherwise ONNX Runtime falls back to the processor.
+    provider: String,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    let mut a = Args { segmentation: String::new(), voices: String::new(), audio: String::new(), people: 0, threshold: 0.0, threads: 0, shift: 0.0 };
+    let mut a = Args { segmentation: String::new(), voices: String::new(), audio: String::new(), people: 0, threshold: 0.0, threads: 0, shift: 0.0, provider: "cpu".into() };
     let mut it = args.iter();
     while let Some(k) = it.next() {
         let mut value = || it.next().cloned().ok_or_else(|| format!("{k} needs a value"));
@@ -38,6 +40,12 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--threshold" => a.threshold = value()?.parse().map_err(|_| "--threshold must be a number".to_string())?,
             "--shift" => a.shift = value()?.parse().map_err(|_| "--shift must be a number".to_string())?,
             "--threads" => a.threads = value()?.parse().map_err(|_| "--threads must be a number".to_string())?,
+            "--provider" => {
+                a.provider = value()?;
+                if !matches!(a.provider.as_str(), "cpu" | "cuda") {
+                    return Err("--provider must be cpu or cuda".into());
+                }
+            }
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -64,9 +72,10 @@ fn run(a: &Args) -> Result<serde_json::Value, String> {
         segmentation: OfflineSpeakerSegmentationModelConfig {
             pyannote: OfflineSpeakerSegmentationPyannoteModelConfig { model: Some(a.segmentation.clone()), window_shift_ratio: if a.shift > 0.0 { a.shift } else { 0.1 } },
             num_threads: threads,
+            provider: Some(a.provider.clone()),
             ..Default::default()
         },
-        embedding: SpeakerEmbeddingExtractorConfig { model: Some(a.voices.clone()), num_threads: threads, ..Default::default() },
+        embedding: SpeakerEmbeddingExtractorConfig { model: Some(a.voices.clone()), num_threads: threads, provider: Some(a.provider.clone()), ..Default::default() },
         clustering: FastClusteringConfig { num_clusters: if a.people > 0 { a.people } else { -1 }, threshold: if a.threshold > 0.0 { a.threshold } else { 0.5 }, ..Default::default() },
         min_duration_on: 0.3,
         min_duration_off: 0.5,
@@ -126,7 +135,7 @@ mod tests {
     fn a_recording_shorter_than_a_second_has_no_speakers_and_needs_no_models() {
         let d = std::env::temp_dir().join(format!("marginalia-speakers-helper-{}.pcm", std::process::id()));
         std::fs::write(&d, vec![0u8; 3200]).unwrap();
-        let a = Args { segmentation: "missing".into(), voices: "missing".into(), audio: d.to_string_lossy().to_string(), people: 0, threshold: 0.0, threads: 0, shift: 0.0 };
+        let a = Args { segmentation: "missing".into(), voices: "missing".into(), audio: d.to_string_lossy().to_string(), people: 0, threshold: 0.0, threads: 0, shift: 0.0, provider: "cpu".into() };
         assert_eq!(run(&a).unwrap(), serde_json::json!({"voices": 0, "spans": []}));
         let _ = std::fs::remove_file(&d);
         assert!(run(&Args { audio: "/nonexistent/x.pcm".into(), ..a }).is_err());

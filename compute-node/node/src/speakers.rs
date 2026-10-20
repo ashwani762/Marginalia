@@ -41,19 +41,38 @@ pub fn helper_path() -> Option<PathBuf> {
 
 /// The two model files in the models folder, when both are there.
 pub fn model_files(dir: &Path) -> Option<(PathBuf, PathBuf)> {
-    let seg = dir.join(crate::models_dl::SPEAKER_SEGMENTATION.file);
-    let voices = dir.join(crate::models_dl::SPEAKER_VOICES.file);
+    let seg = dir.join(crate::catalog::speakers_segmentation().file);
+    let voices = dir.join(crate::catalog::speakers_voices().file);
     (seg.is_file() && voices.is_file()).then_some((seg, voices))
 }
 
 pub struct Speakers {
     dir: PathBuf,
     helper: Option<PathBuf>,
+    /// Ask the helper to use the graphics card.
+    want_gpu: bool,
+    /// Where the last job really ran: 0 not run yet, 1 the processor, 2 the graphics card.
+    last_on: std::sync::atomic::AtomicU8,
 }
 
 impl Speakers {
-    pub fn new(models_dir: PathBuf) -> Speakers {
-        Speakers { dir: models_dir, helper: helper_path() }
+    pub fn new(models_dir: PathBuf, want_gpu: bool) -> Speakers {
+        Speakers { dir: models_dir, helper: helper_path(), want_gpu, last_on: Default::default() }
+    }
+
+    /// Where telling speakers apart runs, for the status: what was asked for, and where the last job really ran.
+    pub fn placement(&self) -> serde_json::Value {
+        let on = match self.last_on.load(std::sync::atomic::Ordering::Relaxed) {
+            2 => "gpu",
+            1 => "cpu",
+            _ if self.want_gpu => "gpu",
+            _ => "cpu",
+        };
+        let mut v = serde_json::json!({"on": on, "asked": if self.want_gpu { "gpu" } else { "cpu" }});
+        if self.want_gpu && on == "cpu" {
+            v["note"] = "this helper build has no graphics card support, so it runs on the processor".into();
+        }
+        v
     }
 
     /// The helper is installed and the models are downloaded. The models are checked each time, so downloading them is enough, no restart.
@@ -84,18 +103,38 @@ impl Speakers {
         }
         std::fs::write(&file, &bytes).with_context(|| "cannot write the audio for the speaker helper")?;
         drop(bytes);
-        let out = run_helper(helper, &seg, &voices, &file, people, threshold, Duration::from_secs_f32(300.0 + audio_s * 1.5));
+        let out = run_helper(helper, &seg, &voices, &file, people, threshold, self.want_gpu, Duration::from_secs_f32(300.0 + audio_s * 1.5));
         let _ = std::fs::remove_file(&file);
-        parse_answer(&out?)
+        let (stdout, stderr) = out?;
+        if self.want_gpu {
+            // ONNX Runtime says so when it cannot use the card and falls back to the processor.
+            let fell_back = falls_back_to_cpu(&stderr);
+            self.last_on.store(if fell_back { 1 } else { 2 }, std::sync::atomic::Ordering::Relaxed);
+            if fell_back {
+                tracing::warn!("the speaker helper could not use the graphics card and ran on the processor (it needs the GPU build of sherpa-onnx and cuDNN)");
+            }
+        } else {
+            self.last_on.store(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        parse_answer(&stdout)
     }
 }
 
 /// Starts the helper and waits for its one line of output, stopping it if it takes longer than `limit`.
-fn run_helper(helper: &Path, seg: &Path, voices: &Path, audio: &Path, people: u32, threshold: f32, limit: Duration) -> Result<String> {
+/// Whether the helper's messages say the graphics card could not be used.
+pub fn falls_back_to_cpu(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("fallback to cpu") || s.contains("fall back to cpu") || s.contains("falling back to cpu")
+}
+
+fn run_helper(helper: &Path, seg: &Path, voices: &Path, audio: &Path, people: u32, threshold: f32, gpu: bool, limit: Duration) -> Result<(String, String)> {
     let mut cmd = Command::new(helper);
     // The segmentation window moves half its length each step. The default of a tenth is 5 times slower for the same result on speech
     // (measured: 93% agreement with the slow setting, 3.4 s instead of 59 s for 4 minutes of audio).
     cmd.arg("--segmentation").arg(seg).arg("--voices").arg(voices).arg("--audio").arg(audio).arg("--shift").arg("0.5");
+    if gpu {
+        cmd.arg("--provider").arg("cuda");
+    }
     if people > 0 {
         cmd.arg("--people").arg(people.to_string());
     }
@@ -138,7 +177,7 @@ fn run_helper(helper: &Path, seg: &Path, voices: &Path, audio: &Path, people: u3
         let why = stderr.lines().last().filter(|l| !l.trim().is_empty()).map(|l| l.trim().to_string()).unwrap_or_else(|| format!("it stopped with {status}"));
         bail!("the speaker helper failed: {why}");
     }
-    Ok(stdout)
+    Ok((stdout, stderr))
 }
 
 /// The helper's JSON line as spans in milliseconds, in time order.
@@ -160,6 +199,18 @@ pub fn spans_from(segments: impl Iterator<Item = (f32, f32, i32)>) -> Vec<Speake
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn notices_the_fallback_to_the_processor() {
+        assert!(falls_back_to_cpu("Available providers: CPUExecutionProvider. Fallback to cpu!"));
+        assert!(!falls_back_to_cpu("loaded the models"));
+        let s = Speakers { dir: PathBuf::from("."), helper: None, want_gpu: true, last_on: Default::default() };
+        assert_eq!(s.placement()["on"], "gpu");
+        s.last_on.store(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(s.placement()["on"], "cpu");
+        assert!(s.placement()["note"].as_str().unwrap().contains("no graphics card support"));
+    }
+
     use super::*;
 
     fn temp(tag: &str) -> PathBuf {
@@ -205,13 +256,13 @@ mod tests {
     #[test]
     fn the_node_offers_it_only_with_the_helper_and_both_models() {
         let d = temp("offer");
-        let none = Speakers { dir: d.clone(), helper: None };
+        let none = Speakers { dir: d.clone(), helper: None, want_gpu: false, last_on: Default::default() };
         assert!(!none.available());
-        std::fs::write(d.join(crate::models_dl::SPEAKER_SEGMENTATION.file), b"x").unwrap();
-        let with_helper = Speakers { dir: d.clone(), helper: Some(PathBuf::from("helper")) };
+        std::fs::write(d.join(crate::catalog::speakers_segmentation().file), b"x").unwrap();
+        let with_helper = Speakers { dir: d.clone(), helper: Some(PathBuf::from("helper")), want_gpu: false, last_on: Default::default() };
         assert!(!with_helper.available(), "one model is not enough");
         assert!(with_helper.why_not().unwrap().contains("not downloaded"));
-        std::fs::write(d.join(crate::models_dl::SPEAKER_VOICES.file), b"x").unwrap();
+        std::fs::write(d.join(crate::catalog::speakers_voices().file), b"x").unwrap();
         assert!(with_helper.available() && with_helper.why_not().is_none());
         assert!(!none.available(), "the models alone are not enough");
         assert!(none.why_not().unwrap().contains("helper"));
@@ -232,24 +283,24 @@ mod tests {
     #[test]
     fn the_helper_is_run_with_the_audio_and_models_and_its_answer_is_used_or_its_failure_reported() {
         let d = temp("run");
-        std::fs::write(d.join(crate::models_dl::SPEAKER_SEGMENTATION.file), b"x").unwrap();
-        std::fs::write(d.join(crate::models_dl::SPEAKER_VOICES.file), b"x").unwrap();
+        std::fs::write(d.join(crate::catalog::speakers_segmentation().file), b"x").unwrap();
+        std::fs::write(d.join(crate::catalog::speakers_voices().file), b"x").unwrap();
         let pcm = vec![1i16; 32_000];
         // It checks that it was given the audio file with the right size and the number of people, then answers.
         let ok = fake(&d, r#"audio=""; people=""; while [ $# -gt 0 ]; do case "$1" in --audio) audio="$2";; --people) people="$2";; esac; shift; done
 [ "$(wc -c < "$audio")" = "64000" ] && [ "$people" = "3" ] && echo '{"voices": 2, "spans": [{"start": 0.0, "end": 1.5, "speaker": 0}, {"start": 1.5, "end": 2.0, "speaker": 1}]}'"#);
-        let s = Speakers { dir: d.clone(), helper: Some(ok) };
+        let s = Speakers { dir: d.clone(), helper: Some(ok), want_gpu: false, last_on: Default::default() };
         assert_eq!(s.run(&pcm, 3, 0.0).unwrap(), vec![SpeakerSpan { start_ms: 0, end_ms: 1500, speaker: 0 }, SpeakerSpan { start_ms: 1500, end_ms: 2000, speaker: 1 }]);
         // The audio file does not stay behind.
         assert!(std::fs::read_dir(std::env::temp_dir()).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().starts_with(&format!("marginalia-speakers-{}-", std::process::id()))));
         // A helper that fails says why.
         let bad = fake(&d, "echo 'the speaker models could not be loaded' >&2; exit 1");
-        let e = Speakers { dir: d.clone(), helper: Some(bad) }.run(&pcm, 0, 0.0).unwrap_err().to_string();
+        let e = Speakers { dir: d.clone(), helper: Some(bad), want_gpu: false, last_on: Default::default() }.run(&pcm, 0, 0.0).unwrap_err().to_string();
         assert!(e.contains("could not be loaded"), "{e}");
         // One that hangs is stopped.
         let slow = fake(&d, "sleep 30");
         let t = Instant::now();
-        let e = run_helper(&slow, Path::new("s"), Path::new("v"), Path::new("a"), 0, 0.0, Duration::from_millis(400)).unwrap_err().to_string();
+        let e = run_helper(&slow, Path::new("s"), Path::new("v"), Path::new("a"), 0, 0.0, false, Duration::from_millis(400)).unwrap_err().to_string();
         assert!(e.contains("was stopped") && t.elapsed() < Duration::from_secs(5), "{e}");
         let _ = std::fs::remove_dir_all(&d);
     }

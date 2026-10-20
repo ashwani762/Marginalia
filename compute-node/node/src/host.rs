@@ -14,7 +14,8 @@ pub struct Options {
     pub models_dir: PathBuf,
     pub chat_model: Option<PathBuf>,
     pub embed_model: Option<PathBuf>,
-    pub cpu_only: bool,
+    /// Where each model runs (see `runon.rs`).
+    pub run_on: crate::runon::Setting,
     pub ctx: u32,
     /// The speech model file, if not the default one in `models_dir`.
     pub speech_model: Option<PathBuf>,
@@ -35,6 +36,10 @@ pub struct Host {
     pub vision: bool,
     /// The vision projector's name, for the status and the tray.
     pub vision_model: Option<String>,
+    /// Where each model ended up, for the status and the tray.
+    pub placement: serde_json::Value,
+    /// The models folder, for the tray's downloads.
+    pub models_dir: PathBuf,
     /// Telling speakers apart, opt-in (see `speakers.rs`).
     pub speakers: crate::speakers::Speakers,
     /// Jobs that have been accepted and not yet finished.
@@ -68,20 +73,98 @@ pub fn find_projector(chat_model: &std::path::Path) -> Option<PathBuf> {
     found.into_iter().next()
 }
 
-pub const SPEECH_FILE: &str = "ggml-large-v3-turbo-q5_0.bin";
-pub const CHAT_FILE: &str = "gemma-4-E2B-it-Q4_0.gguf";
-pub const CHAT_FILE_E4B: &str = "gemma-4-E4B-it-Q4_0.gguf";
+/// The model file names come from models.toml (see `catalog.rs`).
+pub fn speech_file() -> &'static str {
+    crate::catalog::speech().file
+}
+pub fn chat_file() -> &'static str {
+    crate::catalog::chat_e2b().file
+}
+pub fn chat_file_e4b() -> &'static str {
+    crate::catalog::chat_e4b().file
+}
 
 /// The chat model `run` loads when nothing was chosen: E2B, or E4B when that is the only one downloaded.
 pub fn default_chat_path(models_dir: &std::path::Path) -> PathBuf {
-    let e2b = models_dir.join(CHAT_FILE);
-    let e4b = models_dir.join(CHAT_FILE_E4B);
+    let e2b = models_dir.join(chat_file());
+    let e4b = models_dir.join(chat_file_e4b());
     if !e2b.is_file() && e4b.is_file() { e4b } else { e2b }
 }
-pub const EMBED_FILE: &str = "embeddinggemma-2-Q8_0.gguf";
+pub fn embed_file() -> &'static str {
+    crate::catalog::search().file
+}
 
 fn tiers(cpu_only: bool) -> Vec<u32> {
     if cpu_only { vec![0] } else { vec![999, 16, 0] }
+}
+
+/// The layer counts to try for a model with `share` percent on the graphics card: that share, then the processor only.
+fn share_tiers(share: u8, n_layer: Option<u32>) -> Vec<u32> {
+    match (share, n_layer) {
+        (0, _) => vec![0],
+        (100, _) => vec![999, 0],
+        // The layer count is unknown, so keep the whole model on one side: the card when most of it was asked for.
+        (s, None) => if s >= 50 { vec![999, 0] } else { vec![0] },
+        (s, Some(n)) => vec![((n as u64 * s as u64 + 99) / 100).max(1) as u32, 0],
+    }
+}
+
+/// How many layers a model file has (`<architecture>.block_count`), read from its GGUF header without loading the weights.
+fn layer_count(path: &std::path::Path) -> Option<u32> {
+    use std::io::Read;
+    let mut f = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    fn u32_(f: &mut impl Read) -> Option<u32> { let mut b = [0u8; 4]; f.read_exact(&mut b).ok()?; Some(u32::from_le_bytes(b)) }
+    fn u64_(f: &mut impl Read) -> Option<u64> { let mut b = [0u8; 8]; f.read_exact(&mut b).ok()?; Some(u64::from_le_bytes(b)) }
+    fn text(f: &mut impl Read) -> Option<String> {
+        let n = u64_(f)?;
+        if n > 1 << 20 { return None; }
+        let mut b = vec![0u8; n as usize]; f.read_exact(&mut b).ok()?; Some(String::from_utf8_lossy(&b).into_owned())
+    }
+    fn skip(f: &mut impl Read, ty: u32) -> Option<()> {
+        let n = match ty { 0 | 1 | 7 => 1, 2 | 3 => 2, 4 | 5 | 6 => 4, 10 | 11 | 12 => 8, 8 => { text(f)?; return Some(()) }
+            9 => { let inner = u32_(f)?; let count = u64_(f)?; for _ in 0..count { skip(f, inner)?; } return Some(()) }
+            _ => return None };
+        std::io::copy(&mut f.take(n), &mut std::io::sink()).ok()?;
+        Some(())
+    }
+    let mut magic = [0u8; 4];
+    f.read_exact(&mut magic).ok()?;
+    if &magic != b"GGUF" { return None; }
+    let _version = u32_(&mut f)?;
+    let _tensors = u64_(&mut f)?;
+    let kvs = u64_(&mut f)?;
+    for _ in 0..kvs {
+        let key = text(&mut f)?;
+        let ty = u32_(&mut f)?;
+        if key.ends_with(".block_count") && (ty == 4 || ty == 5) {
+            return u32_(&mut f);
+        }
+        if key.ends_with(".block_count") && (ty == 10 || ty == 11) {
+            return u64_(&mut f).map(|v| v as u32);
+        }
+        skip(&mut f, ty)?;
+    }
+    None
+}
+
+fn file_size(p: &std::path::Path) -> Option<u64> {
+    std::fs::metadata(p).ok().filter(|m| m.is_file()).map(|m| m.len())
+}
+
+/// The model sizes this node would load from `models_dir`, counting only what mixed mode puts on the graphics card.
+pub fn sizes(models_dir: &std::path::Path, chat: Option<&std::path::Path>) -> crate::runon::Sizes {
+    let chat_path = chat.map(|p| p.to_path_buf()).unwrap_or_else(|| default_chat_path(models_dir));
+    crate::runon::Sizes {
+        chat: file_size(&chat_path),
+        search: file_size(&models_dir.join(embed_file())),
+        speech: file_size(&models_dir.join(speech_file())),
+        photos: find_projector(&chat_path).and_then(|p| file_size(&p)),
+    }
+}
+
+/// What mixed mode would pick on this machine right now, with the reason.
+pub fn suggestion(models_dir: &std::path::Path, s: &crate::runon::Setting) -> (crate::runon::Split, String) {
+    crate::runon::suggest(crate::runon::free_vram(), s, &sizes(models_dir, None))
 }
 
 /// `ggml-large-v3-turbo-q5_0.bin` is shown as `large-v3-turbo-q5_0`.
@@ -104,14 +187,59 @@ impl Host {
         let backend = Arc::new(backend);
         let mut caps = Capabilities { embed_dim: 768, ..Default::default() };
 
-        let embed_path = opts.embed_model.clone().unwrap_or_else(|| opts.models_dir.join(EMBED_FILE));
+        use crate::models_dl::RunOn;
+        let mode = opts.run_on.mode;
+        let embed_path = opts.embed_model.clone().unwrap_or_else(|| opts.models_dir.join(embed_file()));
+        let chat_path = opts.chat_model.clone().unwrap_or_else(|| default_chat_path(&opts.models_dir));
+        let projector = if chat_path.is_file() { find_projector(&chat_path) } else { None };
+        // Where each model goes. Mixed mode fills in what the setting leaves open from the free graphics memory.
+        let mut z = sizes(&opts.models_dir, Some(&chat_path));
+        z.search = file_size(&embed_path);
+        // Auto becomes a mixed setting with every choice made from the free graphics memory.
+        let free = if matches!(mode, RunOn::Auto | RunOn::Mixed) { crate::runon::free_vram() } else { None };
+        let run_on = match (mode, free) {
+            (RunOn::Auto, Some(f)) => {
+                let s = crate::runon::Setting { speakers_gpu: opts.run_on.speakers_gpu, ..crate::runon::auto_all(f, &z) };
+                tracing::info!("auto: {} ({:.1} GB of graphics memory is free)", s.words(), f as f64 / 1073741824.0);
+                s
+            }
+            (RunOn::Auto, None) => {
+                tracing::info!("auto: the free graphics memory could not be read, so the models try the graphics card first");
+                crate::runon::Setting { mode: RunOn::Gpu, ..opts.run_on }
+            }
+            _ => opts.run_on,
+        };
+        let mode = run_on.mode;
+        let split = (mode == RunOn::Mixed).then(|| {
+            let (sp, why) = crate::runon::suggest(free, &run_on, &z);
+            tracing::info!("mixed mode: {why}");
+            sp
+        });
+        let speech_gpu = match mode { RunOn::Cpu => false, RunOn::Mixed => run_on.speech_gpu.unwrap_or(true), _ => true };
+        let photos_gpu = match mode { RunOn::Cpu => false, RunOn::Mixed => run_on.photos_gpu.unwrap_or(true), _ => true };
+        let plan = |share: Option<u8>, path: &std::path::Path| -> (Vec<u32>, Option<u32>) {
+            match (mode, share) {
+                (RunOn::Gpu, _) => (tiers(false), None),
+                (RunOn::Cpu, _) => (tiers(true), None),
+                (RunOn::Mixed, Some(s)) => {
+                    let n = if s > 0 && s < 100 { layer_count(path) } else { None };
+                    (share_tiers(s, n), n)
+                }
+                (RunOn::Mixed, None) | (RunOn::Auto, _) => (tiers(false), None),
+            }
+        };
+        let (embed_tiers, embed_layers) = plan(split.map(|s| s.search), &embed_path);
+        let (chat_tiers, chat_layers) = plan(split.map(|s| s.chat), &chat_path);
+        let mut embed_on: Option<u32> = None;
+        let mut chat_on: Option<u32> = None;
         let embed = if embed_path.is_file() {
             let mut found = None;
-            for layers in tiers(opts.cpu_only) {
+            for layers in embed_tiers {
                 let cfg = crate::engine::embed::EmbedConfig { model_path: embed_path.clone(), mmproj_path: None, gpu_layers: layers, use_gpu: layers > 0, threads: threads() };
                 match crate::engine::embed::spawn(backend.clone(), cfg) {
                     Ok(h) => {
                         tracing::info!("search model loaded ({} GPU layers)", layers);
+                        embed_on = Some(layers);
                         found = Some(h);
                         break;
                     }
@@ -127,19 +255,18 @@ impl Host {
             None
         };
 
-        let chat_path = opts.chat_model.clone().unwrap_or_else(|| default_chat_path(&opts.models_dir));
-        let projector = if chat_path.is_file() { find_projector(&chat_path) } else { None };
         let llm = if chat_path.is_file() {
             let mut found = None;
             match &projector {
                 Some(p) => tracing::info!("vision projector {} found, this node can read photos", p.display()),
                 None => tracing::info!("no vision projector next to the chat model, this node does not read photos"),
             }
-            for layers in tiers(opts.cpu_only) {
-                let cfg = crate::engine::llm::LlmConfig { model_path: chat_path.clone(), mmproj_path: projector.clone(), gpu_layers: layers, use_gpu: layers > 0, n_ctx: opts.ctx, threads: threads() };
+            for layers in chat_tiers {
+                let cfg = crate::engine::llm::LlmConfig { model_path: chat_path.clone(), mmproj_path: projector.clone(), gpu_layers: layers, use_gpu: photos_gpu && (layers > 0 || mode == RunOn::Mixed), n_ctx: opts.ctx, threads: threads() };
                 match crate::engine::llm::spawn(backend.clone(), cfg) {
                     Ok(h) => {
                         tracing::info!("chat model loaded ({} GPU layers)", layers);
+                        chat_on = Some(layers);
                         found = Some(h);
                         break;
                     }
@@ -155,13 +282,13 @@ impl Host {
             None
         };
 
-        let speech_path = opts.speech_model.clone().unwrap_or_else(|| opts.models_dir.join(SPEECH_FILE));
+        let speech_path = opts.speech_model.clone().unwrap_or_else(|| opts.models_dir.join(speech_file()));
         let whisper = if opts.no_speech {
             None
         } else if speech_path.is_file() {
             let mut found = None;
             // The graphics card first, then the processor.
-            for gpu in if opts.cpu_only { vec![false] } else { vec![true, false] } {
+            for gpu in if speech_gpu { vec![true, false] } else { vec![false] } {
                 let cfg = WhisperConfig { model_path: speech_path.clone(), use_gpu: gpu, threads: threads() };
                 match Whisper::load(&cfg) {
                     Ok(w) => {
@@ -186,9 +313,26 @@ impl Host {
         }
         let speech_gate = Arc::new(tokio::sync::Semaphore::new(1));
         let window_gate = if whisper.as_ref().map(|w| w.on_gpu()).unwrap_or(false) { Arc::new(tokio::sync::Semaphore::new(1)) } else { speech_gate.clone() };
+        let side = |layers: Option<u32>, total: Option<u32>| match (layers, total) {
+            (None, _) => serde_json::Value::Null,
+            (Some(0), _) => serde_json::json!({"on": "cpu"}),
+            (Some(l), Some(n)) if l < n => serde_json::json!({"on": "mixed", "gpu_layers": l, "layers": n, "percent": l * 100 / n.max(1)}),
+            (Some(_), _) => serde_json::json!({"on": "gpu"}),
+        };
+        let placement = serde_json::json!({
+            "mode": opts.run_on.mode.name(),
+            "setting": opts.run_on.line(),
+            "chat": side(chat_on, chat_layers),
+            "search": side(embed_on, embed_layers),
+            "speech": whisper.as_ref().map(|w| serde_json::json!({"on": if w.on_gpu() { "gpu" } else { "cpu" }})),
+            "photos": (llm.is_some() && projector.is_some()).then(|| serde_json::json!({"on": if photos_gpu { "gpu" } else { "cpu" }})),
+        });
+        tracing::info!("models placed: {placement}");
         let host = Host {
             _backend: backend,
-            speakers: crate::speakers::Speakers::new(opts.models_dir.clone()),
+            placement,
+            models_dir: opts.models_dir.clone(),
+            speakers: crate::speakers::Speakers::new(opts.models_dir.clone(), opts.run_on.speakers_gpu.unwrap_or(false)),
             vision: llm.is_some() && projector.is_some(),
             vision_model: projector.as_ref().filter(|_| llm.is_some()).and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()),
             llm,
@@ -320,5 +464,39 @@ mod speech_sample_tests {
         let secs = pcm.len() as f32 / 16_000.0;
         assert!((10.0..12.5).contains(&secs), "{secs}");
         assert!(pcm.iter().any(|x| x.abs() > 0.1));
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use super::*;
+
+    #[test]
+    fn shares_become_layer_counts() {
+        assert_eq!(share_tiers(0, Some(35)), vec![0]);
+        assert_eq!(share_tiers(100, Some(35)), vec![999, 0]);
+        assert_eq!(share_tiers(45, Some(35)), vec![16, 0]);
+        assert_eq!(share_tiers(1, Some(35)), vec![1, 0]);
+        assert_eq!(share_tiers(70, None), vec![999, 0]);
+        assert_eq!(share_tiers(30, None), vec![0]);
+    }
+
+    #[test]
+    fn layer_count_reads_a_gguf_header() {
+        // A minimal header: two keys, an array to skip, then the block count.
+        let mut b: Vec<u8> = b"GGUF".to_vec();
+        b.extend(3u32.to_le_bytes());
+        b.extend(0u64.to_le_bytes());
+        b.extend(3u64.to_le_bytes());
+        let key = |b: &mut Vec<u8>, k: &str| { b.extend((k.len() as u64).to_le_bytes()); b.extend(k.as_bytes()); };
+        key(&mut b, "general.architecture"); b.extend(8u32.to_le_bytes()); key(&mut b, "gemma4");
+        key(&mut b, "tokenizer.ggml.scores"); b.extend(9u32.to_le_bytes()); b.extend(6u32.to_le_bytes()); b.extend(2u64.to_le_bytes()); b.extend([0u8; 8]);
+        key(&mut b, "gemma4.block_count"); b.extend(4u32.to_le_bytes()); b.extend(35u32.to_le_bytes());
+        let p = std::env::temp_dir().join(format!("marginalia-layers-{}.gguf", std::process::id()));
+        std::fs::write(&p, &b).unwrap();
+        assert_eq!(layer_count(&p), Some(35));
+        std::fs::write(&p, b"nope").unwrap();
+        assert_eq!(layer_count(&p), None);
+        let _ = std::fs::remove_file(&p);
     }
 }

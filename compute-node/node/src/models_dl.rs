@@ -26,21 +26,6 @@ pub struct ModelFile {
     pub optional: bool,
 }
 
-pub const CHAT_E2B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E2B-it-GGUF", file: crate::host::CHAT_FILE, remote: "", bytes: 2_841_481_184, optional: false };
-pub const CHAT_E4B: ModelFile = ModelFile { role: "chat", repo: "ggml-org/gemma-4-E4B-it-GGUF", file: crate::host::CHAT_FILE_E4B, remote: "", bytes: 4_590_807_392, optional: true };
-pub const SEARCH: ModelFile = ModelFile { role: "search", repo: "ggml-org/embeddinggemma-2-GGUF", file: crate::host::EMBED_FILE, remote: "", bytes: 309_855_456, optional: false };
-
-pub const SPEECH: ModelFile = ModelFile { role: "speech", repo: "ggerganov/whisper.cpp", file: crate::host::SPEECH_FILE, remote: "", bytes: 574_041_195, optional: false };
-
-/// The vision projector that lets the chat model read photos. Optional: a node without it simply does not read photos.
-pub const VISION_E2B: ModelFile = ModelFile { role: "vision", repo: "ggml-org/gemma-4-E2B-it-GGUF", file: "mmproj-gemma-4-E2B-it-Q8_0.gguf", remote: "", bytes: 557_368_064, optional: true };
-pub const VISION_E4B: ModelFile = ModelFile { role: "vision", repo: "ggml-org/gemma-4-E4B-it-GGUF", file: "mmproj-gemma-4-E4B-it-Q8_0.gguf", remote: "", bytes: 559_874_816, optional: true };
-
-/// The two models for telling speakers apart (sherpa-onnx): who talks when (pyannote segmentation 3.0) and which voice is which
-/// (WeSpeaker ResNet34, 26 MB. Measured against the larger ResNet293 on the same audio it agrees on 93% of the speech and is 4 times faster, and the CAM++ model of the phone splits one voice into several). Optional: asked for with `--only speakers`.
-pub const SPEAKER_SEGMENTATION: ModelFile = ModelFile { role: "speakers", repo: "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0", file: "pyannote-segmentation-3-0.onnx", remote: "model.onnx", bytes: 5_992_913, optional: true };
-pub const SPEAKER_VOICES: ModelFile = ModelFile { role: "speakers", repo: "csukuangfj/speaker-embedding-models", file: "wespeaker-resnet34.onnx", remote: "wespeaker_en_voxceleb_resnet34_LM.onnx", bytes: 26_530_550, optional: true };
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Only {
     Chat,
@@ -61,8 +46,8 @@ pub enum ChatChoice {
 impl ChatChoice {
     pub fn file(self) -> &'static str {
         match self {
-            ChatChoice::E2b => CHAT_E2B.file,
-            ChatChoice::E4b => CHAT_E4B.file,
+            ChatChoice::E2b => crate::catalog::chat_e2b().file,
+            ChatChoice::E4b => crate::catalog::chat_e4b().file,
         }
     }
     pub fn name(self) -> &'static str {
@@ -87,6 +72,41 @@ pub fn save_chat_choice(state: &Path, c: ChatChoice) -> Result<()> {
     std::fs::write(state.join("chat-model"), c.name()).context("could not save the chat model choice")
 }
 
+/// Where the models run. Saved with `marginalia-node run-on`, read when the node starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum RunOn {
+    /// The node decides each model from the free graphics memory: on the card when it fits, split or on the
+    /// processor when it does not.
+    Auto,
+    /// The graphics card, with the processor as the fallback (the default).
+    Gpu,
+    /// The processor only. Slower, leaves the graphics card free.
+    Cpu,
+    /// Both: each model on the graphics card, on the processor, or split between them, set by hand or worked out
+    /// by the node from the free graphics memory.
+    Mixed,
+}
+
+impl RunOn {
+    pub fn name(self) -> &'static str {
+        match self {
+            RunOn::Auto => "auto",
+            RunOn::Gpu => "gpu",
+            RunOn::Cpu => "cpu",
+            RunOn::Mixed => "mixed",
+        }
+    }
+    /// How people read it, for logs and messages.
+    pub fn words(self) -> &'static str {
+        match self {
+            RunOn::Auto => "what fits, decided by the node from the free graphics memory",
+            RunOn::Gpu => "the graphics card",
+            RunOn::Cpu => "the processor",
+            RunOn::Mixed => "the graphics card and the processor",
+        }
+    }
+}
+
 /// The same folder `run` looks in when `--models` is not given.
 pub fn default_dir() -> PathBuf {
     dirs::data_dir().map(|d| d.join("marginalia").join("models")).unwrap_or_default()
@@ -95,17 +115,17 @@ pub fn default_dir() -> PathBuf {
 /// The files `download` fetches for the given options.
 pub fn wanted(only: Option<Only>, chat: ChatChoice, skip_speech: bool) -> Vec<ModelFile> {
     let chat_file = match chat {
-        ChatChoice::E2b => CHAT_E2B,
-        ChatChoice::E4b => CHAT_E4B,
+        ChatChoice::E2b => crate::catalog::chat_e2b(),
+        ChatChoice::E4b => crate::catalog::chat_e4b(),
     };
     match only {
         Some(Only::Chat) => vec![chat_file],
-        Some(Only::Search) => vec![SEARCH],
-        Some(Only::Speech) => vec![SPEECH],
-        Some(Only::Vision) => vec![if chat == ChatChoice::E4b { VISION_E4B } else { VISION_E2B }],
-        Some(Only::Speakers) => vec![SPEAKER_SEGMENTATION, SPEAKER_VOICES],
-        None if skip_speech => vec![chat_file, SEARCH],
-        None => vec![chat_file, SEARCH, SPEECH],
+        Some(Only::Search) => vec![crate::catalog::search()],
+        Some(Only::Speech) => vec![crate::catalog::speech()],
+        Some(Only::Vision) => vec![if chat == ChatChoice::E4b { crate::catalog::vision_e4b() } else { crate::catalog::vision_e2b() }],
+        Some(Only::Speakers) => vec![crate::catalog::speakers_segmentation(), crate::catalog::speakers_voices()],
+        None if skip_speech => vec![chat_file, crate::catalog::search()],
+        None => vec![chat_file, crate::catalog::search(), crate::catalog::speech()],
     }
 }
 
@@ -281,14 +301,14 @@ pub fn token_from(v: Option<String>) -> Option<String> {
 /// Which of the files `run` needs are missing, as (role, file name).
 pub fn missing_for_run(dir: &Path, chat_given: bool, embed_given: bool, speech_given_or_off: bool) -> Vec<ModelFile> {
     let mut v = vec![];
-    if !chat_given && !dir.join(CHAT_E2B.file).is_file() && !dir.join(CHAT_E4B.file).is_file() {
-        v.push(CHAT_E2B);
+    if !chat_given && !dir.join(crate::catalog::chat_e2b().file).is_file() && !dir.join(crate::catalog::chat_e4b().file).is_file() {
+        v.push(crate::catalog::chat_e2b());
     }
-    if !embed_given && !dir.join(SEARCH.file).is_file() {
-        v.push(SEARCH);
+    if !embed_given && !dir.join(crate::catalog::search().file).is_file() {
+        v.push(crate::catalog::search());
     }
-    if !speech_given_or_off && !dir.join(SPEECH.file).is_file() {
-        v.push(SPEECH);
+    if !speech_given_or_off && !dir.join(crate::catalog::speech().file).is_file() {
+        v.push(crate::catalog::speech());
     }
     v
 }
@@ -307,11 +327,32 @@ pub fn missing_message(dir: &Path) -> String {
 // list
 // ---------------------------------------------------------------------------------------------
 
+/// `models list --json`: every model in models.toml with what is on disk, for the tray.
+pub fn list_json(dir: Option<PathBuf>) {
+    let dir = dir.unwrap_or_else(default_dir);
+    let cat = crate::catalog::get();
+    let models: Vec<serde_json::Value> = cat
+        .all()
+        .into_iter()
+        .map(|(id, m)| {
+            let present = std::fs::metadata(dir.join(m.file)).ok().filter(|x| x.is_file()).map(|x| x.len());
+            let part = std::fs::metadata(part_path(&dir, &m)).ok().map(|x| x.len()).filter(|l| *l > 0);
+            serde_json::json!({"id": id, "role": m.role, "file": m.file, "optional": m.optional, "present": present, "partial": part})
+        })
+        .collect();
+    let out = serde_json::json!({"dir": dir, "source": cat.source, "models": models});
+    println!("{out}");
+}
+
 pub fn list(dir: Option<PathBuf>) -> Result<()> {
     let dir = dir.unwrap_or_else(default_dir);
-    println!("Models folder: {}\n", dir.display());
+    println!("Models folder: {}", dir.display());
+    match &crate::catalog::get().source {
+        Some(p) => println!("Models list: {}\n", p.display()),
+        None => println!("Models list: built in (put a models.toml in the state folder to change it)\n"),
+    }
     let mut missing_needed = false;
-    for m in [CHAT_E2B, SEARCH, SPEECH, CHAT_E4B, VISION_E2B, VISION_E4B, SPEAKER_SEGMENTATION, SPEAKER_VOICES] {
+    for m in [crate::catalog::chat_e2b(), crate::catalog::search(), crate::catalog::speech(), crate::catalog::chat_e4b(), crate::catalog::vision_e2b(), crate::catalog::vision_e4b(), crate::catalog::speakers_segmentation(), crate::catalog::speakers_voices()] {
         let len = std::fs::metadata(dir.join(m.file)).ok().filter(|x| x.is_file()).map(|x| x.len());
         let part = std::fs::metadata(part_path(&dir, &m)).ok().map(|x| x.len()).filter(|l| *l > 0);
         let role = match (m.optional, m.role) {
@@ -357,7 +398,31 @@ enum Fail {
 
 const MAX_RETRIES: u32 = 8;
 
+/// When the environment variable MARGINALIA_PROGRESS_FILE names a file, the download keeps one line of JSON in it:
+/// the file being fetched, bytes done and expected, speed, and at the end "done" or the reason it failed. The tray reads it.
+fn progress_file() -> Option<PathBuf> {
+    std::env::var_os("MARGINALIA_PROGRESS_FILE").map(PathBuf::from)
+}
+
+fn report(v: serde_json::Value) {
+    if let Some(p) = progress_file() {
+        let tmp = p.with_extension("tmp");
+        if std::fs::write(&tmp, v.to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
+    }
+}
+
 pub fn download(dir: Option<PathBuf>, only: Option<Only>, chat: ChatChoice, skip_speech: bool) -> Result<()> {
+    let r = download_inner(dir, only, chat, skip_speech);
+    match &r {
+        Ok(()) => report(serde_json::json!({"state": "done", "pid": std::process::id()})),
+        Err(e) => report(serde_json::json!({"state": "failed", "error": format!("{e:#}"), "pid": std::process::id()})),
+    }
+    r
+}
+
+fn download_inner(dir: Option<PathBuf>, only: Option<Only>, chat: ChatChoice, skip_speech: bool) -> Result<()> {
     let dir = dir.unwrap_or_else(default_dir);
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create the models folder {}", dir.display()))?;
     let token = token_from(std::env::var("HF_TOKEN").ok());
@@ -510,6 +575,7 @@ fn attempt(agent: &ureq::Agent, m: &ModelFile, dir: &Path, token: Option<&str>, 
         if last_print.elapsed() >= Duration::from_millis(250) {
             last_print = Instant::now();
             let line = progress_line(m.file, done, total_n, speed);
+            report(serde_json::json!({"state": "downloading", "file": m.file, "done": done, "total": total_n, "bytes_per_s": speed, "pid": std::process::id()}));
             if interactive {
                 eprint!("\r  {line}   ");
                 let _ = std::io::stderr().flush();
@@ -564,13 +630,13 @@ mod chat_choice_tests {
     fn e2b_is_the_default_and_e4b_only_when_alone() {
         let dir = temp("chat-pref");
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(crate::host::default_chat_path(&dir), dir.join(crate::host::CHAT_FILE));
+        assert_eq!(crate::host::default_chat_path(&dir), dir.join(crate::host::chat_file()));
         assert!(missing_for_run(&dir, false, true, true).iter().any(|m| m.role == "chat"));
-        std::fs::write(dir.join(crate::host::CHAT_FILE_E4B), b"x").unwrap();
-        assert_eq!(crate::host::default_chat_path(&dir), dir.join(crate::host::CHAT_FILE_E4B));
+        std::fs::write(dir.join(crate::host::chat_file_e4b()), b"x").unwrap();
+        assert_eq!(crate::host::default_chat_path(&dir), dir.join(crate::host::chat_file_e4b()));
         assert!(missing_for_run(&dir, false, true, true).is_empty());
-        std::fs::write(dir.join(crate::host::CHAT_FILE), b"x").unwrap();
-        assert_eq!(crate::host::default_chat_path(&dir), dir.join(crate::host::CHAT_FILE));
+        std::fs::write(dir.join(crate::host::chat_file()), b"x").unwrap();
+        assert_eq!(crate::host::default_chat_path(&dir), dir.join(crate::host::chat_file()));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -592,10 +658,10 @@ mod tests {
 
     #[test]
     fn urls() {
-        assert_eq!(url_for(&CHAT_E2B), "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf");
-        assert_eq!(url_for(&SEARCH), "https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/embeddinggemma-2-Q8_0.gguf");
-        assert_eq!(url_for(&SPEECH), "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin");
-        assert_eq!(part_path(Path::new("m"), &SEARCH), Path::new("m").join("embeddinggemma-2-Q8_0.gguf.part"));
+        assert_eq!(url_for(&crate::catalog::chat_e2b()), "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_0.gguf");
+        assert_eq!(url_for(&crate::catalog::search()), "https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/embeddinggemma-2-Q8_0.gguf");
+        assert_eq!(url_for(&crate::catalog::speech()), "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin");
+        assert_eq!(part_path(Path::new("m"), &crate::catalog::search()), Path::new("m").join("embeddinggemma-2-Q8_0.gguf.part"));
     }
 
     #[test]
@@ -607,9 +673,9 @@ mod tests {
         assert_eq!(wanted(Some(Only::Vision), ChatChoice::E4b, false)[0].file, "mmproj-gemma-4-E4B-it-Q8_0.gguf");
         assert_eq!(names(Some(Only::Speakers)), ["pyannote-segmentation-3-0.onnx", "wespeaker-resnet34.onnx"]);
         // The file in the folder has its own name, the address has the name on Hugging Face.
-        assert_eq!(url_for(&SPEAKER_SEGMENTATION), "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx");
-        assert_eq!(url_for(&SPEAKER_VOICES), "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/wespeaker_en_voxceleb_resnet34_LM.onnx");
-        assert_eq!(url_for(&VISION_E2B), "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf");
+        assert_eq!(url_for(&crate::catalog::speakers_segmentation()), "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx");
+        assert_eq!(url_for(&crate::catalog::speakers_voices()), "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/wespeaker_en_voxceleb_resnet34_LM.onnx");
+        assert_eq!(url_for(&crate::catalog::vision_e2b()), "https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf");
         // A node can start without them.
         assert!(missing_for_run(Path::new("/nonexistent"), true, true, true).is_empty());
     }

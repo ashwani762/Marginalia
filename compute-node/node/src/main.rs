@@ -11,6 +11,8 @@ mod models_dl;
 mod logfile;
 mod peers;
 mod resources;
+mod catalog;
+mod runon;
 mod speakers;
 mod place;
 mod probe;
@@ -38,6 +40,13 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// The graphics card or the processor, for one model in mixed mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum Place {
+    Gpu,
+    Cpu,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the node.
@@ -63,9 +72,13 @@ enum Cmd {
         /// Do not load the speech model, so this node does not transcribe recordings.
         #[arg(long)]
         no_speech: bool,
-        /// Do not use the graphics card.
+        /// Do not use the graphics card (the same as `--run-on cpu`).
         #[arg(long)]
         cpu: bool,
+        /// Where the models run: auto, gpu (graphics card), cpu (processor only) or mixed (split between both).
+        /// Without it the choice saved with `run-on` is used, then gpu. The per-model shares come from `run-on`.
+        #[arg(long, value_enum)]
+        run_on: Option<models_dl::RunOn>,
         /// Longest prompt plus answer the chat model handles, in tokens. Lower it to share a small graphics card.
         #[arg(long, default_value_t = 16384)]
         ctx: u32,
@@ -87,6 +100,34 @@ enum Cmd {
     ChatModel {
         #[arg(value_enum)]
         choice: Option<models_dl::ChatChoice>,
+    },
+    /// Show or choose where the models run: auto (the node decides from the free graphics memory), gpu (the
+    /// graphics card, the default), cpu (the processor only) or mixed (each model on the card, the processor or
+    /// split between them). With no choice it shows the current setting and what mixed would pick on this
+    /// machine. Restart the node to apply it.
+    RunOn {
+        #[arg(value_enum)]
+        choice: Option<models_dl::RunOn>,
+        /// Mixed only: percent of the chat model's layers on the graphics card (0 to 100, 0 is the processor only).
+        /// Leave out to let the node work it out from the free graphics memory each time it starts.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+        chat: Option<u8>,
+        /// Mixed only: the same for the search model. Leave out to let the node work it out.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+        search: Option<u8>,
+        /// Mixed only: where the speech model runs (default gpu). It cannot be split.
+        #[arg(long, value_enum)]
+        speech: Option<Place>,
+        /// Mixed only: where photos are read (default gpu). It cannot be split.
+        #[arg(long, value_enum)]
+        photos: Option<Place>,
+        /// Any choice: where speakers are told apart (default cpu). gpu needs the speaker helper built with the
+        /// GPU version of sherpa-onnx, otherwise it runs on the processor. Left out, the saved choice is kept.
+        #[arg(long, value_enum)]
+        speakers: Option<Place>,
+        /// The models folder, for the suggestion. Defaults to the one `run` uses.
+        #[arg(long)]
+        models: Option<PathBuf>,
     },
     /// Take jobs again after `pause`.
     Resume,
@@ -182,6 +223,9 @@ enum ModelsCmd {
         /// The models folder. Defaults to the one `run` uses.
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Print the list as JSON, for the tray.
+        #[arg(long)]
+        json: bool,
     },
     /// Download the model files from Hugging Face. Safe to stop and run again, it continues where it stopped.
     /// Set the HF_TOKEN environment variable if a repository asks for a login.
@@ -275,10 +319,11 @@ fn init_logging(cli: &Cli, dir: &std::path::Path) {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let dir = state_dir(&cli);
+    catalog::set_state_dir(&dir);
     init_logging(&cli, &dir);
     match &cli.cmd {
         Cmd::Models { cmd } => match cmd {
-            ModelsCmd::List { dir } => models_dl::list(dir.clone())?,
+            ModelsCmd::List { dir, json } => if *json { models_dl::list_json(dir.clone()) } else { models_dl::list(dir.clone())? },
             ModelsCmd::Download { dir, only, chat_model, skip_speech } => models_dl::download(dir.clone(), *only, *chat_model, *skip_speech)?,
         },
         Cmd::Pair => {
@@ -339,6 +384,30 @@ async fn main() -> Result<()> {
                 None => println!("Chat model: automatic (e2b, or e4b when it is the only one present). Choose with: marginalia-node chat-model e2b|e4b"),
             },
         },
+        Cmd::RunOn { choice, chat, search, speech, photos, speakers, models } => {
+            let models_dir = models.clone().unwrap_or_else(models_dl::default_dir);
+            match choice {
+                Some(r) => {
+                    if *r != models_dl::RunOn::Mixed && (chat.is_some() || search.is_some() || speech.is_some() || photos.is_some()) {
+                        anyhow::bail!("--chat, --search, --speech and --photos only go with mixed, for example: marginalia-node run-on mixed --chat 60 --speech cpu");
+                    }
+                    let kept = runon::saved(&dir).and_then(|s| s.speakers_gpu);
+                    let s = runon::Setting { mode: *r, chat: *chat, search: *search, speech_gpu: speech.map(|p| p == Place::Gpu), photos_gpu: photos.map(|p| p == Place::Gpu), speakers_gpu: speakers.map(|p| p == Place::Gpu).or(kept) };
+                    runon::save(&dir, &s)?;
+                    println!("The models will run on {}. Restart the node to use it.", s.words());
+                    if s.mode == models_dl::RunOn::Auto || (s.mode == models_dl::RunOn::Mixed && (s.chat.is_none() || s.search.is_none())) {
+                        println!("The node works out the split when it starts. On this machine now: {}", host::suggestion(&models_dir, &s).1);
+                    }
+                }
+                None => {
+                    let s = runon::saved(&dir).unwrap_or(runon::Setting::plain(models_dl::RunOn::Gpu));
+                    println!("Models run on: {} ({})", s.words(), s.line());
+                    let mixed = runon::Setting { mode: models_dl::RunOn::Mixed, ..s };
+                    println!("Suggested for mixed on this machine: {}", host::suggestion(&models_dir, &mixed).1);
+                    println!("Choose with: marginalia-node run-on auto|gpu|cpu|mixed [--chat PERCENT] [--search PERCENT] [--speech gpu|cpu] [--photos gpu|cpu] [--speakers gpu|cpu]");
+                }
+            }
+        }
         Cmd::Pause => {
             admin::ask(cli.admin_port, json!({"cmd": "pause"})).await?;
             println!("Paused. New jobs are turned away until you run `marginalia-node resume`. Jobs already running finish.");
@@ -359,7 +428,7 @@ async fn main() -> Result<()> {
         Cmd::Deny { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "deny", "who": who})).await?),
         Cmd::Revoke { who } => println!("{}", admin::ask(cli.admin_port, json!({"cmd": "revoke", "who": who})).await?),
         Cmd::Probe { addr, code, knock, decide, deny, transcribe, language, window, prompt, hang_up_after, only, long, speakers, people } => probe::run(*addr, dir.join("probe"), code.clone(), *knock, decide.clone(), *deny, transcribe.clone(), language.clone(), *window, prompt.clone(), *hang_up_after, *only, *long, speakers.clone(), *people).await?,
-        Cmd::Run { port, name, models, chat_model, chat, embed_model, speech_model, no_speech, cpu, ctx, lock, window_max_seconds } => {
+        Cmd::Run { port, name, models, chat_model, chat, embed_model, speech_model, no_speech, cpu, run_on, ctx, lock, window_max_seconds } => {
             tracing::info!("marginalia-node {} starting on {} {}, state folder {}, log folder {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, dir.display(), logfile::dir_of(&dir).display());
             let store = Arc::new(state::Store::open(dir.clone())?);
             let identity = store.identity()?;
@@ -380,15 +449,22 @@ async fn main() -> Result<()> {
             }
             let missing = models_dl::missing_for_run(&models_dir, chat_model.is_some(), embed_model.is_some(), speech_model.is_some() || *no_speech);
             // Speech alone is enough to serve, so the node only refuses when it has none of the three.
-            let speech_here = !*no_speech && (speech_model.is_some() || models_dir.join(host::SPEECH_FILE).is_file());
+            let speech_here = !*no_speech && (speech_model.is_some() || models_dir.join(host::speech_file()).is_file());
             if missing.iter().filter(|m| m.role != "speech").count() == 2 && !speech_here {
                 anyhow::bail!("{}", models_dl::missing_message(&models_dir));
             }
             for m in &missing {
                 tracing::warn!("the {} model {} is not in {}, so this node will not do {} jobs. Get it with: marginalia-node models download --only {}", m.role, m.file, models_dir.display(), m.role, m.role);
             }
-            tracing::info!("loading models from {}", models_dir.display());
-            let opts = host::Options { models_dir, chat_model: chat_model.clone(), embed_model: embed_model.clone(), speech_model: speech_model.clone(), no_speech: *no_speech, cpu_only: *cpu, ctx: *ctx, window_max_s: *window_max_seconds };
+            let saved = runon::saved(&dir);
+            let run_on = match (*cpu, run_on) {
+                (true, _) => runon::Setting::plain(models_dl::RunOn::Cpu),
+                (false, Some(r)) if saved.map(|s| s.mode) == Some(*r) => saved.unwrap(),
+                (false, Some(r)) => runon::Setting::plain(*r),
+                (false, None) => saved.unwrap_or(runon::Setting::plain(models_dl::RunOn::Gpu)),
+            };
+            tracing::info!("loading models from {}, running them on {}", models_dir.display(), run_on.words());
+            let opts = host::Options { models_dir, chat_model: chat_model.clone(), embed_model: embed_model.clone(), speech_model: speech_model.clone(), no_speech: *no_speech, run_on, ctx: *ctx, window_max_s: *window_max_seconds };
             let host = Arc::new(tokio::task::spawn_blocking(move || host::Host::start(&opts)).await??);
             let peers = peers::Peers::open(&dir)?;
             let cluster = cluster::Cluster::new(store.clone(), peers, identity.clone(), name.clone(), *port)?;

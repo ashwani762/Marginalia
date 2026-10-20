@@ -1,0 +1,82 @@
+# The model files the compute node can use, and the memory estimates for placing them.
+#
+# The node reads the first of these it finds, when it starts:
+#   1. the file named by the MARGINALIA_MODELS_FILE environment variable
+#   2. models.toml in the node's state folder (~/.config/marginalia-node or %APPDATA%\marginalia-node)
+#   3. models.toml next to the marginalia-node program
+#   4. this file, built into the program
+# A model left out of your file is taken from the built-in one, so a small file with only what you change is enough.
+# `marginalia-node models list` shows which file is in use.
+#
+# Each model:
+#   role      what it does: chat, search, speech, vision or speakers
+#   repo      the Hugging Face repository it is downloaded from
+#   file      its name in the models folder
+#   remote    its name in the repository when that is not the same (leave out otherwise)
+#   optional  true when the node starts without it
+
+[models.chat-e2b]
+role = "chat"
+repo = "ggml-org/gemma-4-E2B-it-GGUF"
+file = "gemma-4-E2B-it-Q4_0.gguf"
+optional = false
+
+[models.chat-e4b]
+role = "chat"
+repo = "ggml-org/gemma-4-E4B-it-GGUF"
+file = "gemma-4-E4B-it-Q4_0.gguf"
+optional = true
+
+[models.search]
+role = "search"
+repo = "ggml-org/embeddinggemma-2-GGUF"
+file = "embeddinggemma-2-Q8_0.gguf"
+optional = false
+
+[models.speech]
+role = "speech"
+repo = "ggerganov/whisper.cpp"
+file = "ggml-large-v3-turbo-q5_0.bin"
+optional = false
+
+# Lets the chat model read photos. The node looks for mmproj-<chat model family>-*.gguf next to the chat model.
+[models.vision-e2b]
+role = "vision"
+repo = "ggml-org/gemma-4-E2B-it-GGUF"
+file = "mmproj-gemma-4-E2B-it-Q8_0.gguf"
+optional = true
+
+[models.vision-e4b]
+role = "vision"
+repo = "ggml-org/gemma-4-E4B-it-GGUF"
+file = "mmproj-gemma-4-E4B-it-Q8_0.gguf"
+optional = true
+
+# Telling speakers apart (sherpa-onnx): who talks when (pyannote segmentation 3.0) and which voice is which
+# (WeSpeaker ResNet34, 26 MB. On the same audio it agrees with the larger ResNet293 on 93% of the speech and is 4 times faster).
+[models.speakers-segmentation]
+role = "speakers"
+repo = "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0"
+file = "pyannote-segmentation-3-0.onnx"
+remote = "model.onnx"
+optional = true
+
+[models.speakers-voices]
+role = "speakers"
+repo = "csukuangfj/speaker-embedding-models"
+file = "wespeaker-resnet34.onnx"
+remote = "wespeaker_en_voxceleb_resnet34_LM.onnx"
+optional = true
+
+# How much graphics memory a model needs, as its file size times `factor` plus `extra_mb`. Used by `run-on auto` and
+# `run-on mixed` to decide what fits. Measured on an RTX 4060.
+[memory]
+keep_free_mb = 768
+speech_factor = 1.4
+speech_extra_mb = 300
+search_factor = 1.3
+search_extra_mb = 100
+chat_factor = 1.15
+chat_extra_mb = 500
+photos_factor = 1.2
+photos_extra_mb = 0
