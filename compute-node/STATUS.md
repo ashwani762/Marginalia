@@ -66,7 +66,18 @@ sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
 - The node serves chat (E2B, about 65 tokens a second), search and speech, and the self tests for let in, search, chat and speech pass.
 - Chat model choice: E2B is the default. `marginalia-node chat-model e4b` and the tray menu entry switch to E4B. Stopping the
   node frees the graphics memory (5141 MiB used, 2026 MiB after stop, 7166 MiB with E4B loaded), then the new model loads.
-- `cargo test` for proto (23), node (22) and tray (29) passes on Windows.
+- `cargo test` for proto (27), node (66) and tray (40) passes on Windows (2026-10-20, after the speaker and logging work from Linux).
+- The Windows scripts moved to `scripts/windows`. The repository root there was one folder too high and is fixed.
+- Build: `setup.ps1` builds the node, the speaker helper (`marginalia-node-speakers.exe`, sherpa-onnx links fine on
+  `x86_64-pc-windows-msvc`) and the tray, and `verify.ps1` passes 19 of 19.
+- Speaker separation on Windows: after `marginalia-node models download --only speakers` the node logs "this node can tell speakers apart
+  for phones" and `status` shows `speakers: true`. A 25 s recording with two Windows voices came back as two voices split at the right
+  moment (voice 1 until 12 s, voice 2 from 13.9 s), 33 times faster than real time.
+- The node's own log (`%APPDATA%\marginalia-node\logs\node.log`), the graphics card readout through `nvidia-smi` in the resources line, and
+  the single tray icon (a second tray exits at once) work on Windows.
+- `verify.ps1` removes its test phone ("probe") again and compares each program with its own sources.
+- Still to try by hand: the tray clicks, a reboot, `uninstall.ps1` then `setup.ps1` (it asks for administrator rights twice
+  for the firewall rules), and a real phone killing the node during an answer.
 
 ## Measured on Linux later (RTX 4060, 20 core processor, real phone)
 
