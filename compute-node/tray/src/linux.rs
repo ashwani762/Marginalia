@@ -47,7 +47,7 @@ impl ksni::Tray for NodeTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        crate::model::menu_with_chat_switch(&self.view)
+        crate::model::menu_with_settings(&self.view)
             .into_iter()
             .map(|e| match e {
                 Entry::Separator => MenuItem::Separator,

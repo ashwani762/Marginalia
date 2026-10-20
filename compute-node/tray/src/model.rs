@@ -16,10 +16,8 @@ pub enum Action {
     ShowDetails,
     Stop,
     Start,
-    /// Saves the smaller chat model (E2B) as the choice and restarts the node.
-    ChatSmall,
-    /// Saves the larger chat model (E4B) as the choice and restarts the node.
-    ChatLarge,
+    /// Opens the details panel on its Settings page (chat model, where the models run, logs).
+    ShowSettings,
     Quit,
 }
 
@@ -105,6 +103,21 @@ pub struct Info {
     pub addresses: Vec<String>,
     /// Where the node keeps its log files.
     pub log_dir: Option<String>,
+    /// Where the models run: `auto`, `gpu`, `cpu` or `mixed`, the saved setting line, and the line the panel shows for it.
+    pub run_mode: Option<String>,
+    pub run_setting: Option<String>,
+    pub runs_on: Option<String>,
+    /// Mixed only: where each model ended up, for the second line of the panel row.
+    pub runs_on_detail: Option<String>,
+    /// Where the models are now, as By hand starts from it: percent of the chat and search models on the card,
+    /// and whether speech and photos are on the card.
+    pub now_chat: Option<u8>,
+    pub now_search: Option<u8>,
+    pub now_speech_gpu: Option<bool>,
+    pub now_photos_gpu: Option<bool>,
+    /// The node's state and models folders, for saving settings and downloading models.
+    pub state_dir: Option<String>,
+    pub models_dir: Option<String>,
 }
 
 /// What the last poll found.
@@ -208,6 +221,16 @@ pub fn parse(status: &Value, stats: Option<&Value>) -> Info {
         speech_model: text(&status["speech"]),
         speech_x: status["speech_x"].as_f64().unwrap_or(0.0),
         speakers: status["speakers"].as_bool() == Some(true),
+        run_mode: text(&status["placement"]["mode"]),
+        run_setting: text(&status["placement"]["setting"]),
+        runs_on: runs_on_text(&status["placement"]),
+        runs_on_detail: runs_on_detail(&status["placement"]),
+        now_chat: share_now(&status["placement"]["chat"]),
+        now_search: share_now(&status["placement"]["search"]),
+        now_speech_gpu: status["placement"]["speech"]["on"].as_str().map(|o| o == "gpu"),
+        now_photos_gpu: status["placement"]["photos"]["on"].as_str().map(|o| o == "gpu"),
+        state_dir: text(&status["state_dir"]),
+        models_dir: text(&status["models_dir"]),
         vision_model: if status["vision"].as_bool() == Some(true) { Some(text(&status["vision_model"]).unwrap_or_else(|| "vision".into())) } else { None },
         chat_jobs: jobs("chat", "jobs"),
         search_jobs: jobs("search", "jobs"),
@@ -223,6 +246,49 @@ pub fn parse(status: &Value, stats: Option<&Value>) -> Info {
 
 fn plural(count: u64, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
+}
+
+/// The Runs on line of the panel: where the models run.
+pub fn runs_on_text(p: &Value) -> Option<String> {
+    Some(match p["mode"].as_str()? {
+        "auto" => "Auto".into(),
+        "gpu" => "Graphics card".into(),
+        "cpu" => "Processor".into(),
+        "mixed" if p["setting"].as_str().map(|s| s.trim() == "mixed").unwrap_or(true) => "Auto".into(),
+        "mixed" => "Custom".into(),
+        other => other.to_string(),
+    })
+}
+
+/// The share of a model on the graphics card now, in steps of 5: 100 on the card, 0 on the processor.
+pub fn share_now(m: &Value) -> Option<u8> {
+    Some(match m["on"].as_str()? {
+        "gpu" => 100,
+        "cpu" => 0,
+        "mixed" => {
+            let p = m["gpu_layers"].as_u64()? * 100 / m["layers"].as_u64()?.max(1);
+            ((p + 2) / 5 * 5).min(100) as u8
+        }
+        _ => return None,
+    })
+}
+
+/// Mixed only: one short part per model, for example "chat 16 of 35 layers on the card, search card, speech card".
+pub fn runs_on_detail(p: &Value) -> Option<String> {
+    if !matches!(p["mode"].as_str()?, "mixed" | "auto") {
+        return None;
+    }
+    let one = |name: &str| -> Option<String> {
+        let m = &p[name];
+        Some(match m["on"].as_str()? {
+            "gpu" => format!("{name} card"),
+            "cpu" => format!("{name} processor"),
+            "mixed" => format!("{name} {} of {} layers on the card", m["gpu_layers"].as_u64()?, m["layers"].as_u64()?),
+            _ => return None,
+        })
+    };
+    let parts: Vec<String> = ["chat", "search", "speech", "photos"].iter().filter_map(|n| one(n)).collect();
+    if parts.is_empty() { None } else { Some(parts.join(", ")) }
 }
 
 /// The Photos line of the panel: whether this node reads photos for phones.
@@ -453,24 +519,162 @@ pub fn menu(v: &View) -> Vec<Entry> {
     m
 }
 
-/// The right-click menu as the icons show it: `menu` plus the entry that switches the chat model (E2B or E4B).
-pub fn menu_with_chat_switch(v: &View) -> Vec<Entry> {
+/// The right-click menu as the icons show it: `menu` plus Settings under Show details while the node runs.
+pub fn menu_with_settings(v: &View) -> Vec<Entry> {
     let mut m = menu(v);
-    if let Poll::Up(i) = &v.poll {
-        let entry = match i.chat_model.as_deref() {
-            Some(c) if c.contains("E4B") => Some(Entry::Item("Use chat model E2B (restarts node)".into(), Action::ChatSmall)),
-            Some(c) if c.contains("E2B") => Some(Entry::Item("Use chat model E4B (restarts node)".into(), Action::ChatLarge)),
-            _ => None,
-        };
-        if let (Some(e), Some(at)) = (entry, m.iter().position(|e| matches!(e, Entry::Item(_, Action::ShowDetails)))) {
-            m.insert(at + 1, e);
-        }
+    if let (Poll::Up(_), Some(at)) = (&v.poll, m.iter().position(|e| matches!(e, Entry::Item(_, Action::ShowDetails)))) {
+        m.insert(at + 1, Entry::Item("Settings".into(), Action::ShowSettings));
     }
     m
 }
 
+/// Where the models run, as the Settings page edits it. Turns into `marginalia-node run-on ...` arguments.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunDraft {
+    /// `auto`, `gpu`, `cpu` or `custom` (every model set here).
+    pub mode: String,
+    pub chat: u8,
+    pub search: u8,
+    pub speech_gpu: bool,
+    pub photos_gpu: bool,
+    pub speakers_gpu: bool,
+}
+
+impl RunDraft {
+    /// From the line the node saved, for example `mixed chat=60 search=0 speech=cpu`. A mixed line with shares
+    /// given is Custom. A mixed line without them lets the node split, which is what Auto does, so it shows as Auto.
+    pub fn from_setting(line: Option<&str>) -> RunDraft {
+        let mut d = RunDraft { mode: "gpu".into(), chat: 50, search: 100, speech_gpu: true, photos_gpu: true, speakers_gpu: false };
+        let Some(line) = line else { return d };
+        let mut parts = line.split_whitespace();
+        if let Some(m) = parts.next() {
+            d.mode = m.to_string();
+        }
+        let mut given = 0;
+        for p in parts {
+            let Some((k, v)) = p.split_once('=') else { continue };
+            let gpu = v == "gpu";
+            match k {
+                "chat" => { d.chat = v.parse().unwrap_or(d.chat); given += 1 }
+                "search" => { d.search = v.parse().unwrap_or(d.search); given += 1 }
+                "speech" => { d.speech_gpu = gpu; given += 1 }
+                "photos" => { d.photos_gpu = gpu; given += 1 }
+                "speakers" => d.speakers_gpu = gpu,
+                _ => {}
+            }
+        }
+        if d.mode == "mixed" {
+            d.mode = if given > 0 { "custom" } else { "auto" }.into();
+        }
+        d
+    }
+
+    /// The arguments for `marginalia-node`.
+    pub fn args(&self) -> Vec<String> {
+        let gc = |g: bool| if g { "gpu" } else { "cpu" }.to_string();
+        let mut a: Vec<String> = vec!["run-on".into()];
+        match self.mode.as_str() {
+            "custom" => {
+                a.push("mixed".into());
+                a.extend(["--chat".into(), self.chat.to_string(), "--search".into(), self.search.to_string(), "--speech".into(), gc(self.speech_gpu), "--photos".into(), gc(self.photos_gpu)]);
+            }
+            m => a.push(m.to_string()),
+        }
+        a.extend(["--speakers".into(), gc(self.speakers_gpu)]);
+        a
+    }
+
+    /// The four choices the Settings page offers: the value, its name and one line on what it does.
+    pub const MODES: [(&'static str, &'static str, &'static str); 4] = [
+        ("auto", "Auto", "Fits the models to free card memory"),
+        ("gpu", "Graphics card", "All on the card. Fastest"),
+        ("cpu", "Processor", "All on the processor. Card stays free"),
+        ("custom", "Custom", "Choose for each model"),
+    ];
+
+}
+
+/// One downloadable item on the Settings page. Speakers is two files shown as one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelItem {
+    pub label: String,
+    /// Its size on disk when it is there, else 0.
+    pub bytes: u64,
+    /// All of its files are on disk.
+    pub ready: bool,
+    /// The `marginalia-node models download` arguments that fetch it (without the folder).
+    pub args: Vec<String>,
+    /// The node loads it only when it starts, so it needs a restart after a download.
+    pub needs_restart: bool,
+}
+
+/// The items for the Settings page from `marginalia-node models list --json`.
+pub fn model_items(list: &Value) -> Vec<ModelItem> {
+    let models = list["models"].as_array().cloned().unwrap_or_default();
+    let find = |id: &str| models.iter().find(|m| m["id"].as_str() == Some(id));
+    let one = |ids: &[&str], label: &str, args: &[&str], restart: bool| -> Option<ModelItem> {
+        let ms: Vec<&Value> = ids.iter().filter_map(|i| find(i)).collect();
+        if ms.is_empty() {
+            return None;
+        }
+        Some(ModelItem {
+            label: label.into(),
+            bytes: ms.iter().map(|m| m["present"].as_u64().unwrap_or(0)).sum(),
+            ready: ms.iter().all(|m| !m["present"].is_null()),
+            args: ["models", "download"].iter().chain(args).map(|a| a.to_string()).collect(),
+            needs_restart: restart,
+        })
+    };
+    [
+        one(&["chat-e2b"], "Chat E2B", &["--only", "chat", "--chat-model", "e2b"], true),
+        one(&["chat-e4b"], "Chat E4B", &["--only", "chat", "--chat-model", "e4b"], true),
+        one(&["search"], "Search", &["--only", "search"], true),
+        one(&["speech"], "Speech", &["--only", "speech"], true),
+        one(&["vision-e2b"], "Photos (E2B)", &["--only", "vision", "--chat-model", "e2b"], true),
+        one(&["vision-e4b"], "Photos (E4B)", &["--only", "vision", "--chat-model", "e4b"], true),
+        one(&["speakers-segmentation", "speakers-voices"], "Speakers", &["--only", "speakers"], false),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// What a running or finished download says in its progress file.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Download {
+    Running { file: String, done: u64, total: u64 },
+    Done,
+    Failed(String),
+}
+
+/// Reads the progress file. A "downloading" line that has not changed for `stale_s` seconds belongs to a download that died.
+pub fn download_state(v: &Value, age_s: u64, stale_s: u64) -> Option<Download> {
+    match v["state"].as_str()? {
+        "downloading" if age_s <= stale_s => Some(Download::Running { file: v["file"].as_str().unwrap_or("").into(), done: v["done"].as_u64().unwrap_or(0), total: v["total"].as_u64().unwrap_or(0) }),
+        "downloading" => Some(Download::Failed("The download stopped. Try again, it continues where it stopped.".into())),
+        "done" => Some(Download::Done),
+        "failed" => Some(Download::Failed(v["error"].as_str().unwrap_or("The download failed").chars().take(160).collect())),
+        _ => None,
+    }
+}
+
+/// "2.8 GB" or "560 MB".
+pub fn size_text(bytes: u64) -> String {
+    let gb = bytes as f64 / 1e9;
+    if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{} MB", (bytes as f64 / 1e6).round() as u64) }
+}
+
+/// The chat model the node runs now, `e2b` or `e4b`.
+pub fn chat_choice(i: &Info) -> Option<&'static str> {
+    match i.chat_model.as_deref() {
+        Some(c) if c.contains("E4B") => Some("e4b"),
+        Some(c) if c.contains("E2B") => Some("e2b"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
-mod chat_switch_tests {
+mod settings_tests {
     use super::*;
 
     fn view(chat: Option<&str>) -> View {
@@ -479,30 +683,78 @@ mod chat_switch_tests {
     }
 
     #[test]
-    fn menu_offers_the_other_chat_model_after_show_details() {
-        let m = menu_with_chat_switch(&view(Some("gemma-4-E2B-it-Q4_0")));
+    fn menu_has_settings_after_show_details_only_while_running() {
+        let m = menu_with_settings(&view(Some("gemma-4-E2B-it-Q4_0")));
         let at = m.iter().position(|e| matches!(e, Entry::Item(_, Action::ShowDetails))).unwrap();
-        assert_eq!(m[at + 1], Entry::Item("Use chat model E4B (restarts node)".into(), Action::ChatLarge));
-        let m = menu_with_chat_switch(&view(Some("gemma-4-E4B-it-Q4_0")));
-        assert!(m.contains(&Entry::Item("Use chat model E2B (restarts node)".into(), Action::ChatSmall)));
-    }
-
-    #[test]
-    fn no_chat_entry_when_unknown_or_node_down() {
-        assert_eq!(menu_with_chat_switch(&view(None)), menu(&view(None)));
+        assert_eq!(m[at + 1], Entry::Item("Settings".into(), Action::ShowSettings));
         let down = View { poll: Poll::Down, starting: false };
-        assert_eq!(menu_with_chat_switch(&down), menu(&down));
+        assert_eq!(menu_with_settings(&down), menu(&down));
     }
 
     #[test]
-    fn chat_entry_wording_is_plain() {
-        for c in ["gemma-4-E2B-it-Q4_0", "gemma-4-E4B-it-Q4_0"] {
-            for e in menu_with_chat_switch(&view(Some(c))) {
-                if let Entry::Item(t, _) = e {
-                    assert!(!t.contains(';') && !t.contains('\u{2014}'), "bad wording: {t}");
-                }
+    fn drafts_read_the_saved_line_and_write_arguments() {
+        let d = RunDraft::from_setting(Some("mixed chat=60 search=0 speech=cpu photos=gpu speakers=gpu"));
+        assert_eq!((d.mode.as_str(), d.chat, d.search, d.speech_gpu, d.photos_gpu, d.speakers_gpu), ("custom", 60, 0, false, true, true));
+        assert_eq!(d.args().join(" "), "run-on mixed --chat 60 --search 0 --speech cpu --photos gpu --speakers gpu");
+        let auto = RunDraft::from_setting(Some("auto"));
+        assert_eq!(auto.mode, "auto");
+        assert_eq!(auto.args().join(" "), "run-on auto --speakers cpu");
+        assert_eq!(RunDraft::from_setting(Some("mixed")).mode, "auto");
+        assert_eq!(RunDraft::from_setting(None).mode, "gpu");
+    }
+
+    #[test]
+    fn chat_choice_and_wording() {
+        let up = |c: &str| Info { chat_model: Some(c.into()), ..Default::default() };
+        assert_eq!(chat_choice(&up("gemma-4-E4B-it-Q4_0")), Some("e4b"));
+        assert_eq!(chat_choice(&up("gemma-4-E2B-it-Q4_0")), Some("e2b"));
+        for (_, name, line) in RunDraft::MODES {
+            for t in [name, line] {
+                assert!(!t.contains(';') && !t.contains('\u{2014}'), "{t}");
             }
         }
+    }
+
+    #[test]
+    fn runs_on_lines() {
+        let p = serde_json::json!({"mode": "mixed", "setting": "mixed", "chat": {"on": "mixed", "gpu_layers": 16, "layers": 35}, "search": {"on": "gpu"}, "speech": {"on": "cpu"}, "photos": null});
+        assert_eq!(runs_on_text(&p).as_deref(), Some("Auto"));
+        assert_eq!(runs_on_detail(&p).as_deref(), Some("chat 16 of 35 layers on the card, search card, speech processor"));
+        let hand = serde_json::json!({"mode": "mixed", "setting": "mixed chat=30"});
+        assert_eq!(runs_on_text(&hand).as_deref(), Some("Custom"));
+        assert_eq!(runs_on_text(&serde_json::json!({"mode": "cpu"})).as_deref(), Some("Processor"));
+        assert_eq!(runs_on_detail(&serde_json::json!({"mode": "gpu"})), None);
+        assert_eq!(runs_on_text(&Value::Null), None);
+        assert_eq!(share_now(&serde_json::json!({"on": "mixed", "gpu_layers": 14, "layers": 35})), Some(40));
+        assert_eq!(share_now(&serde_json::json!({"on": "cpu"})), Some(0));
+        assert_eq!(share_now(&Value::Null), None);
+    }
+
+    #[test]
+    fn model_items_group_files_and_carry_download_arguments() {
+        let list = serde_json::json!({"models": [
+            {"id": "chat-e2b", "present": 2841481184u64},
+            {"id": "chat-e4b", "present": null},
+            {"id": "speakers-segmentation", "present": 5992913},
+            {"id": "speakers-voices", "present": null}
+        ]});
+        let items = model_items(&list);
+        assert_eq!(items.len(), 3);
+        assert!(items[0].ready && !items[1].ready);
+        assert_eq!(items[1].args.join(" "), "models download --only chat --chat-model e4b");
+        let sp = items.iter().find(|i| i.label == "Speakers").unwrap();
+        assert!(!sp.ready && !sp.needs_restart && sp.bytes == 5992913);
+        assert_eq!(size_text(2841481184), "2.8 GB");
+        assert_eq!(size_text(32523463), "33 MB");
+    }
+
+    #[test]
+    fn download_progress_and_stale_downloads() {
+        let running = serde_json::json!({"state": "downloading", "file": "a.gguf", "done": 5, "total": 10});
+        assert_eq!(download_state(&running, 2, 90), Some(Download::Running { file: "a.gguf".into(), done: 5, total: 10 }));
+        assert!(matches!(download_state(&running, 200, 90), Some(Download::Failed(_))));
+        assert_eq!(download_state(&serde_json::json!({"state": "done"}), 0, 90), Some(Download::Done));
+        assert_eq!(download_state(&Value::Null, 0, 90), None);
     }
 }
 

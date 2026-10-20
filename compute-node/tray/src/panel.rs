@@ -5,7 +5,9 @@
 
 use crate::charts::{self, Line};
 use crate::control::{Controller, Pairing};
-use crate::model::{self, Action, Activity, Info, Phone, Poll, State, View, Waiting};
+use crate::model::{self, Action, Activity, Download, Info, ModelItem, Phone, Poll, RunDraft, State, View, Waiting};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use crate::usage::{self, History, Load, Reading};
 use eframe::egui::{self, Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -48,10 +50,16 @@ enum Cmd {
     /// `block`, `revoke`, `approve` or `deny` for the phone with this id.
     Phone(&'static str, String),
     Pair,
+    /// Save these `marginalia-node` command lines, then restart the node.
+    Apply(Vec<Vec<String>>),
+    /// Start `marginalia-node` with these download arguments.
+    Download(Vec<String>),
 }
 
 enum Msg {
     View(View),
+    /// The models on disk and the download in progress, if any.
+    Models(Vec<ModelItem>, Option<Download>),
     /// New readings of processor, memory, graphics card and network, and the name of the graphics card.
     Usage(Vec<Reading>, Option<String>),
     Pairing(Pairing),
@@ -82,7 +90,33 @@ fn usage_worker(port: u16, ctx: egui::Context, tx: Sender<Msg>) {
     }
 }
 
-fn worker(port: u16, ctx: egui::Context, tx: Sender<Msg>, rx: Receiver<Cmd>) {
+/// Where a download keeps its progress: one line of JSON in the node's state folder.
+fn progress_path(state_dir: &str) -> std::path::PathBuf {
+    std::path::Path::new(state_dir).join("download.json")
+}
+
+/// While the Settings page shows, lists the models on disk and reads the download progress every 1.5 seconds.
+fn models_worker(ctx: egui::Context, tx: Sender<Msg>, visible: Arc<AtomicBool>, home: Arc<Mutex<Option<(String, String)>>>) {
+    loop {
+        std::thread::sleep(Duration::from_millis(1500));
+        if !visible.load(Ordering::Relaxed) {
+            continue;
+        }
+        let Some((state, models)) = home.lock().ok().and_then(|h| h.clone()) else { continue };
+        let Ok(list) = crate::os::models_list(&state, &models) else { continue };
+        let path = progress_path(&state);
+        let dl = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|v| {
+            let age = std::fs::metadata(&path).ok()?.modified().ok()?.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+            model::download_state(&v, age, 90)
+        });
+        if tx.send(Msg::Models(model::model_items(&list), dl)).is_err() {
+            return;
+        }
+        ctx.request_repaint();
+    }
+}
+
+fn worker(port: u16, ctx: egui::Context, tx: Sender<Msg>, rx: Receiver<Cmd>, home: Arc<Mutex<Option<(String, String)>>>) {
     let (ctl, _refresh) = Controller::new(port);
     loop {
         if tx.send(Msg::View(ctl.fetch())).is_err() {
@@ -94,6 +128,11 @@ fn worker(port: u16, ctx: egui::Context, tx: Sender<Msg>, rx: Receiver<Cmd>) {
                 let msg = match cmd {
                     Cmd::Click(a) => ctl.perform(a).map(|n| Msg::Notice(format!("{}: {}", n.title, n.body))),
                     Cmd::Phone(c, who) => ctl.phone(c, &who).map(|n| Msg::Notice(format!("{}: {}", n.title, n.body))),
+                    Cmd::Apply(cmds) => ctl.apply(&cmds).map(|n| Msg::Notice(format!("{}: {}", n.title, n.body))),
+                    Cmd::Download(args) => match home.lock().ok().and_then(|h| h.clone()) {
+                        Some((state, models)) => crate::os::start_download(&state, &models, &args, &progress_path(&state)).err().map(|e| Msg::Notice(format!("Could not download: {e}"))),
+                        None => Some(Msg::Notice("Could not download: the node did not say where its models are.".into())),
+                    },
                     Cmd::Pair => Some(match ctl.pairing() {
                         Ok(p) => Msg::Pairing(p),
                         Err(e) => Msg::Notice(format!("Could not get a pairing code: {e}")),
@@ -135,18 +174,41 @@ struct Panel {
     placed: bool,
     /// Do not close when focus is lost (for taking screenshots).
     keep_open: bool,
+    /// The Settings page is showing instead of the overview.
+    settings: bool,
+    /// What the Settings page is editing, filled from the node the first time it is shown.
+    draft: Option<(RunDraft, String)>,
+    /// Saved and waiting for the node to come back.
+    applying: bool,
+    /// While applying: the node has gone down for its restart.
+    applying_down: bool,
+    /// The Models section: what is on disk and the download in progress.
+    models: Option<(Vec<ModelItem>, Option<Download>)>,
+    /// The item a download was started for, and whether the node needs a restart to use it.
+    fetching: Option<(String, bool)>,
+    settings_visible: Arc<AtomicBool>,
+    home: Arc<Mutex<Option<(String, String)>>>,
 }
 
 impl Panel {
-    fn new(port: u16, keep_open: bool, ctx: egui::Context) -> Panel {
+    fn new(port: u16, keep_open: bool, settings: bool, ctx: egui::Context) -> Panel {
         let (tx, rx) = channel();
         let (cmds, cmd_rx) = channel();
         {
             let (ctx, tx) = (ctx.clone(), tx.clone());
             std::thread::spawn(move || usage_worker(port, ctx, tx));
         }
-        std::thread::spawn(move || worker(port, ctx, tx, cmd_rx));
-        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, was_focused: false, placed: false, keep_open }
+        let settings_visible = Arc::new(AtomicBool::new(settings));
+        let home: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        {
+            let (ctx, tx, v, h) = (ctx.clone(), tx.clone(), settings_visible.clone(), home.clone());
+            std::thread::spawn(move || models_worker(ctx, tx, v, h));
+        }
+        {
+            let h = home.clone();
+            std::thread::spawn(move || worker(port, ctx, tx, cmd_rx, h));
+        }
+        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, was_focused: false, placed: false, keep_open, settings, draft: None, applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
     }
 
     fn send(&self, c: Cmd) {
@@ -157,6 +219,21 @@ impl Panel {
         while let Ok(m) = self.rx.try_recv() {
             match m {
                 Msg::View(v) => {
+                    // Settings were saved: the node goes down and comes back with them.
+                    match (&v.poll, self.applying) {
+                        (Poll::Down, true) => self.applying_down = true,
+                        (Poll::Up(_), true) if self.applying_down => {
+                            self.applying = false;
+                            self.applying_down = false;
+                            self.draft = None;
+                        }
+                        _ => {}
+                    }
+                    if let (Poll::Up(i), Ok(mut h)) = (&v.poll, self.home.lock()) {
+                        if let (Some(st), Some(md)) = (&i.state_dir, &i.models_dir) {
+                            *h = Some((st.clone(), md.clone()));
+                        }
+                    }
                     match &v.poll {
                         Poll::Up(i) => self.activity.push(self.started.elapsed().as_secs_f64(), (i.running_jobs + i.waiting_jobs) as u32, i.served),
                         Poll::Down => {
@@ -172,11 +249,16 @@ impl Panel {
                         self.history.gpu_name = gpu;
                     }
                 }
+                Msg::Models(items, dl) => self.models = Some((items, dl)),
                 Msg::Pairing(p) => {
                     let until = Instant::now() + Duration::from_secs(p.minutes * 60);
                     self.pairing = Some((p, until));
                 }
-                Msg::Notice(n) => self.notice = Some((n, Instant::now())),
+                Msg::Notice(n) => {
+                    self.applying = false;
+                    self.applying_down = false;
+                    self.notice = Some((n, Instant::now()));
+                }
             }
         }
     }
@@ -242,6 +324,71 @@ fn small_button(ui: &mut Ui, text: &str, hint: &str) -> bool {
 }
 
 /// A small button with a colour that says what kind of action it is.
+/// A name at the start of a row, left aligned in a fixed width so the rows line up.
+fn row_label(ui: &mut Ui, text: &str, width: f32) -> egui::Response {
+    ui.allocate_ui_with_layout(Vec2::new(width, 18.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.set_min_width(width);
+        ui.label(RichText::new(text).size(12.5).color(TEXT))
+    })
+    .inner
+}
+
+/// A small coloured label.
+fn pill(ui: &mut Ui, text: &str, colour: Color32) {
+    Frame::NONE.fill(colour.gamma_multiply(0.18)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::symmetric(7, 2)).show(ui, |ui| {
+        ui.label(RichText::new(text).size(11.0).color(colour));
+    });
+}
+
+/// A quiet title over a group of settings.
+fn section(ui: &mut Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(text.to_uppercase()).size(10.5).strong().color(DIM));
+}
+
+/// One choice as a whole card with a round marker, its name and a line on what it does. Returns true when clicked.
+fn option_card(ui: &mut Ui, title: &str, line: &str, selected: bool) -> bool {
+    let stroke = if selected { Stroke::new(1.5, BLUE) } else { Stroke::new(1.0, TRACK) };
+    let r = Frame::NONE.fill(if selected { BLUE.gamma_multiply(0.10) } else { CARD }).stroke(stroke).corner_radius(CornerRadius::same(10)).inner_margin(Margin::symmetric(10, 7)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+            let c = rect.center();
+            ui.painter().circle_stroke(c, 6.0, Stroke::new(1.5, if selected { BLUE } else { GREY }));
+            if selected {
+                ui.painter().circle_filled(c, 3.2, BLUE);
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(RichText::new(title).size(13.0).strong().color(TEXT));
+                ui.label(RichText::new(line).size(11.0).color(DIM));
+            });
+        });
+    });
+    let resp = ui.interact(r.response.rect, ui.scope_id().with(("option", title)), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}
+
+/// Two sides of one choice, side by side. `on` is true for the first.
+fn segmented(ui: &mut Ui, on: &mut bool, first: &str, second: &str) {
+    ui.spacing_mut().item_spacing.x = 2.0;
+    if choice(ui, first, *on, "") {
+        *on = true;
+    }
+    if choice(ui, second, !*on, "") {
+        *on = false;
+    }
+}
+
+/// One option of a group, filled when it is the chosen one.
+fn choice(ui: &mut Ui, text: &str, selected: bool, hint: &str) -> bool {
+    let b = egui::Button::new(RichText::new(text).size(12.0).color(if selected { Color32::WHITE } else { TEXT })).fill(if selected { BLUE.gamma_multiply(0.55) } else { TRACK }).min_size(Vec2::new(0.0, 22.0));
+    finish(ui.add(b), hint)
+}
+
 fn tinted_button(ui: &mut Ui, text: &str, fill: Color32, hint: &str) -> bool {
     finish(ui.add(egui::Button::new(RichText::new(text).size(12.0).color(TEXT)).fill(fill).min_size(Vec2::new(0.0, 22.0))), hint)
 }
@@ -364,6 +511,19 @@ impl Panel {
                     ui.horizontal(|ui| {
                         ui.add_space(58.0);
                         truncated(ui, RichText::new(m).size(11.0).color(DIM));
+                    });
+                }
+            }
+            if let Some(r) = &i.runs_on {
+                ui.horizontal(|ui| {
+                    ui.add_sized([52.0, 14.0], egui::Label::new(dim("Runs on")));
+                    ui.label(RichText::new(r).size(12.0).color(TEXT))
+                        .on_hover_text("Change it on the Settings page, or with: marginalia-node run-on auto|gpu|cpu|mixed. COMMANDS.md has the details.");
+                });
+                if let Some(d) = &i.runs_on_detail {
+                    ui.horizontal(|ui| {
+                        ui.add_space(58.0);
+                        truncated(ui, RichText::new(d).size(11.0).color(DIM));
                     });
                 }
             }
@@ -644,22 +804,232 @@ impl Panel {
                     ui.label(RichText::new(a).font(FontId::monospace(12.0)).color(TEXT));
                 });
             }
-            if let Some(dir) = &i.log_dir {
-                // The word and the button on one line, the folder on the line under it with the whole width, so nothing can run into the button.
-                ui.add_space(2.0);
+        });
+    }
+
+    /// Overview or Settings, under the header.
+    fn tabs(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            for (name, settings) in [("Overview", false), ("Settings", true)] {
+                if choice(ui, name, self.settings == settings, if settings { "Models and logs" } else { "What the node is doing" }) {
+                    self.settings = settings;
+                    self.settings_visible.store(settings, Ordering::Relaxed);
+                }
+            }
+        });
+    }
+
+    /// What the node uses now, as the Settings page shows it.
+    fn current_settings(i: &Info) -> (RunDraft, String) {
+        (RunDraft::from_setting(i.run_setting.as_deref()), model::chat_choice(i).unwrap_or("e2b").to_string())
+    }
+
+    fn settings_page(&mut self, ui: &mut Ui, i: &Info) {
+        let current = Self::current_settings(i);
+        if self.draft.is_none() || self.applying {
+            self.draft = Some(current.clone());
+        }
+        let Some((mut run, mut chat)) = self.draft.clone() else { return };
+
+        // Where things are right now, in one glance.
+        if let Some(r) = &i.runs_on {
+            card(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add_sized([58.0, 14.0], egui::Label::new(dim("Logs")));
-                    ui.label(dim("node.log, kept 5 files"));
+                    dot(ui, GREEN, 4.0);
+                    ui.label(RichText::new("Now").size(12.0).strong().color(TEXT));
+                    ui.label(dim(r));
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(3.0, 4.0);
+                    for (name, share) in [("Chat", i.now_chat), ("Search", i.now_search), ("Speech", i.now_speech_gpu.map(|g| if g { 100 } else { 0 })), ("Photos", i.now_photos_gpu.map(|g| if g { 100 } else { 0 }))] {
+                        if let Some(sh) = share {
+                            let (text, colour) = match sh {
+                                100 => (format!("{name} card"), BLUE),
+                                0 => (format!("{name} CPU"), GREY),
+                                p => (format!("{name} {p}%"), VIOLET),
+                            };
+                            pill(ui, &text, colour);
+                        }
+                    }
+                });
+            });
+        }
+
+        section(ui, "Chat model");
+        for (value, name, line) in [("e2b", "E2B", "Smaller, faster"), ("e4b", "E4B", "Better answers, 2 GB more memory")] {
+            if option_card(ui, name, line, chat == value) {
+                chat = value.into();
+            }
+        }
+
+        section(ui, "Where the models run");
+        for (value, name, line) in RunDraft::MODES {
+            if option_card(ui, name, line, run.mode == value) {
+                if value == "custom" && run.mode != "custom" {
+                    // Start from where the models are now.
+                    run.chat = i.now_chat.unwrap_or(run.chat);
+                    run.search = i.now_search.unwrap_or(run.search);
+                    run.speech_gpu = i.now_speech_gpu.unwrap_or(run.speech_gpu);
+                    run.photos_gpu = i.now_photos_gpu.unwrap_or(run.photos_gpu);
+                }
+                run.mode = value.into();
+            }
+        }
+        if run.mode == "custom" {
+            card(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                let share = |ui: &mut Ui, label: &str, hint: &str, v: &mut u8| {
+                    ui.horizontal(|ui| {
+                        row_label(ui, label, 60.0).on_hover_text(hint);
+                        let mut x = *v as f32;
+                        ui.spacing_mut().slider_width = 130.0;
+                        if ui.add(egui::Slider::new(&mut x, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").show_value(false)).changed() {
+                            *v = x as u8;
+                        }
+                        ui.label(RichText::new(match *v { 0 => "processor".to_string(), 100 => "card".to_string(), p => format!("{p}% on card") }).size(12.0).color(DIM));
+                    });
+                };
+                share(ui, "Chat", "Share of layers on the card. The rest uses the processor.", &mut run.chat);
+                share(ui, "Search", "Share of layers on the card.", &mut run.search);
+                let side = |ui: &mut Ui, label: &str, gpu: &mut bool| {
+                    ui.horizontal(|ui| {
+                        row_label(ui, label, 60.0).on_hover_text("Runs on one side only");
+                        segmented(ui, gpu, "Card", "Processor");
+                    });
+                };
+                side(ui, "Speech", &mut run.speech_gpu);
+                side(ui, "Photos", &mut run.photos_gpu);
+                ui.label(dim("Speech and photos run on one side only."));
+            });
+        }
+
+        section(ui, "Speakers");
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                row_label(ui, "Run on", 60.0);
+                let mut gpu = run.speakers_gpu;
+                segmented(ui, &mut gpu, "Card", "Processor");
+                run.speakers_gpu = gpu;
+            });
+            ui.label(dim("Card needs the GPU helper and cuDNN."));
+        });
+
+        self.models_section(ui);
+
+        if let Some(dir) = &i.log_dir {
+            section(ui, "Logs");
+            card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("node.log").size(12.5).color(TEXT));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if small_button(ui, "Open", "Open the folder with the log files") {
+                        if small_button(ui, "Open folder", "Open the folder with the log files") {
                             open_folder(dir);
                         }
                     });
                 });
+                ui.label(dim("Keeps the last 5 files, 5 MB each. Events and numbers only."));
+                truncated(ui, RichText::new(dir).font(FontId::monospace(10.5)).color(DIM));
+            });
+        }
+        ui.add_space(4.0);
+        if !self.applying {
+            self.draft = Some((run, chat));
+        }
+    }
+
+    /// The model files: which are there, a Get button for the missing ones, and the download in progress.
+    fn models_section(&mut self, ui: &mut Ui) {
+        section(ui, "Models");
+        let Some((items, dl)) = self.models.clone() else {
+            card(ui, |ui| {
+                ui.label(dim("Looking at the models folder..."));
+            });
+            return;
+        };
+        let running = matches!(dl, Some(Download::Running { .. }));
+        let mut start: Option<ModelItem> = None;
+        let mut restart = false;
+        card(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            for it in &items {
                 ui.horizontal(|ui| {
-                    ui.add_space(58.0);
-                    truncated(ui, RichText::new(dir).font(FontId::monospace(10.5)).color(DIM));
+                    row_label(ui, &it.label, 86.0);
+                    let busy = running && self.fetching.as_ref().map(|(l, _)| l == &it.label).unwrap_or(false);
+                    if it.ready {
+                        ui.label(RichText::new(format!("Ready  {}", model::size_text(it.bytes))).size(11.5).color(GREEN));
+                    } else if busy {
+                        ui.label(RichText::new("Downloading").size(11.5).color(BLUE));
+                    } else {
+                        ui.label(RichText::new("Not downloaded").size(11.5).color(DIM));
+                    }
+                    if !it.ready && !running {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if small_button(ui, "Get", "Download it from Hugging Face") {
+                                start = Some(it.clone());
+                            }
+                        });
+                    }
                 });
+            }
+            match &dl {
+                Some(Download::Running { file, done, total }) => {
+                    let f = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
+                    ui.add_space(2.0);
+                    bar(ui, ui.available_width(), f, BLUE);
+                    ui.label(dim(format!("{file}  {}  {}", if *total > 0 { format!("{}%", (f * 100.0) as u32) } else { String::new() }, model::size_text(*done))));
+                }
+                Some(Download::Failed(e)) if self.fetching.is_some() => {
+                    ui.label(RichText::new(e).size(11.0).color(RED));
+                }
+                Some(Download::Done) if self.fetching.as_ref().map(|(_, r)| *r).unwrap_or(false) => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Downloaded. Restart to use it.").size(11.5).color(GREEN));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if small_button(ui, "Restart node", "Restart the node so it loads the new model") {
+                                restart = true;
+                            }
+                        });
+                    });
+                }
+                _ => {}
+            }
+        });
+        if let Some(it) = start {
+            self.fetching = Some((it.label.clone(), it.needs_restart));
+            self.send(Cmd::Download(it.args.clone()));
+            if let Some((_, d)) = &mut self.models {
+                // Shown as running at once, the next look at the progress file confirms it.
+                *d = Some(Download::Running { file: it.label.clone(), done: 0, total: 0 });
+            }
+        }
+        if restart {
+            self.fetching = None;
+            self.applying = true;
+            self.send(Cmd::Apply(vec![]));
+        }
+    }
+
+    /// Save and Undo, kept at the bottom of the Settings page. They light up only when something changed.
+    fn settings_footer(&mut self, ui: &mut Ui, i: &Info) {
+        let current = Self::current_settings(i);
+        let Some((run, chat)) = self.draft.clone() else { return };
+        let changed = (run.clone(), chat.clone()) != current;
+        ui.label(dim(if self.applying { "Restarting the node, about a minute." } else if changed { "Saving restarts the node." } else { "No changes." }));
+        ui.columns(2, |cols| {
+            let save = if self.applying { "Restarting..." } else { "Save and restart" };
+            if big_button(&mut cols[0], save, if changed && !self.applying { Some(GREEN_BTN) } else { None }, "Save the settings and restart the node") && changed && !self.applying {
+                let mut cmds = vec![];
+                if chat != current.1 {
+                    cmds.push(vec!["chat-model".to_string(), chat.clone()]);
+                }
+                if run != current.0 {
+                    cmds.push(run.args());
+                }
+                self.applying = true;
+                self.send(Cmd::Apply(cmds));
+            }
+            if big_button(&mut cols[1], "Undo changes", None, "Back to what the node uses now") && !self.applying {
+                self.draft = Some(current.clone());
             }
         });
     }
@@ -785,7 +1155,11 @@ impl eframe::App for Panel {
                 if let Some((n, _)) = &self.notice {
                     ui.label(RichText::new(n).size(12.0).color(RED));
                 }
-                self.footer(ui, i);
+                if self.settings {
+                    self.settings_footer(ui, i);
+                } else {
+                    self.footer(ui, i);
+                }
             });
         }
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -794,7 +1168,12 @@ impl eframe::App for Panel {
                     None => {
                         ui.label(dim("Looking for the node..."));
                     }
-                    Some(v) => self.header(ui, v),
+                    Some(v) => {
+                        self.header(ui, v);
+                        if info.is_some() {
+                            self.tabs(ui);
+                        }
+                    }
                 }
             });
             match (&view, &info) {
@@ -813,6 +1192,10 @@ impl eframe::App for Panel {
                     .show(ui, |ui| {
                         Frame::NONE.inner_margin(Margin::symmetric(12, 4)).show(ui, |ui| {
                             ui.spacing_mut().item_spacing.y = 6.0;
+                            if self.settings {
+                                self.settings_page(ui, i);
+                                return;
+                            }
                             self.pairing_card(ui);
                             self.asking(ui, &i.asking);
                             self.numbers(ui, i);
@@ -839,7 +1222,7 @@ impl eframe::App for Panel {
     }
 }
 
-pub fn run(port: u16, keep_open: bool) {
+pub fn run(port: u16, keep_open: bool, settings: bool) {
     let viewport = egui::ViewportBuilder::default()
         .with_title("Marginalia node")
         .with_app_id("marginalia-node-tray")
@@ -861,8 +1244,10 @@ pub fn run(port: u16, keep_open: bool) {
             style.visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
             style.visuals.widgets.active.corner_radius = CornerRadius::same(6);
             style.spacing.item_spacing = Vec2::new(6.0, 6.0);
+            // Text is not selectable, so a click on a card's words reaches the card.
+            style.interaction.selectable_labels = false;
             cc.egui_ctx.set_global_style(style);
-            Ok(Box::new(Panel::new(port, keep_open, cc.egui_ctx.clone())))
+            Ok(Box::new(Panel::new(port, keep_open, settings, cc.egui_ctx.clone())))
         }),
     );
     if let Err(e) = result {

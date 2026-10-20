@@ -39,7 +39,7 @@ impl App {
     fn menu(view: &View) -> (Menu, HashMap<String, Action>) {
         let menu = Menu::new();
         let mut actions = HashMap::new();
-        for (n, e) in crate::model::menu_with_chat_switch(view).into_iter().enumerate() {
+        for (n, e) in crate::model::menu_with_settings(view).into_iter().enumerate() {
             let _ = match e {
                 Entry::Separator => menu.append(&PredefinedMenuItem::separator()),
                 Entry::Info(text) => menu.append(&MenuItem::new(label(&text), false, None)),

@@ -51,6 +51,9 @@ struct Cli {
     /// Show the details panel and nothing else. The tray starts this itself when the icon is clicked.
     #[arg(long)]
     panel: bool,
+    /// With `--panel`: open on the Settings page.
+    #[arg(long)]
+    settings: bool,
     /// With `--panel`: do not close the panel when it loses focus. For taking screenshots.
     #[arg(long, hide = true)]
     keep_open: bool,
@@ -82,14 +85,14 @@ fn main() {
         }
     };
     if cli.panel {
-        panel::run(cli.admin_port, cli.keep_open);
+        panel::run(cli.admin_port, cli.keep_open, cli.settings);
         return;
     }
     let (ctl, rx) = control::Controller::new(cli.admin_port);
     if cli.print {
         let view = ctl.fetch();
         println!("{}", model::tooltip(&view));
-        for e in model::menu(&view) {
+        for e in model::menu_with_settings(&view) {
             match e {
                 model::Entry::Info(s) => println!("  {s}"),
                 model::Entry::Separator => println!("  ----"),

@@ -33,9 +33,18 @@ fn reap(mut child: std::process::Child) {
 }
 
 /// Starts the node. Returns a short sentence on success and the reason on failure.
-pub fn start_node(admin_port: u16) -> Result<String, String> {
+/// Where a node keeps its settings, its port and its name, so a node that is not the installed one comes back the same.
+#[derive(Clone, Debug)]
+pub struct NodeHome {
+    pub dir: String,
+    pub port: u16,
+    pub name: Option<String>,
+}
+
+/// Starts the node. `home` is given for a node that is not the installed one.
+pub fn start_node(admin_port: u16, home: Option<NodeHome>) -> Result<String, String> {
     #[cfg(target_os = "linux")]
-    {
+    if admin_port == DEFAULT_ADMIN_PORT {
         // The installed user service is the proper way to run it, when it exists.
         let has_unit = Command::new("systemctl").args(["--user", "cat", "marginalia-node.service"]).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
         if has_unit {
@@ -45,9 +54,18 @@ pub fn start_node(admin_port: u16) -> Result<String, String> {
     }
     let exe = find_node().ok_or_else(|| format!("Could not find {NODE_EXE}. Put it next to the tray program or in your PATH."))?;
     let mut cmd = Command::new(&exe);
+    if let Some(h) = &home {
+        cmd.arg("--state-dir").arg(&h.dir);
+    }
     cmd.arg("run");
     if admin_port != DEFAULT_ADMIN_PORT {
         cmd.arg("--admin-port").arg(admin_port.to_string());
+    }
+    if let Some(h) = &home {
+        cmd.arg("--port").arg(h.port.to_string());
+        if let Some(n) = &h.name {
+            cmd.arg("--name").arg(n);
+        }
     }
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(unix)]
@@ -67,11 +85,47 @@ pub fn start_node(admin_port: u16) -> Result<String, String> {
     Ok(format!("Started {}", exe.display()))
 }
 
-/// Saves the chat model choice (`e2b` or `e4b`) with `marginalia-node chat-model`. The node reads it when it starts.
-pub fn set_chat_model(choice: &str) -> Result<(), String> {
+/// `marginalia-node models list --json` for this models folder.
+pub fn models_list(state_dir: &str, models_dir: &str) -> Result<serde_json::Value, String> {
+    let exe = find_node().ok_or_else(|| format!("Could not find {NODE_EXE}."))?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(["--state-dir", state_dir, "models", "list", "--json", "--dir", models_dir]).stdin(Stdio::null()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().map_err(|e| format!("Could not run {}: {e}", exe.display()))?;
+    serde_json::from_slice(&out.stdout).map_err(|_| "The node program did not list its models.".to_string())
+}
+
+/// Starts a model download as its own program, so it keeps going when the panel closes. It writes its progress to `progress`.
+pub fn start_download(state_dir: &str, models_dir: &str, args: &[String], progress: &std::path::Path) -> Result<(), String> {
+    let exe = find_node().ok_or_else(|| format!("Could not find {NODE_EXE}."))?;
+    let mut cmd = Command::new(&exe);
+    cmd.args(["--state-dir", state_dir]).args(args).args(["--dir", models_dir]).env("MARGINALIA_PROGRESS_FILE", progress);
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0000_0200 | 0x0000_0008 | 0x0800_0000);
+    }
+    let _ = std::fs::remove_file(progress);
+    let child = cmd.spawn().map_err(|e| format!("Could not start the download: {e}"))?;
+    reap(child);
+    Ok(())
+}
+
+/// Runs the node program with `args` to save a setting, and waits for it.
+pub fn node_says(args: &[&str]) -> Result<(), String> {
     let exe = find_node().ok_or_else(|| format!("Could not find {NODE_EXE}. Put it next to the tray program or in your PATH."))?;
     let mut cmd = Command::new(&exe);
-    cmd.args(["chat-model", choice]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

@@ -55,12 +55,30 @@ impl PanelHost {
     }
 
     pub fn open(&self) {
+        self.open_page(false)
+    }
+
+    /// Opens the panel on its Settings page. A panel already open on the other page is closed first.
+    pub fn open_settings(&self) {
+        if let Ok(mut c) = self.child.lock() {
+            if let Some(mut ch) = c.take() {
+                let _ = ch.kill();
+                let _ = ch.wait();
+            }
+        }
+        self.open_page(true)
+    }
+
+    fn open_page(&self, settings: bool) {
         if self.is_open() {
             return;
         }
         let Ok(exe) = std::env::current_exe() else { return };
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("--panel").arg("--admin-port").arg(self.port.to_string());
+        if settings {
+            cmd.arg("--settings");
+        }
         cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         #[cfg(windows)]
         {
@@ -109,12 +127,15 @@ pub struct Controller {
     panel: PanelHost,
     starting: Mutex<Option<Instant>>,
     refresh: Sender<()>,
+    /// The node's own state folder and port, as it last said in `status`. Settings are saved there, and a node that
+    /// is not the installed service is started again with them.
+    node_home: Mutex<Option<os::NodeHome>>,
 }
 
 impl Controller {
     pub fn new(port: u16) -> (Arc<Controller>, Receiver<()>) {
         let (refresh, rx) = channel();
-        (Arc::new(Controller { port, panel: PanelHost::new(port), starting: Mutex::new(None), refresh }), rx)
+        (Arc::new(Controller { port, panel: PanelHost::new(port), starting: Mutex::new(None), refresh, node_home: Mutex::new(None) }), rx)
     }
 
     fn starting(&self) -> bool {
@@ -186,7 +207,7 @@ impl Controller {
                 if let Ok(mut s) = self.starting.lock() {
                     *s = Some(Instant::now());
                 }
-                match os::start_node(self.port) {
+                match os::start_node(self.port, self.node_home.lock().ok().and_then(|h| h.clone())) {
                     Ok(_) => None,
                     Err(e) => {
                         if let Ok(mut s) = self.starting.lock() {
@@ -196,31 +217,54 @@ impl Controller {
                     }
                 }
             }
-            Action::ChatSmall | Action::ChatLarge => {
-                let choice = if action == Action::ChatSmall { "e2b" } else { "e4b" };
-                if let Err(e) = os::set_chat_model(choice) {
-                    return notice("Could not change the chat model", e);
-                }
-                // The old node must be gone first so its model leaves the graphics card before the new one loads.
-                if admin::ask(self.port, "shutdown").is_ok() {
-                    let mut gone = false;
-                    for _ in 0..60 {
-                        if admin::ask(self.port, "status").is_err() {
-                            gone = true;
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(500));
-                    }
-                    if !gone {
-                        return notice("Could not change the chat model", "The node did not stop in 30 seconds. The new choice is saved and is used the next time the node starts.".into());
-                    }
-                    // A moment for the graphics driver to take the memory back.
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-                self.perform(Action::Start)
+            Action::ShowSettings => {
+                self.panel.open_settings();
+                None
             }
             Action::Quit => None,
         }
+    }
+
+    /// Saves settings with the node program (each entry is one `marginalia-node` command line), then restarts
+    /// the node so they take effect.
+    pub fn apply(&self, commands: &[Vec<String>]) -> Option<Notice> {
+        // The settings belong in the state folder of the node this tray watches, which is not always the default one.
+        let home = admin::ask(self.port, "status").ok().and_then(|s| Some(os::NodeHome { dir: s["state_dir"].as_str()?.to_string(), port: s["port"].as_u64()? as u16, name: s["name"].as_str().map(String::from) }));
+        let Some(home) = home else {
+            return Some(Notice { title: "Could not save the settings".into(), body: "The node did not say where it keeps its settings. Is it a newer version than the tray?".into() });
+        };
+        let dir = home.dir.clone();
+        if let Ok(mut h) = self.node_home.lock() {
+            *h = Some(home);
+        }
+        for args in commands {
+            let mut a: Vec<&str> = vec!["--state-dir", &dir];
+            a.extend(args.iter().map(String::as_str));
+            if let Err(e) = os::node_says(&a) {
+                return Some(Notice { title: "Could not save the settings".into(), body: e });
+            }
+        }
+        self.restart("Could not restart the node")
+    }
+
+    /// Stops the node, waits until it is gone so its models leave the graphics card, then starts it again.
+    fn restart(&self, what: &str) -> Option<Notice> {
+        if admin::ask(self.port, "shutdown").is_ok() {
+            let mut gone = false;
+            for _ in 0..60 {
+                if admin::ask(self.port, "status").is_err() {
+                    gone = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            if !gone {
+                return Some(Notice { title: what.into(), body: "The node did not stop in 30 seconds. The new choice is saved and is used the next time the node starts.".into() });
+            }
+            // A moment for the graphics driver to take the memory back.
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        self.perform(Action::Start)
     }
 
     /// Runs a click on its own thread (it may talk to the node or start a program) and then asks
