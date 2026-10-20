@@ -56,7 +56,11 @@ scripts/node/install-linux.sh   # user service and tray autostart
 ```
 
 On Windows use `scripts/windows/setup.ps1` (see `docs/WINDOWS-PLAN.md`). Node models are GGUF files, download them with
-`marginalia-node models download`.
+`marginalia-node models download` or the Get buttons on the tray's Settings page. Which files exist, where they come from and the
+graphics memory estimates are in `compute-node/models.toml` (read at start, never written in the code, see `catalog.rs`). Where
+each model runs (`run-on`) is in `runon.rs` and `host.rs`. Every command is in `compute-node/COMMANDS.md`. To try settings
+without touching your own node, run a second one with `--state-dir DIR --admin-port 47726 run --port 47725` and open its panel
+with `marginalia-node-tray --panel --settings --admin-port 47726`.
 
 ## Loading models on the phone
 

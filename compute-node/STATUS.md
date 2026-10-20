@@ -64,7 +64,7 @@ sent to `Done`, the 11 s JFK sample repeated to 40 s, English, greedy decoding:
 - Fixed on the way: CMake older than 4.2 cannot make a Visual Studio 2026 project, and Rust older than 1.95 cannot build the
   tray. `setup.ps1` now upgrades both.
 - The node serves chat (E2B, about 65 tokens a second), search and speech, and the self tests for let in, search, chat and speech pass.
-- Chat model choice: E2B is the default. `marginalia-node chat-model e4b` and the tray menu entry switch to E4B. Stopping the
+- Chat model choice: E2B is the default. `marginalia-node chat-model e4b` and the tray's Settings page switch to E4B. Stopping the
   node frees the graphics memory (5141 MiB used, 2026 MiB after stop, 7166 MiB with E4B loaded), then the new model loads.
 - `cargo test` for proto (27), node (66) and tray (40) passes on Windows (2026-10-20, after the speaker and logging work from Linux).
 - The Windows scripts moved to `scripts/windows`. The repository root there was one folder too high and is fixed.
@@ -186,6 +186,34 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
 3. Cluster, the rest: member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
 4. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.
 5. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).
+
+## Where the models run, Settings page, models file (2026-10-20)
+
+- `marginalia-node run-on auto|gpu|cpu|mixed` with `--chat PERCENT`, `--search PERCENT`, `--speech gpu|cpu`, `--photos gpu|cpu` and
+  `--speakers gpu|cpu` (see COMMANDS.md). The choice is the `run-on` file in the state folder. Auto reads the free graphics memory with
+  `nvidia-smi` before loading and fits the models in turn (speech, photos, search, then as much of chat as fits, in steps of 5 percent).
+  A share becomes a number of layers from the model's own GGUF header (`block_count`, read without loading the weights).
+  `status` has a `placement` part with where each model ended up. Measured on the RTX 4060 with 3.5 GB used by something else, E2B:
+  cpu 22.6 tokens a second and speech 2.5 times real time. mixed worked out to 16 of 35 layers, 41 tokens a second, speech 88 times.
+  Hand set chat 30, the rest on the processor: 11 of 35 layers, 34.9 tokens a second. Auto with 4.3 GB free: 14 of 35 layers, the
+  other models on the card.
+- The tray panel has an Overview and a Settings page (the menu's Settings opens it): where each model runs now, the chat model,
+  Auto, Graphics card, Processor or Custom, speakers, the models with Get buttons and a progress bar, the log folder, and Save and
+  restart. Checked with real clicks under X11 against a test node in its own state folder: saving writes that node's `run-on`
+  (not the default node's), the node comes back with the same folder, port and name, Custom starts from the current split, and a
+  speaker models download through Get finished with both files at full size and the node offering speakers without a restart.
+- The menu no longer has the chat model entry. It has Settings instead.
+- `models.toml` holds every model file (role, repository, file) and the memory estimates. The node reads it from
+  `MARGINALIA_MODELS_FILE`, the state folder, next to the program, or the copy built in. No expected sizes: a download is complete
+  when the server's length is reached. `models list --json` and `MARGINALIA_PROGRESS_FILE` are what the tray uses.
+- Speakers on the graphics card: the helper takes `--provider cuda` and the node notices when ONNX Runtime falls back to the
+  processor (status says so). Not tried on the card yet: the prebuilt helper is the processor build, the GPU build needs the
+  sherpa-onnx CUDA archive and cuDNN 9, which this machine does not have.
+- The speaker helper stays a separate program. In one program with llama.cpp it crashes at start: the prebuilt sherpa-onnx static
+  library uses the old C++ string layout of GCC's library, and the linker merges its `std::regex` code with ours (gdb:
+  `_S_empty_rep_storage` freed from `onnxruntime::GetPciBusId`). Ways to one program, all bigger work: build ONNX Runtime and
+  sherpa-onnx from source with the new layout, or a pure Rust ONNX runner for the two speaker models.
+- Not tried on Windows yet: `run-on`, the Settings page and downloads from the tray (the tray type checks for Windows).
 
 ## Photos, graphs and logs (2026-10-19)
 

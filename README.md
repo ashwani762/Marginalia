@@ -181,12 +181,15 @@ Use `marginalia-node lock` if you want to approve every new phone yourself, or `
 | Task | Command |
 | --- | --- |
 | Run the node in the foreground | `target/release/marginalia-node run` |
-| Run on the processor only | `target/release/marginalia-node run --cpu` |
+| Run on the processor only | `marginalia-node run-on cpu`, then restart the node (or `run --cpu` once) |
+| Split the models between the graphics card and the processor | `marginalia-node run-on auto` (the node decides) or `marginalia-node run-on mixed --chat 60 --speech cpu`. The tray's Settings page does the same |
 | Build with Vulkan (AMD, Intel) | `cargo build --release -p marginalia-node --features vulkan` |
 | Show or fetch model files | `marginalia-node models list` and `marginalia-node models download` |
 | Let the node read photos | `marginalia-node models download --only vision` |
 | Let the node tell speakers apart | `marginalia-node models download --only speakers` (the helper program must sit next to the node) |
-| Choose the chat model (E2B is smaller and faster, E4B answers better) | `marginalia-node chat-model e4b`, then restart the node. The tray menu does the same |
+| Choose the chat model (E2B is smaller and faster, E4B answers better) | `marginalia-node chat-model e4b`, then restart the node. The tray's Settings page does the same |
+| Change a model file or the memory estimates | Edit `models.toml` (see [compute-node/COMMANDS.md](compute-node/COMMANDS.md#the-models-file)) |
+| Every command with examples | [compute-node/COMMANDS.md](compute-node/COMMANDS.md) |
 | Pause or resume new jobs | `marginalia-node pause` and `marginalia-node resume` |
 | Let a waiting phone in | `marginalia-node approve` |
 | Block or forget a phone | `marginalia-node block <id or name>` and `marginalia-node revoke <id or name>` |

@@ -50,22 +50,28 @@ Put these files in the models folder:
 
 | File | Used for |
 | --- | --- |
-| `gemma-4-E2B-it-Q4_0.gguf` | chat (write-ups, answers), the default. The larger `gemma-4-E4B-it-Q4_0.gguf` (`--chat-model e4b`) is used when chosen from the tray menu or with `chat-model e4b` |
+| `gemma-4-E2B-it-Q4_0.gguf` | chat (write-ups, answers), the default. The larger `gemma-4-E4B-it-Q4_0.gguf` (`--chat-model e4b`) is used when chosen on the tray's Settings page or with `chat-model e4b` |
 | `embeddinggemma-2-Q8_0.gguf` | search (embeddings) |
 | `ggml-large-v3-turbo-q5_0.bin` | speech to text on recorded audio (about 570 MB, from the `ggerganov/whisper.cpp` repository on Hugging Face) |
 
-Get them with `marginalia-node models download` (works the same on Linux and Windows, see below). The default folder is `~/.local/share/marginalia/models/` on Linux (`%APPDATA%\marginalia\models` on Windows). Use another folder with `--models DIR`, or point at single files with `--chat-model FILE`, `--embed-model FILE` and `--speech-model FILE`. Each job type is served only when its file is present, and the status says which. A node with no speech model works as before and does not offer transcription. `run --no-speech` leaves the speech model out even when the file is there. If none of the three is found the node refuses to start.
+The names, repositories and memory estimates are not in the code: they are in [models.toml](models.toml), which the node reads when it starts (a copy in the state folder or next to the program overrides the built-in one, see [COMMANDS.md](COMMANDS.md#the-models-file)).
+
+Get them with `marginalia-node models download` (works the same on Linux and Windows, see below), or with the Get buttons on the tray's Settings page. The default folder is `~/.local/share/marginalia/models/` on Linux (`%APPDATA%\marginalia\models` on Windows). Use another folder with `--models DIR`, or point at single files with `--chat-model FILE`, `--embed-model FILE` and `--speech-model FILE`. Each job type is served only when its file is present, and the status says which. A node with no speech model works as before and does not offer transcription. `run --no-speech` leaves the speech model out even when the file is there. If none of the three is found the node refuses to start.
 
 At start the node runs a short measurement and reports tokens per second for chat and passages per second for search. Phones use those numbers to decide whether this node is worth using for a given job.
 
 ## Commands
 
+Every command with examples and an explanation is in [COMMANDS.md](COMMANDS.md). The short version:
+
 ```sh
 marginalia-node models list
 marginalia-node models download [--dir DIR] [--only chat|search|speech] [--chat-model e4b|e2b] [--skip-speech]
-marginalia-node chat-model [e2b|e4b]   # show or choose the chat model, restart the node to apply. The tray menu has the same choice and restarts the node itself
+marginalia-node chat-model [e2b|e4b]   # show or choose the chat model, restart the node to apply. The tray's Settings page has the same choice and restarts the node itself
+marginalia-node run-on [auto|gpu|cpu|mixed] [--chat PERCENT] [--search PERCENT] [--speech gpu|cpu] [--photos gpu|cpu] [--speakers gpu|cpu]
+                                         # where each model runs: the graphics card, the processor or split between them
 marginalia-node run --chat e2b|e4b      # choose it for one run
-marginalia-node run [--port 47615] [--name NAME] [--models DIR] [--cpu] [--speech-model FILE] [--no-speech] [--window-max-seconds 120]
+marginalia-node run [--port 47615] [--name NAME] [--models DIR] [--run-on auto|gpu|cpu|mixed] [--cpu] [--speech-model FILE] [--no-speech] [--window-max-seconds 120]
 marginalia-node pair
 marginalia-node join <addr:port> <code>
 marginalia-node peers
@@ -113,7 +119,7 @@ A node with the speech model can write out a recording with a large Whisper mode
 - **How it works.** Whisper's own 30 second windows run over the whole recording, so any length works, each window knowing what came before. It decodes with a beam of 5 on the graphics card (greedy on the processor), turns on flash attention on the graphics card, falls back to a higher temperature when a stretch looks like a loop or has low confidence, and drops text that is made up over silence (sound tags, one character repeated, a stuck repeated line). When the language is left open on a long recording it is chosen from the three loudest stretches, so a quiet start does not decide it.
 - **Live windows.** While a meeting is recorded the phone can send short windows of audio (20 to 60 seconds) to correct its live transcript. A request with interactive priority and a length of at most `window_max_s` seconds (`run --window-max-seconds N`, default 120, shown in `status` and told to phones in the capabilities) is a window. Windows have their own lane: one window is decoded at a time, next to one long recording, so a window never waits behind an hour of audio. They wait for each other in the order they came, a phone may have 2 windows in flight and the node 4 waiting, more are answered "busy", and a window that has waited 20 seconds is answered "busy" too because its words have gone stale. Anything longer than `window_max_s` is not an error, it goes through the long lane like a recording, and windows shorter than 15 seconds are fine. They use their own settings: greedy decoding (the final pass over the whole recording uses the beam of 5 and replaces them), no restart at a hotter temperature, and the language given by the phone. Both lanes use the same loaded speech model, each job with its own decoder state. On a processor there is one lane only, because two decodes at once would only slow each other down.
 - **Prompt.** `prompt` is what was said just before the window. It is given to the model as its previous text (the last 800 characters, at most 200 tokens, cut at a word) so names and spelling carry over. It is never returned as a segment, never logged and not kept. Segment times are from the start of the window whether or not there is a prompt. A window with nothing but a quiet room in it returns no segments at once without using the model. Segments with no sound under them are dropped, as are a scrap of up to 3 words the model was unsure of (what it makes up over noise), and a short scrap that only reads the prompt back.
-- **Processor only.** With `run --cpu`, or a node without a usable graphics card, the large model is slow: about half of real time was measured on a busy 12 thread machine (an 11 second clip took 20 seconds), so an hour of meeting would take hours. Use a graphics card for this job. The node does not measure the speed at start, so `transcribe_x` stays 0 until the first recording.
+- **Processor only.** With `run --cpu` (or `run-on cpu`), or a node without a usable graphics card, the large model is slow: about half of real time was measured on a busy 12 thread machine (an 11 second clip took 20 seconds), so an hour of meeting would take hours. Use a graphics card for this job. The node does not measure the speed at start, so `transcribe_x` stays 0 until the first recording.
 - **Memory.** The speech model takes about 0.8 GB of graphics memory while the node runs. A job adds a decoder state (about 0.3 GB on the card) that is freed when the job ends, so a window running next to a long recording adds a second one. In memory a recording takes 2 bytes per sample while it arrives and 4 bytes per sample (about 230 MB per hour) while it is transcribed, and the node hands the memory back when the job is over.
 - **Stopping.** If the phone closes the connection (or a heartbeat cannot be sent) the node stops whisper at once and frees the audio.
 - **Privacy.** The audio and the text exist only in memory while the job runs. Nothing is written to disk or to the log. `stats` shows the number of jobs, seconds of audio and speed only, with windows counted apart from whole recordings.
@@ -139,14 +145,22 @@ marginalia-node-tray --print                    # prints the menu as text and ex
   - the paired phones with their job counts and when they were last seen, each with Block and Remove (both ask first)
   - the addresses the node can be reached at
   - buttons: Pause or Resume, Show pairing code, Lock new phones or Unlock, Stop node (asks first)
+- **Settings page.** The second tab of the panel (also opened by Settings in the menu):
+  - where each model runs now (Chat, Search, Speech, Photos, each on the card, the processor or a share)
+  - the chat model, E2B or E4B
+  - where the models run: Auto (the node fits them to the free graphics memory), Graphics card, Processor, or Custom (a share of the chat and search models on the card, and the card or the processor for speech and photos). Custom starts from where the models are now
+  - where speakers are told apart (the card needs the GPU build of the speaker helper and cuDNN)
+  - the models, each Ready with its size or Not downloaded with a Get button, and the download in progress with a bar. A download is its own process, so it carries on when the panel closes. After a model the node loads at start, a Restart node button appears
+  - the log folder with an Open folder button
+  - Save and restart, which writes the settings with `chat-model` and `run-on` into the node's own state folder and restarts that same node (the service, or a node started by hand with its own folder, port and name)
 - **Pairing code.** It appears inside the panel in large type with a 5 minute countdown, and is hidden otherwise. It is never in the menu and nothing is copied.
 - **Not running.** The panel shows a friendly empty state with a Start node button.
-- **Right click: a short menu.** The status line, Pause or Resume, Show details (opens the panel), Stop node and Quit tray. When the node is not running: Start node and Quit tray.
+- **Right click: a short menu.** The status line, Pause or Resume, Show details (opens the panel), Settings (opens the panel on its Settings page), Stop node and Quit tray. When the node is not running: Start node and Quit tray.
 - **Start node.** On Linux it starts the `marginalia-node` user service if that is installed, otherwise it runs `marginalia-node run` from next to the tray or from PATH.
 - **How it is built.** The tray and the panel are the same program. The tray starts `marginalia-node-tray --panel` as a second process when the panel is wanted and stops it when it is not, so the tray stays small. The panel polls the node every 1.5 seconds while it is open. On Windows the panel appears bottom right above the taskbar, on X11 top right, and on Wayland the compositor chooses the place because windows cannot position themselves there.
 - **Ubuntu.** The top bar shows the icon through the AppIndicator extension, which ships and is on by default. On a plain GNOME without it: `sudo apt install gnome-shell-extension-appindicator` and log in again. The icon uses the StatusNotifierItem protocol over D-Bus (the `ksni` crate) and the panel uses `egui` with OpenGL, so no GTK or other development packages are needed. The OpenGL, X11 and Wayland libraries are loaded at run time and are on any desktop.
 - Short messages (for example "Could not pause the node") use `notify-send`, so the `libnotify-bin` package must be installed (Ubuntu has it).
-- On Windows it uses the `tray-icon` crate. It builds and runs, and `scripts\windows\setup.ps1` starts it at login. The right-click menu also lets you switch the chat model between E2B and E4B, which restarts the node.
+- On Windows it uses the `tray-icon` crate. It builds and runs, and `scripts\windows\setup.ps1` starts it at login. The chat model and where the models run are on the Settings page, the same as on Linux.
 - It is built on its own and is not part of the default workspace build.
 
 ## Firewall and network

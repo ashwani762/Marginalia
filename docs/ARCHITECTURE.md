@@ -33,7 +33,8 @@ flowchart LR
 | Speech to text | `core/src/engine/whisper.rs`, `vendor/whisper.cpp` | whisper.cpp small model, 8-bit, on the phone's CPU. |
 | Wire protocol and trust | `compute-node/proto/` | Messages, certificates and pinning, pairing, framing, the client helpers. |
 | The node daemon | `compute-node/node/` | Serves chat and search jobs with llama.cpp. Keeps nothing about a job. |
-| Tray icon | `compute-node/tray/` | Top bar (Linux) or system tray (Windows) icon with a small details panel. |
+| Tray icon | `compute-node/tray/` | Top bar (Linux) or system tray (Windows) icon with a small panel: an overview and a Settings page (chat model, where the models run, model downloads, logs). |
+| Models file | `compute-node/models.toml` | The model files the node can use and the graphics memory estimates, read when the node starts. |
 
 ## How a job is routed
 
