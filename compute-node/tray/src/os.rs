@@ -170,7 +170,7 @@ pub fn focus_window(title: &str) -> bool {
 
 /// Asks Windows 11 to put its blurred material behind the window, so the sidebar can be see-through as a sidebar is. Returns Some(true)
 /// when the material is on, Some(false) when this system has none, and None when the window does not exist yet (try again next frame).
-pub fn apply_backdrop(title: &str, caption: [u8; 3]) -> Option<bool> {
+pub fn apply_backdrop(title: &str) -> Option<bool> {
     #[cfg(windows)]
     {
         #[repr(C)]
@@ -197,8 +197,9 @@ pub fn apply_backdrop(title: &str, caption: [u8; 3]) -> Option<bool> {
         let set = |attribute: u32, value: u32| unsafe { DwmSetWindowAttribute(hwnd, attribute, &value as *const u32 as *const core::ffi::c_void, 4) };
         // DWMWA_USE_IMMERSIVE_DARK_MODE, so the material and the title bar are the dark kind.
         set(20, 1);
-        // DWMWA_CAPTION_COLOR, so the title bar is one surface with the page under it.
-        set(35, caption[0] as u32 | (caption[1] as u32) << 8 | (caption[2] as u32) << 16);
+        // DWMWA_WINDOW_CORNER_PREFERENCE round, and DWMWA_BORDER_COLOR a hairline: the window draws its own title bar, so these are its edge.
+        set(33, 2);
+        set(34, 0x0046_4242);
         // DWMWA_SYSTEMBACKDROP_TYPE with DWMSBT_TRANSIENTWINDOW (acrylic). Older Windows says no, and the sidebar stays solid.
         if set(38, 3) != 0 {
             return Some(false);
@@ -209,7 +210,7 @@ pub fn apply_backdrop(title: &str, caption: [u8; 3]) -> Option<bool> {
     }
     #[cfg(not(windows))]
     {
-        let _ = (title, caption);
+        let _ = title;
         Some(false)
     }
 }

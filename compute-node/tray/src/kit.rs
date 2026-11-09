@@ -405,6 +405,195 @@ pub fn divider(ui: &mut Ui, height: f32) {
     ui.painter().rect_filled(rect, CornerRadius::ZERO, HAIR);
 }
 
+/// The window's own close, minimise and zoom buttons. They go grey when the window is not in front, and show what they do when the
+/// pointer is near any of them.
+pub fn window_controls(ui: &mut Ui) {
+    const D: f32 = 12.0;
+    const GAP: f32 = 8.0;
+    let (area, _) = ui.allocate_exact_size(vec2(3.0 * D + 2.0 * GAP, D), Sense::hover());
+    let ctx = ui.ctx().clone();
+    let (focused, maximized, near) = ctx.input(|i| (i.viewport().focused.unwrap_or(true), i.viewport().maximized.unwrap_or(false), i.pointer.hover_pos().is_some_and(|p| area.expand(5.0).contains(p))));
+    let id = ui.scope_id().with("kit-window-controls");
+    let shown = spring(&ctx, id.with("near"), if near { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
+    let awake = spring(&ctx, id.with("focus"), if focused || near { 1.0 } else { 0.0 }, GLIDE.0, 0.18);
+    let colours = [Color32::from_rgb(255, 95, 87), Color32::from_rgb(254, 188, 46), Color32::from_rgb(40, 200, 64)];
+    for (n, base) in colours.into_iter().enumerate() {
+        let c = pos2(area.left() + D / 2.0 + n as f32 * (D + GAP), area.center().y);
+        let hit = Rect::from_center_size(c, vec2(D + GAP, D + 10.0));
+        let resp = ui.interact(hit, id.with(n), Sense::click());
+        let down = spring(&ctx, id.with(("down", n)), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, ANSWER.0, 0.06);
+        let fill = mix(mix(Color32::from_rgb(74, 74, 78), base, awake), Color32::BLACK, down * 0.28);
+        ui.painter().circle_filled(c, D / 2.0, fill);
+        let mark = Color32::from_black_alpha((150.0 * shown) as u8);
+        if shown > 0.02 {
+            let stroke = Stroke::new(1.3, mark);
+            match n {
+                0 => {
+                    ui.painter().line_segment([c + vec2(-2.6, -2.6), c + vec2(2.6, 2.6)], stroke);
+                    ui.painter().line_segment([c + vec2(-2.6, 2.6), c + vec2(2.6, -2.6)], stroke);
+                }
+                1 => {
+                    ui.painter().line_segment([c + vec2(-3.2, 0.0), c + vec2(3.2, 0.0)], stroke);
+                }
+                _ => {
+                    // Two small corners pointing apart.
+                    ui.painter().add(egui::Shape::convex_polygon(vec![c + vec2(-3.0, 1.2), c + vec2(-3.0, -3.0), c + vec2(1.2, -3.0)], mark, Stroke::NONE));
+                    ui.painter().add(egui::Shape::convex_polygon(vec![c + vec2(3.0, -1.2), c + vec2(3.0, 3.0), c + vec2(-1.2, 3.0)], mark, Stroke::NONE));
+                }
+            }
+        }
+        if resp.clicked() {
+            ctx.send_viewport_cmd(match n {
+                0 => egui::ViewportCommand::Close,
+                1 => egui::ViewportCommand::Minimized(true),
+                _ => egui::ViewportCommand::Maximized(!maximized),
+            });
+        }
+    }
+}
+
+/// Makes `rect` move the window when dragged and zoom it when double clicked. Call it before what is drawn over it: whatever comes
+/// later and can be clicked takes the pointer first.
+pub fn drag_region(ui: &mut Ui, rect: Rect, name: &str) {
+    let resp = ui.interact(rect, ui.scope_id().with(("kit-drag", name)), Sense::click_and_drag());
+    let ctx = ui.ctx().clone();
+    if resp.double_clicked() {
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    } else if resp.drag_started_by(egui::PointerButton::Primary) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+}
+
+/// Which edge or corner of `window` the point is on, if any.
+pub fn edge_at(window: Rect, p: egui::Pos2) -> Option<egui::ResizeDirection> {
+    use egui::ResizeDirection as D;
+    const EDGE: f32 = 5.0;
+    const CORNER: f32 = 14.0;
+    if !window.expand(1.0).contains(p) {
+        return None;
+    }
+    let (l, r, t, b) = (p.x - window.left(), window.right() - p.x, p.y - window.top(), window.bottom() - p.y);
+    let near_side = l < CORNER || r < CORNER;
+    let near_end = t < CORNER || b < CORNER;
+    Some(match () {
+        _ if t < EDGE && l < CORNER || l < EDGE && t < CORNER => D::NorthWest,
+        _ if t < EDGE && r < CORNER || r < EDGE && t < CORNER => D::NorthEast,
+        _ if b < EDGE && l < CORNER || l < EDGE && b < CORNER => D::SouthWest,
+        _ if b < EDGE && r < CORNER || r < EDGE && b < CORNER => D::SouthEast,
+        _ if t < EDGE && !near_side => D::North,
+        _ if b < EDGE && !near_side => D::South,
+        _ if l < EDGE && !near_end => D::West,
+        _ if r < EDGE && !near_end => D::East,
+        _ => return None,
+    })
+}
+
+/// Resizing from the edges of a window with no frame of its own: the pointer shows it, and a press starts it.
+pub fn resize_edges(ctx: &egui::Context, window: Rect) {
+    use egui::{CursorIcon as C, ResizeDirection as D};
+    let (pos, pressed, maximized) = ctx.input(|i| (i.pointer.latest_pos(), i.pointer.primary_pressed(), i.viewport().maximized.unwrap_or(false)));
+    let (Some(p), false) = (pos, maximized) else { return };
+    let Some(dir) = edge_at(window, p) else { return };
+    ctx.set_cursor_icon(match dir {
+        D::North | D::South => C::ResizeVertical,
+        D::East | D::West => C::ResizeHorizontal,
+        D::NorthWest | D::SouthEast => C::ResizeNwSe,
+        D::NorthEast | D::SouthWest => C::ResizeNeSw,
+    });
+    if pressed {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+    }
+}
+
+/// The waiting sign: spokes round a centre, the brightness running round them.
+pub fn spinner(ui: &mut Ui, size: f32, colour: Color32) {
+    const SPOKES: usize = 12;
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let t = ui.input(|i| i.time);
+    let head = ((t * 1.1).fract() * SPOKES as f64) as usize;
+    let c = rect.center();
+    let (inner, outer) = (size * 0.27, size * 0.5);
+    for n in 0..SPOKES {
+        let (s, co) = (n as f32 * std::f32::consts::TAU / SPOKES as f32).sin_cos();
+        let behind = (head + SPOKES - n) % SPOKES;
+        let a = 1.0 - behind as f32 / SPOKES as f32;
+        ui.painter().line_segment([c + vec2(s, -co) * inner, c + vec2(s, -co) * outer], Stroke::new(size * 0.09, colour.gamma_multiply(0.18 + 0.82 * a)));
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(40));
+}
+
+/// A round picture with the first letter of a name, for a phone.
+pub fn avatar(ui: &mut Ui, name: &str, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    // The same name gets the same colour each time.
+    let hues = [ACCENT, BLUE, Color32::from_rgb(52, 199, 190), Color32::from_rgb(255, 130, 90), PURPLE, Color32::from_rgb(90, 190, 110)];
+    let pick = name.bytes().fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize)) % hues.len();
+    ui.painter().circle_filled(rect.center(), size / 2.0, mix(GROUP, hues[pick], 0.75));
+    let letter = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into());
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, letter, semibold(size * 0.45), Color32::WHITE);
+}
+
+/// A tick.
+pub fn check(ui: &mut Ui, colour: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+    let c = rect.center();
+    ui.painter().add(egui::Shape::line(vec![c + vec2(-4.5, 0.5), c + vec2(-1.2, 3.8), c + vec2(4.8, -3.6)], Stroke::new(1.8, colour)));
+}
+
+/// One character in its own tile, for a code to be read off the screen and typed.
+pub fn code_tile(ui: &mut Ui, ch: char) {
+    let (rect, _) = ui.allocate_exact_size(vec2(44.0, 56.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(10), Color32::from_rgb(30, 30, 33));
+    sheen(ui, rect, 10.0, 0.8);
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, ch, semibold(28.0), TEXT);
+}
+
+/// A ring that empties as time runs out, drawn from the top going clockwise.
+pub fn ring(ui: &mut Ui, size: f32, fraction: f32, colour: Color32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let c = rect.center();
+    let r = size / 2.0 - 1.5;
+    ui.painter().circle_stroke(c, r, Stroke::new(2.4, Color32::from_white_alpha(22)));
+    let f = clamp01(fraction);
+    let n = ((f * 64.0) as usize).max(2);
+    let pts: Vec<_> = (0..=n).map(|k| {
+        let a = k as f32 / n as f32 * f * std::f32::consts::TAU;
+        c + vec2(a.sin(), -a.cos()) * r
+    }).collect();
+    ui.painter().add(egui::Shape::line(pts, Stroke::new(2.4, colour)));
+}
+
+/// A slider in steps of `step` from 0 to 100. The fill follows the pointer exactly, the knob grows while held. True when it changed.
+pub fn slider(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, width: f32, value: &mut u8, step: u8) -> bool {
+    let id = ui.scope_id().with(("kit-slider", id));
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 22.0), Sense::click_and_drag());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let ctx = ui.ctx().clone();
+    let mut changed = false;
+    let (left, right) = (rect.left() + 9.0, rect.right() - 9.0);
+    if let Some(p) = resp.interact_pointer_pos() {
+        let raw = clamp01((p.x - left) / (right - left)) * 100.0;
+        let v = ((raw / step as f32).round() as u8).saturating_mul(step).min(100);
+        if v != *value {
+            *value = v;
+            changed = true;
+        }
+    }
+    let held = spring(&ctx, id.with("p"), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
+    let f = spring(&ctx, id, *value as f32 / 100.0, GLIDE.0, 0.12);
+    let y = rect.center().y;
+    let x = lerp(left, right, f);
+    let track = Rect::from_min_max(pos2(left - 2.0, y - 2.0), pos2(right + 2.0, y + 2.0));
+    ui.painter().rect_filled(track, CornerRadius::same(2), Color32::from_white_alpha(26));
+    ui.painter().rect_filled(Rect::from_min_max(track.left_top(), pos2(x, track.bottom())), CornerRadius::same(2), ACCENT);
+    let r = 8.5 + held * 1.5;
+    ui.painter().circle_filled(pos2(x, y + 0.8), r + 0.4, Color32::from_black_alpha(60));
+    ui.painter().circle_filled(pos2(x, y), r, Color32::WHITE);
+    focus_ring(ui, &resp, rect, 6);
+    changed
+}
+
 /// A small coloured label.
 pub fn pill(ui: &mut Ui, text: &str, colour: Color32) {
     let font = FontId::proportional(12.0);
@@ -442,6 +631,21 @@ mod tests {
         assert_eq!(seen[0], 0.0, "no motion on the first frame");
         assert!(seen[10] > 0.0 && seen[10] < 1.0, "moving: {}", seen[10]);
         assert!((seen[89] - 1.0).abs() < 0.002, "arrived: {}", seen[89]);
+    }
+
+    #[test]
+    fn the_edges_of_a_window_resize_it_and_its_middle_does_not() {
+        use egui::ResizeDirection as D;
+        let w = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+        assert_eq!(edge_at(w, pos2(400.0, 300.0)), None);
+        assert_eq!(edge_at(w, pos2(2.0, 300.0)), Some(D::West));
+        assert_eq!(edge_at(w, pos2(798.0, 300.0)), Some(D::East));
+        assert_eq!(edge_at(w, pos2(400.0, 2.0)), Some(D::North));
+        assert_eq!(edge_at(w, pos2(400.0, 598.0)), Some(D::South));
+        assert_eq!(edge_at(w, pos2(2.0, 2.0)), Some(D::NorthWest));
+        assert_eq!(edge_at(w, pos2(798.0, 598.0)), Some(D::SouthEast));
+        assert_eq!(edge_at(w, pos2(10.0, 3.0)), Some(D::NorthWest), "the corner is easy to hit along both edges");
+        assert_eq!(edge_at(w, pos2(900.0, 300.0)), None, "outside the window");
     }
 
     #[test]

@@ -44,7 +44,6 @@ const ORANGE: Color32 = Color32::from_rgb(255, 150, 80);
 const RED: Color32 = kit::RED;
 /// The sidebar's icon on the selected row: the indigo, lightened to read on its own tint.
 const ACCENT_TEXT: Color32 = Color32::from_rgb(176, 166, 255);
-const GREEN_BTN: Color32 = Color32::from_rgb(38, 120, 66);
 
 /// The pages of the window, in the order of the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,6 +219,10 @@ struct Panel {
     page_in: Spring,
     /// Which way the last move through the sidebar went: 1 down, -1 up. The new page comes from that side.
     page_dir: f32,
+    /// The last message shown, kept so its capsule can leave with its words still on it.
+    toast: String,
+    /// The address just copied, and when, so its button can say so for a moment.
+    copied: Option<(String, Instant)>,
     /// The Marginalia mark, for the top of the sidebar.
     logo: Option<egui::TextureHandle>,
     /// The system's blurred material behind the window: unknown until the window exists.
@@ -261,7 +264,7 @@ impl Panel {
             let h = home.clone();
             std::thread::spawn(move || worker(port, ctx, tx, cmd_rx, h));
         }
-        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, pending: Vec::new(), page, nav: Spring::new(page.index() as f32, 1.0, 0.26), page_in: Spring::new(1.0, 1.0, 0.24), page_dir: 1.0, logo: None, backdrop: None, reduced: crate::os::reduced_motion(), theme_set: false, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
+        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, pending: Vec::new(), page, nav: Spring::new(page.index() as f32, 1.0, 0.26), page_in: Spring::new(1.0, 1.0, 0.24), page_dir: 1.0, toast: String::new(), copied: None, logo: None, backdrop: None, reduced: crate::os::reduced_motion(), theme_set: false, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
     }
 
     fn send(&self, c: Cmd) {
@@ -323,7 +326,7 @@ impl Panel {
             ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
         }
         if self.backdrop.is_none() {
-            self.backdrop = crate::os::apply_backdrop("Marginalia node", [BG.r(), BG.g(), BG.b()]);
+            self.backdrop = crate::os::apply_backdrop("Marginalia node");
         }
     }
 
@@ -350,6 +353,12 @@ impl Panel {
 
     /// Moves the springs on, and says whether any is still moving.
     fn animate(&mut self, ctx: &egui::Context) -> bool {
+        // Ctrl and a number goes straight to that page.
+        for (n, key) in [egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4].into_iter().enumerate() {
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(key)) {
+                self.go(Page::ALL[n]);
+            }
+        }
         let dt = ctx.input(|i| i.stable_dt);
         self.nav.set_target(self.page.index() as f32);
         self.nav.step(dt, self.reduced);
@@ -387,21 +396,6 @@ fn heading(ui: &mut Ui, text: &str) {
 
 fn dim(text: impl Into<String>) -> RichText {
     RichText::new(text.into()).size(12.0).color(DIM)
-}
-
-/// Every button shows a hand when the pointer is over it, and says what it does when it rests there.
-fn finish(r: egui::Response, hint: &str) -> bool {
-    let r = r.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let r = if hint.is_empty() { r } else { r.on_hover_text(hint) };
-    r.clicked()
-}
-
-fn small_button(ui: &mut Ui, text: &str, hint: &str) -> bool {
-    finish(ui.add(egui::Button::new(RichText::new(text).size(12.0)).min_size(Vec2::new(0.0, 22.0))), hint)
-}
-
-fn tinted_button(ui: &mut Ui, text: &str, fill: Color32, hint: &str) -> bool {
-    finish(ui.add(egui::Button::new(RichText::new(text).size(12.0).color(TEXT)).fill(fill).min_size(Vec2::new(0.0, 22.0))), hint)
 }
 
 fn dot(ui: &mut Ui, colour: Color32, radius: f32) {
@@ -442,9 +436,11 @@ impl Panel {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     kit::figure(ui, 78.0, &model::uptime_short(i.uptime_s), "up for");
                     kit::divider(ui, 34.0);
-                    kit::figure(ui, 78.0, &i.phones.len().to_string(), if i.phones.len() == 1 { "phone" } else { "phones" });
+                    let phones = kit::spring(ui.ctx(), egui::Id::NULL.with("count-phones"), i.phones.len() as f32, 1.0, 0.5).round() as u64;
+                    kit::figure(ui, 78.0, &phones.to_string(), if i.phones.len() == 1 { "phone" } else { "phones" });
                     kit::divider(ui, 34.0);
-                    kit::figure(ui, 78.0, &i.served.to_string(), if i.served == 1 { "job served" } else { "jobs served" });
+                    let served = kit::spring(ui.ctx(), egui::Id::NULL.with("count-served"), i.served as f32, 1.0, 0.5).round() as u64;
+                    kit::figure(ui, 78.0, &served.to_string(), if i.served == 1 { "job served" } else { "jobs served" });
                 });
             });
         });
@@ -506,8 +502,8 @@ impl Panel {
         let Some(last) = h.latest().cloned() else { return };
         let bands = h.busy_spans();
         let band = BLUE.gamma_multiply(0.13);
-        let grid = Color32::from_white_alpha(14);
-        let back = Color32::from_rgb(26, 28, 34);
+        let grid = Color32::from_white_alpha(8);
+        let back = Color32::from_rgb(33, 33, 36);
         // A line turns amber and then red as the thing it shows fills up.
         let by_load = |base: Color32, fraction: f32| match usage::load_of(fraction) {
             Load::Calm => base,
@@ -526,12 +522,22 @@ impl Panel {
                 });
             });
         };
-        let size = Vec2::new(ui.available_width(), 30.0);
+        let peak = h.readings.iter().map(|r| r.net_rx.max(r.net_tx) as f32).fold(0.0, f32::max);
+        let top = usage::nice_max(peak, 20_000.0);
+        // Two across, so the four fit on one screen.
+        let gap = 18.0;
+        let col = (ui.available_width() - gap) / 2.0;
+        let size = Vec2::new(col, 42.0);
         let hover_text = |t: f64, parts: Vec<String>| {
             let ago = ((now_ms - charts::DELAY_MS - t) / 1000.0).max(0.0);
             format!("{ago:.0} s ago: {}", parts.join(", "))
         };
 
+        ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.vertical(|ui| {
+        ui.set_width(col);
+        ui.spacing_mut().item_spacing.x = 6.0;
         // Processor
         let cpu = smooth("cpu", last.cpu);
         head(ui, by_load(BLUE, last.cpu / 100.0), "Processor", format!("{cpu:.0}%"), format!("this node {:.0}%", smooth("node_cpu", last.node_cpu)));
@@ -544,8 +550,11 @@ impl Panel {
                 ui.label(hover_text(t, vec![format!("processor {:.0}%", at(&cpu_l)), format!("this node {:.0}%", at(&lines[1].points))]));
             });
         }
-        ui.add_space(5.0);
-
+        });
+        ui.add_space(gap);
+        ui.vertical(|ui| {
+        ui.set_width(col);
+        ui.spacing_mut().item_spacing.x = 6.0;
         // Memory
         head(ui, by_load(VIOLET, last.mem_fraction()), "Memory", format!("{} of {}", usage::size_text(last.mem_used), usage::size_text(last.mem_total)), format!("this node {}", usage::size_text(last.node_rss)));
         let (mem_l, node_m) = (h.series(|r| Some(r.mem_fraction())), h.series(|r| Some(r.node_mem_fraction())));
@@ -557,10 +566,17 @@ impl Panel {
                 ui.label(hover_text(t, vec![format!("memory {}", usage::size_text((usage::value_at(&mem_l, t).unwrap_or(0.0) * total) as u64)), format!("this node {}", usage::size_text((usage::value_at(&lines[1].points, t).unwrap_or(0.0) * total) as u64))]));
             });
         }
-        ui.add_space(5.0);
+        });
+        });
+        ui.add_space(8.0);
 
+        ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
         // Graphics card, when the node can read one
         if h.has_gpu() {
+            ui.vertical(|ui| {
+            ui.set_width(col);
+            ui.spacing_mut().item_spacing.x = 6.0;
             let gpu_pct = last.gpu.unwrap_or(0.0);
             let name = h.gpu_name.clone().unwrap_or_else(|| "Graphics card".into());
             let vram = match (last.vram_used, last.vram_total) {
@@ -577,12 +593,14 @@ impl Panel {
                     ui.label(hover_text(t, vec![name.clone(), format!("busy {:.0}%", usage::value_at(&gpu_l, t).unwrap_or(0.0) * 100.0), format!("memory {:.0}%", usage::value_at(&lines[1].points, t).unwrap_or(0.0) * 100.0)]));
                     });
             }
-            ui.add_space(5.0);
+            });
+            ui.add_space(gap);
         }
 
+        ui.vertical(|ui| {
+        ui.set_width(col);
+        ui.spacing_mut().item_spacing.x = 6.0;
         // Network, both ways on one scale that grows and shrinks with the traffic
-        let peak = h.readings.iter().map(|r| r.net_rx.max(r.net_tx) as f32).fold(0.0, f32::max);
-        let top = usage::nice_max(peak, 20_000.0);
         head(ui, TEAL, "Network", format!("in {}", usage::rate_text(smooth("rx", last.net_rx as f32))), format!("out {}", usage::rate_text(smooth("tx", last.net_tx as f32))));
         let (rx_l, tx_l) = (h.series(|r| Some(r.net_rx as f32 / top)), h.series(|r| Some(r.net_tx as f32 / top)));
         let lines = [Line { points: rx_l.clone(), colour: TEAL, fill: true, width: 1.6, head: true }, Line { points: tx_l, colour: ORANGE, fill: false, width: 1.3, head: true }];
@@ -592,6 +610,8 @@ impl Panel {
                 ui.label(hover_text(t, vec![format!("in {}", usage::rate_text(usage::value_at(&rx_l, t).unwrap_or(0.0) * top)), format!("out {}", usage::rate_text(usage::value_at(&lines[1].points, t).unwrap_or(0.0) * top))]));
                 });
         }
+        });
+        });
         ui.horizontal(|ui| {
             ui.label(RichText::new("2 min ago").size(10.0).color(DIM));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -649,22 +669,34 @@ impl Panel {
         if asking.is_empty() {
             return;
         }
-        card_with(ui, Stroke::new(1.0, AMBER.gamma_multiply(0.7)), |ui| {
-            ui.label(RichText::new(if asking.len() == 1 { "A PHONE WANTS TO JOIN" } else { "PHONES WANT TO JOIN" }).size(10.5).color(AMBER));
+        let mut answer: Option<(&'static str, String)> = None;
+        kit::heading(ui, if asking.len() == 1 { "Wants to join" } else { "Want to join" });
+        kit::group(ui, |ui, g| {
             for w in asking {
-                ui.horizontal(|ui| {
+                g.row(ui, kit::ROW_TALL, |ui| {
+                    kit::avatar(ui, &w.name, 32.0);
+                    ui.add_space(6.0);
+                    let width = (ui.available_width() - 180.0).max(100.0);
+                    kit::text_block(ui, width, kit::ROW_TALL, kit::NAME_H + kit::LINE_H, |ui| {
+                        truncated(ui, RichText::new(&w.name).size(13.5).color(TEXT));
+                        ui.label(RichText::new("Asking to use this node").size(12.0).color(AMBER));
+                    });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if small_button(ui, "Deny", "Turn this phone down") {
-                            self.send(Cmd::Phone("deny", w.id.clone()));
+                        ui.add_space(16.0);
+                        if kit::button(ui, ("allow", &w.id), "Allow", kit::Kind::Primary, "Let this phone use the node") {
+                            answer = Some(("approve", w.id.clone()));
                         }
-                        if tinted_button(ui, "Allow", GREEN_BTN, "Let this phone use the node") {
-                            self.send(Cmd::Phone("approve", w.id.clone()));
+                        ui.add_space(2.0);
+                        if kit::button(ui, ("deny", &w.id), "Deny", kit::Kind::Plain, "Turn this phone down") {
+                            answer = Some(("deny", w.id.clone()));
                         }
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| truncated(ui, RichText::new(&w.name).size(13.0).family(kit::semibold_family()).color(TEXT)));
                     });
                 });
             }
         });
+        if let Some((what, id)) = answer {
+            self.send(Cmd::Phone(what, id));
+        }
     }
 
     fn phones(&mut self, ui: &mut Ui, phones: &[Phone]) {
@@ -687,6 +719,8 @@ impl Panel {
                     _ => None,
                 };
                 g.row(ui, kit::ROW_TALL, |ui| {
+                    kit::avatar(ui, &p.name, 32.0);
+                    ui.add_space(6.0);
                     let width = (ui.available_width() - 220.0).max(120.0);
                     kit::text_block(ui, width, kit::ROW_TALL, kit::NAME_H + kit::LINE_H, |ui| {
                         truncated(ui, RichText::new(&p.name).size(13.5).color(TEXT));
@@ -699,7 +733,7 @@ impl Panel {
                         ui.add_space(14.0);
                         match confirming {
                             Some(what) => {
-                                if kit::button(ui, ("yes", &p.id), "Yes", kit::Kind::Danger, "") {
+                                if kit::button(ui, ("yes", &p.id), "Yes", kit::Kind::Destructive, "") {
                                     yes = Some((p.id.clone(), what));
                                 }
                                 if kit::button(ui, ("no", &p.id), "No", kit::Kind::Plain, "") {
@@ -775,8 +809,10 @@ impl Panel {
         });
     }
 
-    fn addresses(&self, ui: &mut Ui, i: &Info) {
+    fn addresses(&mut self, ui: &mut Ui, i: &Info) {
         kit::heading(ui, "Reach it at");
+        let just_copied = self.copied.as_ref().filter(|(_, t)| t.elapsed() < Duration::from_millis(1500)).map(|(a, _)| a.clone());
+        let mut copied = None;
         kit::group(ui, |ui, g| {
             if i.addresses.is_empty() {
                 g.row(ui, kit::ROW, |ui| {
@@ -784,11 +820,19 @@ impl Panel {
                 });
             }
             for a in &i.addresses {
-                g.setting(ui, "Address", None, |ui| {
-                    ui.label(RichText::new(a).font(FontId::monospace(12.5)).color(TEXT));
+                g.setting(ui, a, None, |ui| {
+                    let done = just_copied.as_deref() == Some(a.as_str());
+                    if kit::button(ui, ("copy", a), if done { "Copied" } else { "Copy" }, kit::Kind::Plain, "Copy this address, to add the node on a phone by hand") {
+                        ui.ctx().copy_text(a.clone());
+                        copied = Some(a.clone());
+                    }
                 });
             }
         });
+        if let Some(a) = copied {
+            self.copied = Some((a, Instant::now()));
+            ui.ctx().request_repaint_after(Duration::from_millis(1600));
+        }
     }
 
     /// What the node uses now, as the Settings page shows it.
@@ -863,11 +907,7 @@ impl Panel {
                     g.setting(ui, label, Some(hint), |ui| {
                         let v = if which == 0 { &mut run.chat } else { &mut run.search };
                         ui.label(RichText::new(match *v { 0 => "processor".to_string(), 100 => "card".to_string(), p => format!("{p}% on card") }).size(12.5).color(DIM));
-                        let mut x = *v as f32;
-                        ui.spacing_mut().slider_width = 150.0;
-                        if ui.add(egui::Slider::new(&mut x, 0.0..=100.0).step_by(5.0).show_value(false)).changed() {
-                            *v = x as u8;
-                        }
+                        kit::slider(ui, ("share", which), 170.0, v, 5);
                     });
                 }
                 for (label, which) in [("Speech", 0), ("Photos", 1)] {
@@ -923,7 +963,8 @@ impl Panel {
                 let busy = running && self.fetching.as_ref().map(|(l, _)| l == &it.label).unwrap_or(false);
                 g.setting(ui, &it.label, None, |ui| {
                     if it.ready {
-                        kit::pill(ui, &format!("Ready  {}", model::size_text(it.bytes)), GREEN);
+                        kit::check(ui, GREEN);
+                        ui.label(RichText::new(model::size_text(it.bytes)).size(12.5).color(DIM));
                     } else if busy {
                         kit::pill(ui, "Downloading", BLUE);
                     } else {
@@ -1029,37 +1070,55 @@ impl Panel {
         }
     }
 
+    /// The code to type on a new phone: each character on its own tile so it reads at a glance, and a ring that empties as it runs out.
     fn pairing_card(&mut self, ui: &mut Ui) {
         let Some((p, until)) = &self.pairing else { return };
-        let left = until.saturating_duration_since(Instant::now()).as_secs();
-        if left == 0 {
+        let left = until.saturating_duration_since(Instant::now()).as_secs_f32();
+        if left <= 0.0 {
             self.pairing = None;
             return;
         }
-        let (code, addresses) = (p.code.clone(), p.addresses.clone());
+        let (code, addresses, minutes) = (p.code.clone(), p.addresses.clone(), p.minutes);
         let mut hide = false;
+        ui.add_space(6.0);
         card(ui, |ui| {
             ui.horizontal(|ui| {
-                heading(ui, "PAIRING CODE");
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.set_max_width(ui.available_width() - 190.0);
+                    ui.label(RichText::new("Type this code on the phone").font(kit::semibold(14.0)).color(TEXT));
+                    ui.label(RichText::new("Settings, Compute nodes, Add a compute node").size(12.0).color(DIM));
+                });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if small_button(ui, "Hide", "Hide the code") {
+                    if kit::button(ui, "hide-code", "Done", kit::Kind::Plain, "Hide the code") {
                         hide = true;
                     }
-                    ui.label(RichText::new(format!("valid for {}", model::countdown(left))).size(12.0).color(AMBER));
+                    ui.add_space(6.0);
+                    kit::ring(ui, 20.0, left / (minutes.max(1) * 60) as f32, if left < 30.0 { AMBER } else { kit::ACCENT });
+                    ui.label(RichText::new(model::countdown(left as u64)).size(12.5).color(DIM));
                 });
             });
+            ui.add_space(12.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new(code).font(FontId::monospace(32.0)).extra_letter_spacing(6.0).color(TEXT));
+                let n = code.chars().count() as f32;
+                let total = n * 44.0 + (n - 1.0) * 6.0;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+                    for ch in code.chars() {
+                        kit::code_tile(ui, ch);
+                    }
+                });
             });
-            ui.label(dim("On the phone open Settings, Compute nodes, Add a compute node, then type this code."));
             if let Some(a) = addresses.first() {
-                ui.label(dim(format!("Or add it by address: {a}")));
+                ui.add_space(10.0);
+                ui.vertical_centered(|ui| ui.label(RichText::new(format!("Or add it by address, {a}")).size(12.0).color(DIM)));
             }
         });
         if hide {
             self.pairing = None;
         }
-        ui.ctx().request_repaint_after(Duration::from_millis(250));
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
 
     /// The sidebar: the mark with the node's state on it as a badge, as on the tray icon, the node's name, then the pages, the selected one
@@ -1072,6 +1131,14 @@ impl Panel {
             },
             None => ("Marginalia node".to_string(), "Looking for it".to_string(), kit::FAINT),
         };
+        // Everything in the sidebar that is not a control moves the window.
+        kit::drag_region(ui, ui.max_rect().expand(14.0), "sidebar");
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            kit::window_controls(ui);
+        });
+        ui.add_space(16.0);
         let logo = self.logo.get_or_insert_with(|| ui.ctx().load_texture("mark", egui::ColorImage::from_rgba_unmultiplied([96, 96], &crate::glyph::mark_rgba(96)), egui::TextureOptions::LINEAR)).id();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
@@ -1193,18 +1260,55 @@ impl Panel {
         }
     }
 
+    /// The node is not there: the mark, one sentence, and the one thing to do about it.
     fn empty_state(&mut self, ui: &mut Ui, starting: bool) {
-        ui.add_space((ui.available_height() * 0.26).max(40.0));
+        ui.add_space((ui.available_height() * 0.22).max(30.0));
         ui.vertical_centered(|ui| {
-            dot(ui, kit::FAINT, 7.0);
-            ui.add_space(10.0);
-            ui.label(RichText::new(if starting { "Starting the node" } else { "The node is not running" }).font(kit::semibold(20.0)).extra_letter_spacing(-0.2).color(TEXT));
-            ui.add_space(4.0);
-            ui.label(dim(if starting { "It is loading its models. This can take a minute." } else { "Your phone works on its own until it is back." }));
-            ui.add_space(14.0);
-            if !starting && kit::button(ui, "start", "Start node", kit::Kind::Primary, "Start marginalia-node on this machine") {
+            if let Some(t) = &self.logo {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(72.0), Sense::hover());
+                let tint = if starting { Color32::WHITE } else { Color32::from_white_alpha(120) };
+                ui.painter().image(t.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
+            }
+            ui.add_space(16.0);
+            ui.label(kit::title(if starting { "Starting the node" } else { "The node is not running" }, 22.0));
+            ui.add_space(2.0);
+            ui.label(RichText::new(if starting { "It is loading its models. This can take a minute." } else { "Your phone works on its own until it is back." }).size(13.0).color(DIM));
+            ui.add_space(18.0);
+            if starting {
+                kit::spinner(ui, 22.0, kit::SOFT);
+            } else if kit::button(ui, "start", "Start node", kit::Kind::Primary, "Start marginalia-node on this machine") {
                 self.send(Cmd::Click(Action::Start));
             }
+        });
+    }
+
+    /// A message that floats down over the page for a few seconds, and goes back up with its words still on it.
+    fn toast(&mut self, ctx: &egui::Context, area: egui::Rect) {
+        if let Some((n, _)) = &self.notice {
+            self.toast = n.clone();
+        }
+        let k = kit::spring(ctx, egui::Id::NULL.with("toast"), if self.notice.is_some() { 1.0 } else { 0.0 }, 1.0, 0.32);
+        if k < 0.01 || self.toast.is_empty() {
+            return;
+        }
+        let pos = egui::pos2(area.center().x, area.top() + 14.0 - (1.0 - k) * 70.0);
+        let text = self.toast.clone();
+        egui::Area::new(egui::Id::NULL.with("toast-area")).order(egui::Order::Foreground).pivot(egui::Align2::CENTER_TOP).fixed_pos(pos).show(ctx, |ui| {
+            ui.set_opacity(clamp01(k * 1.5));
+            ui.set_max_width((area.width() - 60.0).min(520.0));
+            let r = Frame::NONE
+                .fill(kit::RAISED)
+                .corner_radius(CornerRadius::same(14))
+                .stroke(Stroke::new(1.0, Color32::from_white_alpha(14)))
+                .shadow(egui::epaint::Shadow { offset: [0, 8], blur: 26, spread: 0, color: Color32::from_black_alpha(130) })
+                .inner_margin(Margin::symmetric(16, 11))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        dot(ui, RED, 4.0);
+                        ui.add(egui::Label::new(RichText::new(text).size(13.0).color(TEXT)).wrap());
+                    });
+                });
+            kit::sheen(ui, r.response.rect, 14.0, 1.0);
         });
     }
 }
@@ -1222,6 +1326,8 @@ impl eframe::App for Panel {
             self.notice = None;
         }
         let moving = self.animate(&ctx);
+        let window = ui.max_rect();
+        let radius = if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) { 0 } else { 8 };
 
         let view = self.view.clone();
         let info = match &view {
@@ -1231,35 +1337,31 @@ impl eframe::App for Panel {
 
         // See-through where the system has a material to show behind it, solid where it does not.
         let sidebar = if self.backdrop == Some(true) { Color32::from_rgba_unmultiplied(18, 18, 20, 205) } else { SIDEBAR };
-        egui::Panel::left("nav").exact_size(SIDEBAR_W).resizable(false).frame(Frame::NONE.fill(sidebar).inner_margin(Margin { left: 12, right: 12, top: 14, bottom: 12 })).show(ui, |ui| {
+        egui::Panel::left("nav").exact_size(SIDEBAR_W).resizable(false).show_separator_line(false).frame(Frame::NONE.fill(sidebar).corner_radius(CornerRadius { nw: radius, sw: radius, ne: 0, se: 0 }).inner_margin(Margin { left: 12, right: 12, top: 14, bottom: 12 })).show(ui, |ui| {
             self.sidebar(ui, &view, info.as_ref());
         });
 
         let mut content = egui::Rect::NOTHING;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             content = ui.max_rect();
-            ui.painter().rect_filled(content, 0.0, BG);
+            ui.painter().rect_filled(content, CornerRadius { nw: 0, sw: 0, ne: radius, se: radius }, BG);
+            // The strip along the top moves the window, where there is no title bar to take hold of.
+            kit::drag_region(ui, egui::Rect::from_min_size(content.min, Vec2::new(content.width(), 22.0)), "top");
             // The page comes in from the side it was moved towards: a short fade and a few points of travel.
             let t = clamp01(self.page_in.value() * 1.3);
             let travel = (1.0 - clamp01(self.page_in.value())) * 12.0 * self.page_dir;
             ui.set_opacity(t);
-            Frame::NONE.inner_margin(Margin { left: 26, right: 12, top: 8, bottom: 0 }).show(ui, |ui| {
+            Frame::NONE.inner_margin(Margin { left: 26, right: 12, top: 12, bottom: 0 }).show(ui, |ui| {
                 ui.add_space((14.0 + travel).max(0.0));
                 match (&view, &info) {
                     (None, _) => {
-                        ui.label(dim("Looking for the node"));
+                        ui.add_space((ui.available_height() * 0.36).max(30.0));
+                        ui.vertical_centered(|ui| kit::spinner(ui, 22.0, kit::SOFT));
                     }
                     (Some(v), None) => {
                         self.empty_state(ui, v.starting);
-                        if let Some((n, _)) = &self.notice {
-                            ui.add_space(12.0);
-                            ui.vertical_centered(|ui| ui.label(RichText::new(n).size(12.5).color(RED)));
-                        }
                     }
                     (Some(v), Some(i)) => {
-                        if let Some((n, _)) = &self.notice {
-                            ui.label(RichText::new(n).size(12.5).color(RED));
-                        }
                         let state = v.state();
                         let out = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                             // The column keeps its width in a wide window and stays in the middle of it, with the scroll bar outside.
@@ -1291,6 +1393,8 @@ impl eframe::App for Panel {
         if let (Page::Settings, Some(i)) = (self.page, &info) {
             self.save_capsule(&ctx, content, i);
         }
+        self.toast(&ctx, content);
+        kit::resize_edges(&ctx, window);
 
         if moving || self.nav.moving() {
             ctx.request_repaint();
@@ -1333,7 +1437,14 @@ impl Panel {
                 self.peers(ui, i);
             }
             Page::Models => {
-                self.page_title(ui, "Models", "The files the node uses, and what is still to download");
+                let line = match &self.models {
+                    Some((items, _)) => match items.iter().filter(|m| !m.ready).count() {
+                        0 => "Every file the node can use is here".to_string(),
+                        n => format!("{n} still to download"),
+                    },
+                    None => String::new(),
+                };
+                self.page_title(ui, "Models", &line);
                 self.models_section(ui);
             }
             Page::Settings => {
@@ -1363,6 +1474,9 @@ pub fn run(port: u16, page: Page) {
         .with_min_inner_size(WINDOW_MIN)
         // See-through only where the sidebar asks for it. Everything else is painted solid.
         .with_transparent(true)
+        // The window has its own title bar, drawn in the sidebar.
+        .with_decorations(false)
+        .with_resizable(true)
         .with_icon(egui::IconData { rgba, width: w, height: h });
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     let result = eframe::run_native(
@@ -1372,6 +1486,14 @@ pub fn run(port: u16, page: Page) {
             let mut style = (*cc.egui_ctx.global_style()).clone();
             style.visuals = egui::Visuals::dark();
             style.visuals.panel_fill = BG;
+            // Tooltips, the scroll bar and text selection in the same materials as everything else.
+            style.visuals.window_fill = kit::RAISED;
+            style.visuals.window_corner_radius = CornerRadius::same(8);
+            style.visuals.window_stroke = Stroke::new(1.0, Color32::from_white_alpha(14));
+            style.visuals.popup_shadow = egui::epaint::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(110) };
+            style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, kit::SOFT);
+            style.visuals.selection.bg_fill = kit::ACCENT;
+            style.spacing.scroll = egui::style::ScrollStyle::floating();
             style.visuals.widgets.inactive.weak_bg_fill = TRACK;
             style.visuals.widgets.inactive.corner_radius = CornerRadius::same(6);
             style.visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
