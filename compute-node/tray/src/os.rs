@@ -168,6 +168,16 @@ pub fn focus_window(title: &str) -> bool {
     }
 }
 
+/// True when a node program is running on this machine, whatever started it (the tray, the login task, a terminal). A node takes a
+/// minute to load its models before its control port answers, and this is how that time is told from no node at all.
+pub fn node_process_running() -> bool {
+    use sysinfo::{ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All);
+    let found = sys.processes().values().any(|p| p.name() == NODE_EXE);
+    found
+}
+
 /// Asks Windows 11 to put its blurred material behind the window, so the sidebar can be see-through as a sidebar is. Returns Some(true)
 /// when the material is on, Some(false) when this system has none, and None when the window does not exist yet (try again next frame).
 pub fn apply_backdrop(title: &str) -> Option<bool> {

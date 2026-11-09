@@ -60,6 +60,9 @@ struct Cli {
     /// With `--panel`: open on the Settings page.
     #[arg(long)]
     settings: bool,
+    /// With `--panel`: show a pairing code as soon as the window opens.
+    #[arg(long, hide = true)]
+    pair: bool,
     /// With `--panel`: open on this page (overview, phones, models or settings).
     #[arg(long, value_name = "PAGE")]
     page: Option<String>,
@@ -187,14 +190,14 @@ fn main() {
                 // Opened again (from the Start menu, say) while it runs: show its window instead of doing nothing. The
                 // system's own sign in start has nothing to show.
                 if !cli.at_login && cli.startup.is_none() {
-                    panel::run(cli.admin_port, panel::Page::Overview);
+                    panel::run(cli.admin_port, panel::Page::Overview, false);
                 }
                 return;
             }
         }
     };
     if cli.panel {
-        panel::run(cli.admin_port, cli.page.as_deref().and_then(panel::Page::from_name).unwrap_or(if cli.settings { panel::Page::Settings } else { panel::Page::Overview }));
+        panel::run(cli.admin_port, cli.page.as_deref().and_then(panel::Page::from_name).unwrap_or(if cli.settings { panel::Page::Settings } else { panel::Page::Overview }), cli.pair);
         return;
     }
     let (ctl, rx) = control::Controller::new(cli.admin_port);

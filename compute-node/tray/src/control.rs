@@ -164,7 +164,9 @@ impl Controller {
                 let stats = admin::ask(self.port, "stats").ok();
                 View { poll: Poll::Up(Box::new(model::parse(&status, stats.as_ref()))), starting: false }
             }
-            Err(_) => View { poll: Poll::Down, starting: self.starting() },
+            // The window and the tray are separate programs, and the node may have been started by neither, so ask the system as well.
+            // Only for the usual control port: a process cannot be matched to another port from here.
+            Err(_) => View { poll: Poll::Down, starting: self.starting() || (self.port == os::DEFAULT_ADMIN_PORT && os::node_process_running()) },
         }
     }
 

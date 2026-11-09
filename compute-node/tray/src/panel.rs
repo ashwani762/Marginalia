@@ -426,12 +426,6 @@ impl Panel {
                 ui.painter().add(egui::epaint::Shadow { offset: [0, 0], blur: 26, spread: 2, color: colour.gamma_multiply(0.22 + 0.26 * pulse) }.as_shape(egui::Rect::from_center_size(c, Vec2::splat(12.0)), CornerRadius::same(6)));
                 ui.painter().circle_filled(c, 6.5, colour);
                 ui.add_space(4.0);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.set_max_width(260.0);
-                    ui.label(kit::title(hero_word(state), 24.0));
-                    ui.label(RichText::new(model::status_line(i)).size(12.5).color(DIM));
-                });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
                     kit::figure(ui, 78.0, &model::uptime_short(i.uptime_s), "up for");
@@ -441,6 +435,15 @@ impl Panel {
                     kit::divider(ui, 34.0);
                     let served = kit::spring(ui.ctx(), egui::Id::NULL.with("count-served"), i.served as f32, 1.0, 0.5).round() as u64;
                     kit::figure(ui, 78.0, &served.to_string(), if i.served == 1 { "job served" } else { "jobs served" });
+                    ui.add_space(10.0);
+                    // The figures take their room first, and the sentence ends in dots if a narrow window leaves it too little.
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(kit::title(hero_word(state), 24.0));
+                            ui.add(egui::Label::new(RichText::new(model::status_line(i)).size(12.5).color(DIM)).truncate());
+                        });
+                    });
                 });
             });
         });
@@ -1099,16 +1102,20 @@ impl Panel {
                 });
             });
             ui.add_space(12.0);
-            ui.vertical_centered(|ui| {
-                let n = code.chars().count() as f32;
-                let total = n * 44.0 + (n - 1.0) * 6.0;
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
-                    for ch in code.chars() {
+            // The dash only groups the characters, so it is a small mark between tiles and not a tile of its own.
+            let n = code.chars().filter(|c| *c != '-').count() as f32;
+            let total = n * 44.0 + (n - 1.0) * 6.0 + if code.contains('-') { 20.0 } else { 0.0 };
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+                for ch in code.chars() {
+                    if ch == '-' {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 56.0), Sense::hover());
+                        ui.painter().rect_filled(egui::Rect::from_center_size(rect.center(), Vec2::new(9.0, 2.5)), CornerRadius::same(1), DIM);
+                    } else {
                         kit::code_tile(ui, ch);
                     }
-                });
+                }
             });
             if let Some(a) = addresses.first() {
                 ui.add_space(10.0);
@@ -1127,7 +1134,7 @@ impl Panel {
         let (title, sub, colour) = match view {
             Some(v) => match &v.poll {
                 Poll::Up(i) => (i.name.clone(), hero_word(v.state()).to_string(), kit::state_colour(v.state())),
-                Poll::Down => ("Marginalia node".to_string(), if v.starting { "Starting" } else { "Not running" }.to_string(), kit::state_colour(State::Down)),
+                Poll::Down => ("Marginalia node".to_string(), if v.starting { "Starting" } else { "Not running" }.to_string(), if v.starting { AMBER } else { kit::state_colour(State::Down) }),
             },
             None => ("Marginalia node".to_string(), "Looking for it".to_string(), kit::FAINT),
         };
@@ -1465,7 +1472,7 @@ fn hero_word(state: State) -> &'static str {
     }
 }
 
-pub fn run(port: u16, page: Page) {
+pub fn run(port: u16, page: Page, pair: bool) {
     let (rgba, w, h) = (crate::glyph::mark_rgba(64), 64, 64);
     let viewport = egui::ViewportBuilder::default()
         .with_title("Marginalia node")
@@ -1503,7 +1510,11 @@ pub fn run(port: u16, page: Page) {
             style.interaction.selectable_labels = false;
             cc.egui_ctx.set_global_style(style);
             kit::install_fonts(&cc.egui_ctx);
-            Ok(Box::new(Panel::new(port, page, cc.egui_ctx.clone())))
+            let panel = Panel::new(port, page, cc.egui_ctx.clone());
+            if pair {
+                panel.send(Cmd::Pair);
+            }
+            Ok(Box::new(panel))
         }),
     );
     if let Err(e) = result {

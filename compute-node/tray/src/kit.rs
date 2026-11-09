@@ -215,17 +215,20 @@ impl Group {
     pub fn setting(&mut self, ui: &mut Ui, title: &str, line: Option<&str>, add: impl FnOnce(&mut Ui)) {
         let height = if line.is_some() { ROW_TALL } else { ROW };
         self.row(ui, height, |ui| {
-            // Room is kept for the control.
-            let width = (ui.available_width() - 190.0).max(120.0);
-            text_block(ui, width, height, if line.is_some() { NAME_H + LINE_H } else { NAME_H }, |ui| {
-                ui.label(RichText::new(title).size(13.5).color(TEXT));
-                if let Some(l) = line {
-                    ui.label(RichText::new(l).size(12.0).color(DIM));
-                }
-            });
+            // The control takes the room it needs, and the words get what is left. Words too long for it end in dots and show in full on hover.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(PAD);
                 add(ui);
+                ui.add_space(14.0);
+                let width = ui.available_width().max(40.0);
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    text_block(ui, width, height, if line.is_some() { NAME_H + LINE_H } else { NAME_H }, |ui| {
+                        ui.add(egui::Label::new(RichText::new(title).size(13.5).color(TEXT)).truncate());
+                        if let Some(l) = line {
+                            ui.add(egui::Label::new(RichText::new(l).size(12.0).color(DIM)).truncate());
+                        }
+                    });
+                });
             });
         });
     }

@@ -2476,6 +2476,7 @@ dependencies = [
  "eframe",
  "ksni",
  "serde_json",
+ "sysinfo",
  "tray-icon",
  "winit",
  "winreg",
