@@ -31,6 +31,8 @@ struct App {
     views: Receiver<View>,
     tray: Option<TrayIcon>,
     shown: Option<View>,
+    /// Whether the menu on show was built with starting at sign in on, so a click on that entry rebuilds it.
+    shown_startup: bool,
     actions: HashMap<String, Action>,
 }
 
@@ -39,7 +41,7 @@ impl App {
     fn menu(view: &View) -> (Menu, HashMap<String, Action>) {
         let menu = Menu::new();
         let mut actions = HashMap::new();
-        for (n, e) in crate::model::menu_with_settings(view).into_iter().enumerate() {
+        for (n, e) in crate::model::menu_with_startup(view, crate::autostart::enabled()).into_iter().enumerate() {
             let _ = match e {
                 Entry::Separator => menu.append(&PredefinedMenuItem::separator()),
                 Entry::Info(text) => menu.append(&MenuItem::new(label(&text), false, None)),
@@ -54,9 +56,11 @@ impl App {
     }
 
     fn show(&mut self, view: View) {
-        if self.shown.as_ref() == Some(&view) {
+        let startup = crate::autostart::enabled();
+        if self.shown.as_ref() == Some(&view) && self.shown_startup == startup {
             return;
         }
+        self.shown_startup = startup;
         let (menu, actions) = Self::menu(&view);
         self.actions = actions;
         match &self.tray {
@@ -113,6 +117,6 @@ pub fn run(ctl: Arc<Controller>, rx: Receiver<()>) {
         let _ = tx.send(view);
     });
     let Ok(event_loop) = EventLoop::new() else { return };
-    let mut app = App { ctl, views, tray: None, shown: None, actions: HashMap::new() };
+    let mut app = App { ctl, views, tray: None, shown: None, shown_startup: false, actions: HashMap::new() };
     let _ = event_loop.run_app(&mut app);
 }

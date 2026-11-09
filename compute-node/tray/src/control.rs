@@ -221,7 +221,26 @@ impl Controller {
                 self.panel.open_settings();
                 None
             }
+            Action::ToggleStartup => match crate::autostart::set(!crate::autostart::enabled()) {
+                Ok(()) => None,
+                Err(e) => notice("Could not change starting at sign in", e),
+            },
             Action::Quit => None,
+        }
+    }
+
+    /// Starts the node when nothing answers on its control port. For the tray the system starts at sign in, which
+    /// brings the node up with it. A node that is already there (started by a login task, say) is left alone.
+    pub fn start_node_if_down(&self) {
+        // A node started a moment ago by something else may not answer yet: look twice before starting a second one.
+        for _ in 0..2 {
+            if admin::ask(self.port, "status").is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1500));
+        }
+        if let Some(notice) = self.perform(Action::Start) {
+            notice.show();
         }
     }
 

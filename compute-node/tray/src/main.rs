@@ -7,6 +7,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod admin;
+mod autostart;
 mod charts;
 mod control;
 mod icon;
@@ -57,6 +58,12 @@ struct Cli {
     /// With `--panel`: do not close the panel when it loses focus. For taking screenshots.
     #[arg(long, hide = true)]
     keep_open: bool,
+    /// Set by the sign in entry: start the node too when it is not running.
+    #[arg(long = "at-login")]
+    at_login: bool,
+    /// Turn starting at sign in on or off, or show whether it is on, then exit.
+    #[arg(long, value_name = "on|off|status")]
+    startup: Option<String>,
 }
 
 /// Only one tray icon per node: the first one holds a port on this machine for as long as it runs (the node's control port plus one),
@@ -70,8 +77,34 @@ fn single_instance(admin_port: u16) -> Result<Option<std::net::TcpListener>, ()>
     }
 }
 
+/// `--startup on|off|status`: for scripts and the installer. Prints one line and returns the exit code.
+fn startup_command(what: &str) -> i32 {
+    let result = match what {
+        "on" => autostart::set(true),
+        "off" => autostart::set(false),
+        "status" => Ok(()),
+        _ => {
+            eprintln!("Say on, off or status.");
+            return 2;
+        }
+    };
+    match result {
+        Ok(()) => {
+            println!("Start at sign in is {}.", if autostart::enabled() { "on" } else { "off" });
+            0
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
+    if let Some(what) = &cli.startup {
+        std::process::exit(startup_command(what));
+    }
     // Held until the program ends.
     let _only_one = if cli.panel || cli.print {
         None
@@ -92,7 +125,7 @@ fn main() {
     if cli.print {
         let view = ctl.fetch();
         println!("{}", model::tooltip(&view));
-        for e in model::menu_with_settings(&view) {
+        for e in model::menu_with_startup(&view, autostart::enabled()) {
             match e {
                 model::Entry::Info(s) => println!("  {s}"),
                 model::Entry::Separator => println!("  ----"),
@@ -100,6 +133,12 @@ fn main() {
             }
         }
         return;
+    }
+    if cli.at_login {
+        // The system started the tray at sign in. The node comes up with it, unless it is already running (a login task
+        // may have started it) or this person stopped it on purpose a moment ago.
+        let ctl = ctl.clone();
+        std::thread::spawn(move || ctl.start_node_if_down());
     }
     #[cfg(target_os = "linux")]
     linux::run(ctl, rx);

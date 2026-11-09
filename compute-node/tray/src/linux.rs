@@ -47,7 +47,7 @@ impl ksni::Tray for NodeTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        crate::model::menu_with_settings(&self.view)
+        crate::model::menu_with_startup(&self.view, crate::autostart::enabled())
             .into_iter()
             .map(|e| match e {
                 Entry::Separator => MenuItem::Separator,
@@ -81,9 +81,13 @@ pub fn run(ctl: Arc<Controller>, rx: Receiver<()>) {
         }
     };
     let mut last = first;
+    let mut last_startup = crate::autostart::enabled();
     spawn_poller(ctl, rx, move |view| {
-        if view != last {
+        // The menu holds the switch for starting at sign in, so a change of that rebuilds it too.
+        let startup = crate::autostart::enabled();
+        if view != last || startup != last_startup {
             last = view.clone();
+            last_startup = startup;
             let _ = handle.update(|t| t.view = view);
         }
     });

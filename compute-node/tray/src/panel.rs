@@ -178,6 +178,8 @@ struct Panel {
     settings: bool,
     /// What the Settings page is editing, filled from the node the first time it is shown.
     draft: Option<(RunDraft, String)>,
+    /// Whether the tray starts at sign in, as the General card shows it.
+    startup: bool,
     /// Saved and waiting for the node to come back.
     applying: bool,
     /// While applying: the node has gone down for its restart.
@@ -208,7 +210,7 @@ impl Panel {
             let h = home.clone();
             std::thread::spawn(move || worker(port, ctx, tx, cmd_rx, h));
         }
-        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, was_focused: false, placed: false, keep_open, settings, draft: None, applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
+        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, was_focused: false, placed: false, keep_open, settings, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
     }
 
     fn send(&self, c: Cmd) {
@@ -854,6 +856,22 @@ impl Panel {
                 });
             });
         }
+
+        section(ui, "General");
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                row_label(ui, "Start at sign in", 110.0).on_hover_text("Start the tray and the node when you sign in");
+                let mut on = self.startup;
+                segmented(ui, &mut on, "On", "Off");
+                if on != self.startup {
+                    match crate::autostart::set(on) {
+                        Ok(()) => self.startup = on,
+                        Err(e) => self.notice = Some((e, Instant::now())),
+                    }
+                }
+            });
+            ui.label(dim("The tray and the node come up by themselves."));
+        });
 
         section(ui, "Chat model");
         for (value, name, line) in [("e2b", "E2B", "Smaller, faster"), ("e4b", "E4B", "Better answers, 2 GB more memory")] {

@@ -18,6 +18,8 @@ pub enum Action {
     Start,
     /// Opens the details panel on its Settings page (chat model, where the models run, logs).
     ShowSettings,
+    /// Turns starting at sign in on or off.
+    ToggleStartup,
     Quit,
 }
 
@@ -528,6 +530,16 @@ pub fn menu_with_settings(v: &View) -> Vec<Entry> {
     m
 }
 
+/// The menu the icons show: `menu_with_settings` plus the switch for starting at sign in, above Quit. It works with the node
+/// running or not, so a stopped node can still be set to come up at sign in.
+pub fn menu_with_startup(v: &View, startup: bool) -> Vec<Entry> {
+    let mut m = menu_with_settings(v);
+    let at = m.iter().position(|e| matches!(e, Entry::Item(_, Action::Quit))).unwrap_or(m.len());
+    let text = if startup { "Do not start at sign in" } else { "Start at sign in" };
+    m.insert(at, Entry::Item(text.into(), Action::ToggleStartup));
+    m
+}
+
 /// Where the models run, as the Settings page edits it. Turns into `marginalia-node run-on ...` arguments.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunDraft {
@@ -1024,5 +1036,51 @@ mod tests {
         // Age 119 s is the oldest column, age 19 s and 0 s share the newest.
         assert_eq!(b, vec![1.0, 0.0, 0.0, 0.5]);
         assert!(a.bars(60, 119.0).iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+}
+
+#[cfg(test)]
+mod startup_menu_tests {
+    use super::*;
+
+    fn view(up: bool) -> View {
+        let poll = if up { Poll::Up(Box::new(Info { name: "falcon".into(), ..Default::default() })) } else { Poll::Down };
+        View { poll, starting: false }
+    }
+
+    #[test]
+    fn the_switch_sits_just_above_quit_whether_the_node_runs_or_not() {
+        for up in [true, false] {
+            let m = menu_with_startup(&view(up), false);
+            let n = m.len();
+            assert_eq!(m[n - 1], Entry::Item("Quit tray".into(), Action::Quit));
+            assert_eq!(m[n - 2], Entry::Item("Start at sign in".into(), Action::ToggleStartup));
+        }
+    }
+
+    #[test]
+    fn the_text_says_what_a_click_does() {
+        let on = menu_with_startup(&view(true), true);
+        assert!(on.contains(&Entry::Item("Do not start at sign in".into(), Action::ToggleStartup)));
+        let off = menu_with_startup(&view(true), false);
+        assert!(off.contains(&Entry::Item("Start at sign in".into(), Action::ToggleStartup)));
+    }
+
+    #[test]
+    fn nothing_else_changes() {
+        let v = view(true);
+        let without: Vec<Entry> = menu_with_startup(&v, false).into_iter().filter(|e| !matches!(e, Entry::Item(_, Action::ToggleStartup))).collect();
+        assert_eq!(without, menu_with_settings(&v));
+    }
+
+    #[test]
+    fn plain_wording() {
+        for on in [true, false] {
+            for e in menu_with_startup(&view(true), on) {
+                if let Entry::Item(t, _) = e {
+                    assert!(!t.contains(';') && !t.contains('\u{2014}') && !t.ends_with("..."), "bad wording: {t}");
+                }
+            }
+        }
     }
 }
