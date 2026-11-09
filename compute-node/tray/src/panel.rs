@@ -1,6 +1,6 @@
 //! The details window: a normal window with a sidebar of pages (Overview, Phones, Models, Settings) that opens when the tray
 //! icon is clicked. It is its own process (`marginalia-node-tray --panel`), started by the tray, and it stays until it is closed.
-//! It polls the node's local admin channel every 1.5 seconds while it is open and shows counts, names and timings only.
+//! It polls the node's local admin channel every 0.7 seconds while it is open and shows counts, names and timings only.
 //! Everything it can do goes through the same admin commands as the command line.
 
 use crate::anim::{clamp01, Spring};
@@ -26,7 +26,8 @@ const NAV_H: f32 = 32.0;
 const NAV_GAP: f32 = 2.0;
 /// The longest a page's content runs across, so lines stay short in a wide window.
 const CONTENT_W: f32 = 720.0;
-const POLL: Duration = Duration::from_millis(1500);
+/// The window asks the node what it is doing this often, quick enough to catch a node that takes a second to stop.
+const POLL: Duration = POLL_CHANGING;
 const SPARK_COLUMNS: usize = 60;
 
 const BG: Color32 = kit::BG;
@@ -160,14 +161,11 @@ fn models_worker(ctx: egui::Context, tx: Sender<Msg>, visible: Arc<AtomicBool>, 
 fn worker(port: u16, ctx: egui::Context, tx: Sender<Msg>, rx: Receiver<Cmd>, home: Arc<Mutex<Option<(String, String)>>>) {
     let (ctl, _refresh) = Controller::new(port);
     loop {
-        let view = ctl.fetch();
-        let down_or_changing = view.changing() || view.poll == Poll::Down;
-        if tx.send(Msg::View(view)).is_err() {
+        if tx.send(Msg::View(ctl.fetch())).is_err() {
             return;
         }
         ctx.request_repaint();
-        // Close behind the node while it is on its way up or down, or absent and about to be started from somewhere else.
-        match rx.recv_timeout(if down_or_changing { POLL_CHANGING } else { POLL }) {
+        match rx.recv_timeout(POLL) {
             Ok(cmd) => {
                 let msg = match cmd {
                     Cmd::Click(a) => ctl.perform(a).map(|n| Msg::Notice(format!("{}: {}", n.title, n.body))),
