@@ -168,14 +168,21 @@ pub fn focus_window(title: &str) -> bool {
     }
 }
 
-/// The id of the node program running on this machine, whatever started it (the tray, the login task, a terminal). A node takes a
-/// minute to load its models before its control port answers, and this is how that time is told from no node at all.
+/// The id of the node running on this machine, whatever started it (the tray, the login task, a terminal). A node takes a minute to
+/// load its models before its control port answers, and this is how that time is told from no node at all. The same program also
+/// answers small questions (`status`, `models list`) and fetches models, and those are not a node starting.
 pub fn node_process() -> Option<u32> {
-    use sysinfo::{ProcessesToUpdate, System};
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All);
-    let found = sys.processes().values().find(|p| p.name() == NODE_EXE).map(|p| p.pid().as_u32());
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, ProcessRefreshKind::new().with_cmd(UpdateKind::Always));
+    let found = sys.processes().values().find(|p| p.name() == NODE_EXE && is_serving(&p.cmd().iter().skip(1).map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>())).map(|p| p.pid().as_u32());
     found
+}
+
+/// Whether the node program with these arguments is the node itself. No arguments at all also counts: that is what a process looks
+/// like when the system will not say how it was started, and a node wrongly taken for starting is better than one taken for gone.
+fn is_serving(args: &[String]) -> bool {
+    args.is_empty() || args.iter().any(|a| a == "run")
 }
 
 /// Asks Windows 11 to put its blurred material behind the window, so the sidebar can be see-through as a sidebar is. Returns Some(true)
@@ -347,3 +354,26 @@ pub fn toast(title: &str, body: &str, _ms: u32) {
     eprintln!("{title}: {body}")
 }
 
+#[cfg(test)]
+mod node_process_tests {
+    use super::is_serving;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn the_node_itself_counts_however_it_was_started() {
+        assert!(is_serving(&args(&["run"])));
+        assert!(is_serving(&args(&["--state-dir", "C:/somewhere", "run"])));
+        assert!(is_serving(&[]), "a process that will not say how it was started");
+    }
+
+    #[test]
+    fn a_question_or_a_download_is_not_a_node_starting() {
+        assert!(!is_serving(&args(&["status"])));
+        assert!(!is_serving(&args(&["--state-dir", "C:/somewhere", "models", "list", "--json", "--dir", "C:/models"])));
+        assert!(!is_serving(&args(&["--state-dir", "C:/somewhere", "models", "download", "--only", "chat"])));
+        assert!(!is_serving(&args(&["chat-model", "e2b"])));
+    }
+}
