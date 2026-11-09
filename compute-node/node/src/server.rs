@@ -47,6 +47,8 @@ pub struct Shared {
     /// Paused: models stay loaded, new chat and search jobs are turned away, running jobs finish.
     /// Kept in memory only, so a restart is never paused.
     pub paused: AtomicBool,
+    /// Asked to stop and winding down. `status` says so, so every window can show it.
+    pub stopping: AtomicBool,
     /// The network announcement, set once it is up. Pausing and resuming announce again so phones see it at once.
     pub announce: std::sync::OnceLock<crate::discovery::Advertiser>,
     /// Processor, memory, graphics card and network, once a second, for the tray window and the log.

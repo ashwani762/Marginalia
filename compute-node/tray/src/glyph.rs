@@ -136,7 +136,7 @@ fn point(u: f32, v: f32, state: Option<State>, look: Look) -> Px {
                     State::Down => capsule(x, y, bx - 8.0, by, bx + 8.0, by, 3.4) <= 0.0,
                     // A small dot, like a keyhole.
                     State::Locked => d <= 7.0,
-                    State::Running | State::Busy => false,
+                    State::Running | State::Busy | State::Starting | State::Stopping => false,
                 };
                 if on {
                     over(&mut p, WHITE, 1.0);

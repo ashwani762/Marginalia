@@ -36,7 +36,7 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                     let in_flight = sh.in_flight();
                     let addrs: Vec<String> = crate::discovery::lan_addresses().iter().map(|a| format!("{a}:{node_port}")).collect();
                     json!({
-                        "paused": sh.paused.load(Ordering::Relaxed), "running_jobs": in_flight.min(1), "waiting_jobs": in_flight.saturating_sub(1),
+                        "paused": sh.paused.load(Ordering::Relaxed), "stopping": sh.stopping.load(Ordering::Relaxed), "running_jobs": in_flight.min(1), "waiting_jobs": in_flight.saturating_sub(1),
                         "served": sh.served(), "uptime_s": sh.metrics.uptime_s(), "phones": sh.store.list().len(), "version": env!("CARGO_PKG_VERSION"),
                         "port": node_port, "addresses": addrs, "state_dir": sh.store.dir(), "models_dir": sh.host.models_dir,
                         "name": sh.name, "fingerprint": sh.identity.fingerprint(), "locked": sh.locked.load(Ordering::Relaxed),
@@ -73,6 +73,7 @@ pub async fn serve(sh: Arc<Shared>, port: u16, node_port: u16) -> Result<()> {
                 }
                 "shutdown" => {
                     // The reply goes out first, then main is told to wind down.
+                    sh.stopping.store(true, Ordering::Relaxed);
                     stop = true;
                     json!({"stopping": true})
                 }

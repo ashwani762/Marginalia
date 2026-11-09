@@ -168,13 +168,13 @@ pub fn focus_window(title: &str) -> bool {
     }
 }
 
-/// True when a node program is running on this machine, whatever started it (the tray, the login task, a terminal). A node takes a
+/// The id of the node program running on this machine, whatever started it (the tray, the login task, a terminal). A node takes a
 /// minute to load its models before its control port answers, and this is how that time is told from no node at all.
-pub fn node_process_running() -> bool {
+pub fn node_process() -> Option<u32> {
     use sysinfo::{ProcessesToUpdate, System};
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::All);
-    let found = sys.processes().values().any(|p| p.name() == NODE_EXE);
+    let found = sys.processes().values().find(|p| p.name() == NODE_EXE).map(|p| p.pid().as_u32());
     found
 }
 

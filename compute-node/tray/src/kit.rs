@@ -53,6 +53,8 @@ pub fn state_colour(s: State) -> Color32 {
         State::Paused => ORANGE,
         State::Locked => PURPLE,
         State::Down => RED,
+        State::Starting => Color32::from_rgb(90, 200, 250),
+        State::Stopping => DIM,
     }
 }
 

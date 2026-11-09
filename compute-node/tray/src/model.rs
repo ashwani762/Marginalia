@@ -35,6 +35,10 @@ pub enum State {
     Locked,
     /// Not running, or not answering.
     Down,
+    /// Its program is there, loading its models, and does not answer yet.
+    Starting,
+    /// Asked to stop, finishing what it was doing.
+    Stopping,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -79,6 +83,8 @@ pub struct Waiting {
 pub struct Info {
     pub name: String,
     pub paused: bool,
+    /// Asked to stop and winding down.
+    pub stopping: bool,
     pub locked: bool,
     pub running_jobs: u64,
     pub waiting_jobs: u64,
@@ -126,6 +132,8 @@ pub struct Info {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Poll {
     Down,
+    /// The control port has closed but the program has not gone yet.
+    Stopping,
     Up(Box<Info>),
 }
 
@@ -147,7 +155,10 @@ pub enum Entry {
 impl View {
     pub fn state(&self) -> State {
         match &self.poll {
+            Poll::Down if self.starting => State::Starting,
             Poll::Down => State::Down,
+            Poll::Stopping => State::Stopping,
+            Poll::Up(i) if i.stopping => State::Stopping,
             Poll::Up(i) if i.paused => State::Paused,
             Poll::Up(i) if i.running_jobs > 0 => State::Busy,
             Poll::Up(i) if i.locked => State::Locked,
@@ -211,6 +222,7 @@ pub fn parse(status: &Value, stats: Option<&Value>) -> Info {
     Info {
         name: text(&status["name"]).unwrap_or_else(|| "node".into()),
         paused: status["paused"].as_bool().unwrap_or(false),
+        stopping: status["stopping"].as_bool().unwrap_or(false),
         locked: status["locked"].as_bool().unwrap_or(false),
         running_jobs: n(&status["running_jobs"]),
         waiting_jobs: n(&status["waiting_jobs"]),
@@ -487,6 +499,8 @@ pub fn tooltip(v: &View) -> String {
     match &v.poll {
         Poll::Down if v.starting => "Marginalia node: starting".into(),
         Poll::Down => "Marginalia node: not running".into(),
+        Poll::Stopping => "Marginalia node: stopping".into(),
+        Poll::Up(i) if i.stopping => format!("{}: stopping", i.name),
         Poll::Up(i) => {
             let peers = if i.peers.is_empty() { String::new() } else { format!(", {}", plural(i.peers.len() as u64, "peer", "peers")) };
             format!("{}: {}, {} served, {}{peers}", i.name, state_word(i), plural(i.served, "job", "jobs"), plural(i.phones.len() as u64, "phone", "phones"))
@@ -507,6 +521,16 @@ pub fn menu(v: &View) -> Vec<Entry> {
             } else {
                 m.push(Item("Start node".into(), Action::Start));
             }
+        }
+        Poll::Stopping => {
+            m.push(Info("Marginalia node: stopping".into()));
+            m.push(Separator);
+            m.push(Info("Stopping node".into()));
+        }
+        Poll::Up(i) if i.stopping => {
+            m.push(Info(format!("{}: stopping", i.name)));
+            m.push(Separator);
+            m.push(Info("Stopping node".into()));
         }
         Poll::Up(i) => {
             m.push(Info(format!("{}: {}", i.name, state_word(i))));
@@ -1082,6 +1106,67 @@ mod startup_menu_tests {
                 }
             }
         }
+    }
+}
+
+impl View {
+    /// On its way up or down: worth looking again soon, and nothing to press yet.
+    pub fn changing(&self) -> bool {
+        matches!(self.state(), State::Starting | State::Stopping)
+    }
+}
+
+#[cfg(test)]
+mod life_tests {
+    use super::*;
+
+    fn up(stopping: bool) -> View {
+        View { poll: Poll::Up(Box::new(Info { name: "falcon".into(), stopping, ..Default::default() })), starting: false }
+    }
+
+    #[test]
+    fn each_stage_of_the_nodes_life_is_its_own_state() {
+        assert_eq!(View { poll: Poll::Down, starting: false }.state(), State::Down);
+        assert_eq!(View { poll: Poll::Down, starting: true }.state(), State::Starting);
+        assert_eq!(up(false).state(), State::Running);
+        assert_eq!(up(true).state(), State::Stopping);
+        assert_eq!(View { poll: Poll::Stopping, starting: false }.state(), State::Stopping);
+    }
+
+    #[test]
+    fn stopping_beats_paused_because_a_stopping_node_is_also_paused() {
+        let v = View { poll: Poll::Up(Box::new(Info { paused: true, stopping: true, ..Default::default() })), starting: false };
+        assert_eq!(v.state(), State::Stopping);
+    }
+
+    #[test]
+    fn the_status_says_when_a_node_is_stopping() {
+        assert!(parse(&serde_json::json!({"name": "a", "stopping": true}), None).stopping);
+        assert!(!parse(&serde_json::json!({"name": "a"}), None).stopping, "an older node does not say");
+    }
+
+    #[test]
+    fn nothing_can_be_pressed_while_it_is_on_its_way() {
+        let items = |v: &View| menu(v).into_iter().filter(|e| matches!(e, Entry::Item(_, a) if *a != Action::Quit)).count();
+        assert_eq!(items(&View { poll: Poll::Down, starting: true }), 0);
+        assert_eq!(items(&View { poll: Poll::Stopping, starting: false }), 0);
+        assert_eq!(items(&up(true)), 0);
+        assert!(items(&up(false)) > 0);
+        assert!(items(&View { poll: Poll::Down, starting: false }) > 0);
+    }
+
+    #[test]
+    fn the_tooltip_says_the_stage() {
+        assert_eq!(tooltip(&up(true)), "falcon: stopping");
+        assert_eq!(tooltip(&View { poll: Poll::Stopping, starting: false }), "Marginalia node: stopping");
+    }
+
+    #[test]
+    fn only_the_stages_in_between_count_as_changing() {
+        assert!(up(true).changing());
+        assert!(View { poll: Poll::Down, starting: true }.changing());
+        assert!(!up(false).changing());
+        assert!(!View { poll: Poll::Down, starting: false }.changing());
     }
 }
 

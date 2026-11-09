@@ -5,7 +5,7 @@
 
 use crate::anim::{clamp01, Spring};
 use crate::charts::{self, Line};
-use crate::control::{Controller, Pairing};
+use crate::control::{Controller, Pairing, POLL_CHANGING};
 use crate::kit;
 use crate::menuspec::Icon;
 use crate::model::{self, Action, Activity, Download, Info, ModelItem, Phone, Poll, RunDraft, State, View, Waiting};
@@ -160,11 +160,14 @@ fn models_worker(ctx: egui::Context, tx: Sender<Msg>, visible: Arc<AtomicBool>, 
 fn worker(port: u16, ctx: egui::Context, tx: Sender<Msg>, rx: Receiver<Cmd>, home: Arc<Mutex<Option<(String, String)>>>) {
     let (ctl, _refresh) = Controller::new(port);
     loop {
-        if tx.send(Msg::View(ctl.fetch())).is_err() {
+        let view = ctl.fetch();
+        let down_or_changing = view.changing() || view.poll == Poll::Down;
+        if tx.send(Msg::View(view)).is_err() {
             return;
         }
         ctx.request_repaint();
-        match rx.recv_timeout(POLL) {
+        // Close behind the node while it is on its way up or down, or absent and about to be started from somewhere else.
+        match rx.recv_timeout(if down_or_changing { POLL_CHANGING } else { POLL }) {
             Ok(cmd) => {
                 let msg = match cmd {
                     Cmd::Click(a) => ctl.perform(a).map(|n| Msg::Notice(format!("{}: {}", n.title, n.body))),
@@ -277,7 +280,7 @@ impl Panel {
                 Msg::View(v) => {
                     // Settings were saved: the node goes down and comes back with them.
                     match (&v.poll, self.applying) {
-                        (Poll::Down, true) => self.applying_down = true,
+                        (Poll::Down | Poll::Stopping, true) => self.applying_down = true,
                         (Poll::Up(_), true) if self.applying_down => {
                             self.applying = false;
                             self.applying_down = false;
@@ -292,7 +295,7 @@ impl Panel {
                     }
                     match &v.poll {
                         Poll::Up(i) => self.activity.push(self.started.elapsed().as_secs_f64(), (i.running_jobs + i.waiting_jobs) as u32, i.served),
-                        Poll::Down => {
+                        Poll::Down | Poll::Stopping => {
                             self.activity.clear();
                             self.history.clear();
                         }
@@ -1134,7 +1137,8 @@ impl Panel {
         let (title, sub, colour) = match view {
             Some(v) => match &v.poll {
                 Poll::Up(i) => (i.name.clone(), hero_word(v.state()).to_string(), kit::state_colour(v.state())),
-                Poll::Down => ("Marginalia node".to_string(), if v.starting { "Starting" } else { "Not running" }.to_string(), if v.starting { AMBER } else { kit::state_colour(State::Down) }),
+                Poll::Stopping => ("Marginalia node".to_string(), hero_word(v.state()).to_string(), kit::state_colour(v.state())),
+                Poll::Down => ("Marginalia node".to_string(), hero_word(v.state()).to_string(), kit::state_colour(v.state())),
             },
             None => ("Marginalia node".to_string(), "Looking for it".to_string(), kit::FAINT),
         };
@@ -1263,20 +1267,25 @@ impl Panel {
     }
 
     /// The node is not there: the mark, one sentence, and the one thing to do about it.
-    fn empty_state(&mut self, ui: &mut Ui, starting: bool) {
+    fn empty_state(&mut self, ui: &mut Ui, state: State) {
+        let (working, title, line) = match state {
+            State::Starting => (true, "Starting the node", "It is loading its models. This can take a minute."),
+            State::Stopping => (true, "Stopping the node", "It is finishing the jobs it has."),
+            _ => (false, "The node is not running", "Your phone works on its own until it is back."),
+        };
         ui.add_space((ui.available_height() * 0.22).max(30.0));
         ui.vertical_centered(|ui| {
             if let Some(t) = &self.logo {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(72.0), Sense::hover());
-                let tint = if starting { Color32::WHITE } else { Color32::from_white_alpha(120) };
+                let tint = if state == State::Starting { Color32::WHITE } else { Color32::from_white_alpha(120) };
                 ui.painter().image(t.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
             }
             ui.add_space(16.0);
-            ui.label(kit::title(if starting { "Starting the node" } else { "The node is not running" }, 22.0));
+            ui.label(kit::title(title, 22.0));
             ui.add_space(2.0);
-            ui.label(RichText::new(if starting { "It is loading its models. This can take a minute." } else { "Your phone works on its own until it is back." }).size(13.0).color(DIM));
+            ui.label(RichText::new(line).size(13.0).color(DIM));
             ui.add_space(18.0);
-            if starting {
+            if working {
                 kit::spinner(ui, 22.0, kit::SOFT);
             } else if kit::button(ui, "start", "Start node", kit::Kind::Primary, "Start marginalia-node on this machine") {
                 self.send(Cmd::Click(Action::Start));
@@ -1333,7 +1342,8 @@ impl eframe::App for Panel {
 
         let view = self.view.clone();
         let info = match &view {
-            Some(View { poll: Poll::Up(i), .. }) => Some((**i).clone()),
+            // A node on its way out has nothing left to set: the pages give way to saying so.
+            Some(View { poll: Poll::Up(i), .. }) if !i.stopping => Some((**i).clone()),
             _ => None,
         };
 
@@ -1362,7 +1372,7 @@ impl eframe::App for Panel {
                         ui.vertical_centered(|ui| kit::spinner(ui, 22.0, kit::SOFT));
                     }
                     (Some(v), None) => {
-                        self.empty_state(ui, v.starting);
+                        self.empty_state(ui, v.state());
                     }
                     (Some(v), Some(i)) => {
                         let state = v.state();
@@ -1466,6 +1476,8 @@ fn hero_word(state: State) -> &'static str {
         State::Busy => "Working",
         State::Paused => "Paused",
         State::Down => "Not running",
+        State::Starting => "Starting",
+        State::Stopping => "Stopping",
     }
 }
 
@@ -1547,6 +1559,8 @@ mod page_tests {
         assert_eq!(hero_word(State::Busy), "Working");
         assert_eq!(hero_word(State::Paused), "Paused");
         assert_eq!(hero_word(State::Down), "Not running");
+        assert_eq!(hero_word(State::Starting), "Starting");
+        assert_eq!(hero_word(State::Stopping), "Stopping");
     }
 
     #[test]

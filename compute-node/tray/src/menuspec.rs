@@ -97,6 +97,8 @@ impl Spec {
         let (title, subtitle) = match &v.poll {
             Poll::Down if v.starting => ("Marginalia node".to_string(), "Starting, this can take a minute".to_string()),
             Poll::Down => ("Marginalia node".to_string(), "Not running".to_string()),
+            Poll::Stopping => ("Marginalia node".to_string(), "Stopping".to_string()),
+            Poll::Up(i) if i.stopping => (i.name.clone(), "Stopping, finishing its jobs".to_string()),
             Poll::Up(i) => {
                 let word = match v.state() {
                     State::Paused => "Paused",
@@ -159,7 +161,7 @@ impl Spec {
 
     pub fn from_json(s: &str) -> Option<Spec> {
         let v: Value = serde_json::from_str(s).ok()?;
-        let state = [State::Running, State::Busy, State::Paused, State::Locked, State::Down].into_iter().find(|st| format!("{st:?}") == v["state"].as_str().unwrap_or(""))?;
+        let state = [State::Running, State::Busy, State::Paused, State::Locked, State::Down, State::Starting, State::Stopping].into_iter().find(|st| format!("{st:?}") == v["state"].as_str().unwrap_or(""))?;
         let mut rows = Vec::new();
         for r in v["rows"].as_array()? {
             rows.push(match r["t"].as_str()? {

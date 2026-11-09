@@ -10,6 +10,8 @@ pub fn colour(state: State) -> [u8; 3] {
         State::Paused => [230, 150, 10],
         State::Locked => [140, 90, 200],
         State::Down => [215, 60, 55],
+        State::Starting => [60, 170, 215],
+        State::Stopping => [140, 140, 146],
     }
 }
 

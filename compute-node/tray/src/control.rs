@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 /// How long "Start node" shows "starting" before it gives up and offers Start again.
 const START_GRACE: Duration = Duration::from_secs(120);
 /// The icon only needs its colour kept right. The open panel polls faster on its own.
-pub const POLL_EVERY: Duration = Duration::from_secs(5);
+pub const POLL_EVERY: Duration = Duration::from_secs(2);
+/// How often to look while the node is on its way up or down, so the icon and the menu follow it closely.
+pub const POLL_CHANGING: Duration = Duration::from_millis(700);
 
 /// Something to tell the person after an action that did not work.
 #[derive(Debug, PartialEq)]
@@ -129,6 +131,36 @@ impl PanelHost {
     }
 }
 
+/// What the node was last seen doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seen {
+    Nothing,
+    Answering,
+    /// It stopped answering and this program of its is still going.
+    Leaving(u32),
+}
+
+/// What it means that nothing answers on the control port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Silence {
+    Stopped,
+    Starting,
+    Stopping,
+}
+
+/// Works out what the silence means, from what the node was doing and which program of it is there. A node's program that does not
+/// answer is either arriving or leaving, and only what went before tells them apart: one that was answering is leaving, until that very
+/// program has gone. Any other is arriving. `asked` says someone here has just asked for a start, which counts before the program exists.
+fn read_silence(seen: Seen, process: Option<u32>, asked: bool) -> (Silence, Seen) {
+    match (process, seen) {
+        (None, _) if asked => (Silence::Starting, Seen::Nothing),
+        (None, _) => (Silence::Stopped, Seen::Nothing),
+        (Some(p), Seen::Answering) => (Silence::Stopping, Seen::Leaving(p)),
+        (Some(p), Seen::Leaving(q)) if p == q => (Silence::Stopping, Seen::Leaving(q)),
+        (Some(_), _) => (Silence::Starting, Seen::Nothing),
+    }
+}
+
 pub struct Controller {
     port: u16,
     panel: PanelHost,
@@ -137,6 +169,8 @@ pub struct Controller {
     /// The node's own state folder and port, as it last said in `status`. Settings are saved there, and a node that
     /// is not the installed service is started again with them.
     node_home: Mutex<Option<os::NodeHome>>,
+    /// What the node was last seen doing, to tell a node on its way up from one on its way down.
+    seen: Mutex<Seen>,
     /// The menu window while it is open (`--menu`), and when it last closed.
     menu: Mutex<Option<std::process::Child>>,
     menu_closed_at: Mutex<Option<Instant>>,
@@ -147,7 +181,7 @@ pub struct Controller {
 impl Controller {
     pub fn new(port: u16) -> (Arc<Controller>, Receiver<()>) {
         let (refresh, rx) = channel();
-        (Arc::new(Controller { port, panel: PanelHost::new(port), starting: Mutex::new(None), refresh, node_home: Mutex::new(None), menu: Mutex::new(None), menu_closed_at: Mutex::new(None), quit: AtomicBool::new(false) }), rx)
+        (Arc::new(Controller { port, panel: PanelHost::new(port), starting: Mutex::new(None), refresh, node_home: Mutex::new(None), seen: Mutex::new(Seen::Nothing), menu: Mutex::new(None), menu_closed_at: Mutex::new(None), quit: AtomicBool::new(false) }), rx)
     }
 
     fn starting(&self) -> bool {
@@ -161,12 +195,27 @@ impl Controller {
                 if let Ok(mut s) = self.starting.lock() {
                     *s = None;
                 }
+                if let Ok(mut s) = self.seen.lock() {
+                    *s = Seen::Answering;
+                }
                 let stats = admin::ask(self.port, "stats").ok();
                 View { poll: Poll::Up(Box::new(model::parse(&status, stats.as_ref()))), starting: false }
             }
             // The window and the tray are separate programs, and the node may have been started by neither, so ask the system as well.
             // Only for the usual control port: a process cannot be matched to another port from here.
-            Err(_) => View { poll: Poll::Down, starting: self.starting() || (self.port == os::DEFAULT_ADMIN_PORT && os::node_process_running()) },
+            Err(_) => {
+                let process = if self.port == os::DEFAULT_ADMIN_PORT { os::node_process() } else { None };
+                let seen = self.seen.lock().map(|s| *s).unwrap_or(Seen::Nothing);
+                let (meaning, next) = read_silence(seen, process, self.starting());
+                if let Ok(mut s) = self.seen.lock() {
+                    *s = next;
+                }
+                match meaning {
+                    Silence::Stopped => View { poll: Poll::Down, starting: false },
+                    Silence::Starting => View { poll: Poll::Down, starting: true },
+                    Silence::Stopping => View { poll: Poll::Stopping, starting: false },
+                }
+            }
         }
     }
 
@@ -386,9 +435,44 @@ impl Controller {
 /// Polls every two seconds (or sooner after a click) and hands each result to `on_view`.
 pub fn spawn_poller(ctl: Arc<Controller>, rx: Receiver<()>, mut on_view: impl FnMut(View) + Send + 'static) {
     std::thread::spawn(move || loop {
-        on_view(ctl.fetch());
-        let _ = rx.recv_timeout(POLL_EVERY);
+        let view = ctl.fetch();
+        let wait = if view.changing() { POLL_CHANGING } else { POLL_EVERY };
+        on_view(view);
+        let _ = rx.recv_timeout(wait);
     });
+}
+
+#[cfg(test)]
+mod silence_tests {
+    use super::*;
+
+    #[test]
+    fn a_node_that_was_answering_is_leaving_until_its_program_has_gone() {
+        assert_eq!(read_silence(Seen::Answering, Some(7), false), (Silence::Stopping, Seen::Leaving(7)));
+        assert_eq!(read_silence(Seen::Leaving(7), Some(7), false), (Silence::Stopping, Seen::Leaving(7)));
+        assert_eq!(read_silence(Seen::Leaving(7), None, false), (Silence::Stopped, Seen::Nothing));
+    }
+
+    #[test]
+    fn a_program_nobody_saw_answering_is_arriving() {
+        assert_eq!(read_silence(Seen::Nothing, Some(7), false), (Silence::Starting, Seen::Nothing));
+    }
+
+    #[test]
+    fn a_restart_shows_as_arriving_as_soon_as_the_new_program_is_there() {
+        assert_eq!(read_silence(Seen::Leaving(7), Some(8), false), (Silence::Starting, Seen::Nothing));
+    }
+
+    #[test]
+    fn a_start_just_asked_for_counts_before_the_program_exists() {
+        assert_eq!(read_silence(Seen::Nothing, None, true), (Silence::Starting, Seen::Nothing));
+        assert_eq!(read_silence(Seen::Nothing, None, false), (Silence::Stopped, Seen::Nothing));
+    }
+
+    #[test]
+    fn asking_for_a_start_does_not_hide_a_node_still_on_its_way_out() {
+        assert_eq!(read_silence(Seen::Leaving(7), Some(7), true), (Silence::Stopping, Seen::Leaving(7)));
+    }
 }
 
 #[cfg(test)]

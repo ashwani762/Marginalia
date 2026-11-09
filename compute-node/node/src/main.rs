@@ -468,7 +468,7 @@ async fn main() -> Result<()> {
             let host = Arc::new(tokio::task::spawn_blocking(move || host::Host::start(&opts)).await??);
             let peers = peers::Peers::open(&dir)?;
             let cluster = cluster::Cluster::new(store.clone(), peers, identity.clone(), name.clone(), *port)?;
-            let shared = Arc::new(server::Shared { cluster: cluster.clone(), store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), announce: Default::default(), resources: resources::Resources::new(), nearby: Default::default(), stop: Default::default() });
+            let shared = Arc::new(server::Shared { cluster: cluster.clone(), store, host: host.clone(), identity: identity.clone(), name: name.clone(), pairing: Default::default(), metrics: metrics::Metrics::new(), waiting: Default::default(), denied: Default::default(), locked: std::sync::atomic::AtomicBool::new(*lock || locked_before), paused: Default::default(), stopping: Default::default(), announce: Default::default(), resources: resources::Resources::new(), nearby: Default::default(), stop: Default::default() });
             {
                 let counted = shared.clone();
                 shared.resources.start(move || counted.in_flight() as u32);
@@ -508,6 +508,7 @@ async fn main() -> Result<()> {
                 _ = terminated() => tracing::info!("stopping (asked to terminate)"),
                 _ = shared.stop.notified() => tracing::info!("stopping (asked with `stop`)"),
             }
+            shared.stopping.store(true, std::sync::atomic::Ordering::Relaxed);
             // Stop taking new connections and new jobs, then give running jobs a moment to finish.
             shared.paused.store(true, std::sync::atomic::Ordering::Relaxed);
             ep.set_server_config(None);
