@@ -115,7 +115,8 @@ impl Worker<'_, '_> {
 
     fn generate(&mut self, req: GenRequest) {
         let started = Instant::now();
-        let prompt = render_gemma_prompt(&req.messages);
+        let architecture = self.model.meta_val_str("general.architecture").unwrap_or_default();
+        let prompt = render_prompt(prompt_style(&architecture), &req.messages);
         let vocab = self.model.vocab();
         let mut tokens = vocab.tokenize(prompt.as_bytes(), false, true);
         let n_ctx = self.ctx.n_ctx() as usize;
@@ -296,6 +297,50 @@ fn rand_seed() -> u32 {
 
 /// Gemma 4 canonical chat format:
 /// `<bos><|turn>system\n…<turn|>\n<|turn>user\n…<turn|>\n<|turn>model\n`
+/// How a model expects its conversation to be written out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromptStyle {
+    Gemma,
+    /// `<|im_start|>role ... <|im_end|>`, which the LFM family uses.
+    ChatMl,
+}
+
+/// The style for a model, from the architecture named in its file.
+pub fn prompt_style(architecture: &str) -> PromptStyle {
+    if architecture.starts_with("lfm") {
+        PromptStyle::ChatMl
+    } else {
+        PromptStyle::Gemma
+    }
+}
+
+pub fn render_prompt(style: PromptStyle, messages: &[ChatMessage]) -> String {
+    match style {
+        PromptStyle::Gemma => render_gemma_prompt(messages),
+        PromptStyle::ChatMl => render_chatml_prompt(messages),
+    }
+}
+
+/// The LFM template with thinking off, which it does not support: an empty thinking block opens the answer.
+pub fn render_chatml_prompt(messages: &[ChatMessage]) -> String {
+    let mut out = String::with_capacity(messages.iter().map(|m| m.content.len() + 32).sum::<usize>() + 64);
+    out.push_str("<|startoftext|>");
+    for m in messages {
+        let role = match m.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        out.push_str("<|im_start|>");
+        out.push_str(role);
+        out.push('\n');
+        out.push_str(m.content.trim());
+        out.push_str("<|im_end|>\n");
+    }
+    out.push_str("<|im_start|>assistant\n<think></think>");
+    out
+}
+
 pub fn render_gemma_prompt(messages: &[ChatMessage]) -> String {
     let mut out = String::with_capacity(messages.iter().map(|m| m.content.len() + 24).sum::<usize>() + 16);
     out.push_str("<bos>");
@@ -322,4 +367,30 @@ pub fn render_gemma_prompt(messages: &[ChatMessage]) -> String {
     }
     out.push_str("<|turn>model\n");
     out
+}
+
+#[cfg(test)]
+mod prompt_style_tests {
+    use super::*;
+
+    fn chat() -> Vec<ChatMessage> {
+        vec![ChatMessage { role: Role::System, content: "Be brief.".into() }, ChatMessage { role: Role::User, content: "Hello".into() }]
+    }
+
+    #[test]
+    fn the_architecture_in_the_file_picks_the_style() {
+        assert_eq!(prompt_style("lfm3"), PromptStyle::ChatMl);
+        assert_eq!(prompt_style("gemma4"), PromptStyle::Gemma);
+        assert_eq!(prompt_style(""), PromptStyle::Gemma, "a file that does not say is treated as it always was");
+    }
+
+    #[test]
+    fn chatml_follows_the_template_in_the_lfm_file() {
+        assert_eq!(render_chatml_prompt(&chat()), "<|startoftext|><|im_start|>system\nBe brief.<|im_end|>\n<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n<think></think>");
+    }
+
+    #[test]
+    fn gemma_is_unchanged() {
+        assert_eq!(render_prompt(PromptStyle::Gemma, &chat()), render_gemma_prompt(&chat()));
+    }
 }

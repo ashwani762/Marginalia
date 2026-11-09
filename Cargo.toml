@@ -10,6 +10,8 @@ default-members = ["compute-node/proto", "compute-node/node"]
 # The published llama-cpp-sys-2 bundles a llama.cpp that predates the `gemma-embedding2`
 # architecture (EmbeddingGemma 2). The node uses the same crate with a fresh llama.cpp checkout.
 llama-cpp-sys-2 = { path = "compute-node/vendor/llama-cpp-sys-2" }
+# The safe bindings, carried along because the C structs in that newer llama.cpp gained fields.
+llama-cpp-2 = { path = "compute-node/vendor/llama-cpp-2" }
 
 [profile.release]
 opt-level = 3

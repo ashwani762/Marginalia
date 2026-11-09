@@ -237,4 +237,4 @@ impl LlmHandle {
 
 
 mod worker;
-pub use worker::{spawn, LlmConfig};
+pub use worker::{prompt_style, render_prompt, spawn, LlmConfig, PromptStyle};

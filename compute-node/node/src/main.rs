@@ -6,6 +6,7 @@ mod cluster;
 mod discovery;
 mod engine;
 mod host;
+mod lab;
 mod metrics;
 mod models_dl;
 mod logfile;
@@ -100,6 +101,24 @@ enum Cmd {
     ChatModel {
         #[arg(value_enum)]
         choice: Option<models_dl::ChatChoice>,
+    },
+    /// Run a list of tasks (a JSON Lines file) against one model file and write down the answers and timings, to compare models. No
+    /// phone and no network: it does not use the running node, so stop the node first if the graphics memory is needed.
+    Lab {
+        #[arg(long)]
+        model: std::path::PathBuf,
+        /// The projector file, for photos, audio and video.
+        #[arg(long)]
+        mmproj: Option<std::path::PathBuf>,
+        #[arg(long)]
+        tasks: std::path::PathBuf,
+        #[arg(long)]
+        out: std::path::PathBuf,
+        #[arg(long, default_value_t = 16384)]
+        ctx: u32,
+        /// How many layers go on the graphics card.
+        #[arg(long, default_value_t = 999)]
+        gpu_layers: u32,
     },
     /// Show or choose where the models run: auto (the node decides from the free graphics memory), gpu (the
     /// graphics card, the default), cpu (the processor only) or mixed (each model on the card, the processor or
@@ -374,6 +393,7 @@ async fn main() -> Result<()> {
             println!("No longer a peer of {}.", names.join(", "));
         }
         Cmd::Stats => println!("{}", metrics::report(&admin::ask(cli.admin_port, json!({"cmd": "stats"})).await?)),
+        Cmd::Lab { model, mmproj, tasks, out, ctx, gpu_layers } => lab::run(model, mmproj.as_deref(), tasks, out, *ctx, *gpu_layers)?,
         Cmd::ChatModel { choice } => match choice {
             Some(c) => {
                 models_dl::save_chat_choice(&dir, *c)?;
