@@ -183,12 +183,12 @@ impl Spec {
 // Sizes, in points. The window is the card plus room on every side for its shadow.
 // ---------------------------------------------------------------------------------------------
 
-pub const CARD_W: f32 = 252.0;
+pub const CARD_W: f32 = 248.0;
 pub const SHADOW: f32 = 18.0;
-pub const PAD: f32 = 8.0;
-pub const HEADER_H: f32 = 56.0;
-pub const ROW_H: f32 = 34.0;
-pub const SEP_H: f32 = 13.0;
+pub const PAD: f32 = 6.0;
+pub const HEADER_H: f32 = 54.0;
+pub const ROW_H: f32 = 30.0;
+pub const SEP_H: f32 = 11.0;
 
 pub fn row_height(r: &Row) -> f32 {
     match r {

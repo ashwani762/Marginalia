@@ -20,44 +20,31 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// The window's size, and the least it can be made.
 const WINDOW: [f32; 2] = [940.0, 660.0];
 const WINDOW_MIN: [f32; 2] = [780.0, 540.0];
-const SIDEBAR_W: f32 = 220.0;
+const SIDEBAR_W: f32 = 212.0;
 /// A sidebar row, and the space between rows.
-const NAV_H: f32 = 38.0;
-const NAV_GAP: f32 = 3.0;
+const NAV_H: f32 = 32.0;
+const NAV_GAP: f32 = 2.0;
 /// The longest a page's content runs across, so lines stay short in a wide window.
 const CONTENT_W: f32 = 720.0;
 const POLL: Duration = Duration::from_millis(1500);
 const SPARK_COLUMNS: usize = 60;
 
-const BG: Color32 = Color32::from_rgb(22, 24, 29);
-const SIDEBAR: Color32 = Color32::from_rgb(17, 19, 24);
-/// The mark's indigo: the selected row of the sidebar.
-const ACCENT: Color32 = Color32::from_rgb(124, 108, 246);
-const TRACK: Color32 = Color32::from_rgb(52, 56, 66);
-const TEXT: Color32 = Color32::from_rgb(232, 234, 238);
-const DIM: Color32 = Color32::from_rgb(142, 148, 160);
-const GREEN: Color32 = Color32::from_rgb(70, 200, 105);
-const AMBER: Color32 = Color32::from_rgb(240, 165, 30);
-const BLUE: Color32 = Color32::from_rgb(96, 156, 255);
-const VIOLET: Color32 = Color32::from_rgb(170, 125, 230);
+const BG: Color32 = kit::BG;
+const SIDEBAR: Color32 = kit::SIDEBAR;
+const TRACK: Color32 = kit::TRACK;
+const TEXT: Color32 = kit::TEXT;
+const DIM: Color32 = kit::DIM;
+const GREEN: Color32 = kit::GREEN;
+const AMBER: Color32 = kit::ORANGE;
+const BLUE: Color32 = kit::BLUE;
+const VIOLET: Color32 = kit::PURPLE;
 const GREY: Color32 = Color32::from_rgb(130, 134, 142);
 const TEAL: Color32 = Color32::from_rgb(70, 200, 200);
 const ORANGE: Color32 = Color32::from_rgb(255, 150, 80);
-const RED: Color32 = Color32::from_rgb(240, 100, 95);
-const FAINT: Color32 = Color32::from_rgb(98, 104, 116);
+const RED: Color32 = kit::RED;
 /// The sidebar's icon on the selected row: the indigo, lightened to read on its own tint.
 const ACCENT_TEXT: Color32 = Color32::from_rgb(176, 166, 255);
 const GREEN_BTN: Color32 = Color32::from_rgb(38, 120, 66);
-
-fn state_colour(s: State) -> Color32 {
-    match s {
-        State::Running => GREEN,
-        State::Busy => BLUE,
-        State::Paused => AMBER,
-        State::Locked => VIOLET,
-        State::Down => RED,
-    }
-}
 
 /// The pages of the window, in the order of the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,6 +218,12 @@ struct Panel {
     /// Where the sidebar's selected row is, in rows, and how far the page has come in (0 to 1) since it was chosen.
     nav: Spring,
     page_in: Spring,
+    /// Which way the last move through the sidebar went: 1 down, -1 up. The new page comes from that side.
+    page_dir: f32,
+    /// The Marginalia mark, for the top of the sidebar.
+    logo: Option<egui::TextureHandle>,
+    /// The system's blurred material behind the window: unknown until the window exists.
+    backdrop: Option<bool>,
     reduced: bool,
     /// The window is told once to follow the dark theme.
     theme_set: bool,
@@ -268,7 +261,7 @@ impl Panel {
             let h = home.clone();
             std::thread::spawn(move || worker(port, ctx, tx, cmd_rx, h));
         }
-        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, pending: Vec::new(), page, nav: Spring::new(page.index() as f32, 0.86, 0.22), page_in: Spring::new(1.0, 1.0, 0.18), reduced: crate::os::reduced_motion(), theme_set: false, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
+        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, pending: Vec::new(), page, nav: Spring::new(page.index() as f32, 1.0, 0.26), page_in: Spring::new(1.0, 1.0, 0.24), page_dir: 1.0, logo: None, backdrop: None, reduced: crate::os::reduced_motion(), theme_set: false, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
     }
 
     fn send(&self, c: Cmd) {
@@ -329,6 +322,9 @@ impl Panel {
             self.theme_set = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
         }
+        if self.backdrop.is_none() {
+            self.backdrop = crate::os::apply_backdrop("Marginalia node", [BG.r(), BG.g(), BG.b()]);
+        }
     }
 
     /// What a switch shows: the place the person just put it, for a few seconds, then what the node says.
@@ -343,6 +339,7 @@ impl Panel {
 
     fn go(&mut self, page: Page) {
         if page != self.page {
+            self.page_dir = if page.index() > self.page.index() { 1.0 } else { -1.0 };
             self.page = page;
             self.page_in.snap(0.0);
             self.page_in.set_target(1.0);
@@ -421,14 +418,40 @@ fn now_epoch() -> u64 {
 }
 
 impl Panel {
-    fn numbers(&self, ui: &mut Ui, i: &Info) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            let w = (ui.available_width() - 20.0) / 3.0;
-            kit::stat(ui, w, &i.served.to_string(), if i.served == 1 { "job served" } else { "jobs served" });
-            kit::stat(ui, w, &i.phones.len().to_string(), if i.phones.len() == 1 { "phone" } else { "phones" });
-            kit::stat(ui, w, &model::uptime_short(i.uptime_s), "up for");
+    /// The first thing on the Overview: is the node all right. Its state in large type with the state's colour glowing beside it, and the
+    /// three figures that say how it has been doing. The dot only pulses while the node is working.
+    fn hero(&self, ui: &mut Ui, state: State, i: &Info) {
+        let colour = kit::state_colour(state);
+        let busy = state == State::Busy;
+        let r = Frame::NONE.fill(kit::GROUP).corner_radius(CornerRadius::same(14)).inner_margin(Margin { left: 16, right: 12, top: 16, bottom: 16 }).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+                let c = rect.center();
+                let pulse = if busy { 0.5 + 0.5 * (ui.input(|i| i.time) as f32 * 3.2).sin() } else { 0.45 };
+                ui.painter().add(egui::epaint::Shadow { offset: [0, 0], blur: 26, spread: 2, color: colour.gamma_multiply(0.22 + 0.26 * pulse) }.as_shape(egui::Rect::from_center_size(c, Vec2::splat(12.0)), CornerRadius::same(6)));
+                ui.painter().circle_filled(c, 6.5, colour);
+                ui.add_space(4.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.set_max_width(260.0);
+                    ui.label(kit::title(hero_word(state), 24.0));
+                    ui.label(RichText::new(model::status_line(i)).size(12.5).color(DIM));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    kit::figure(ui, 78.0, &model::uptime_short(i.uptime_s), "up for");
+                    kit::divider(ui, 34.0);
+                    kit::figure(ui, 78.0, &i.phones.len().to_string(), if i.phones.len() == 1 { "phone" } else { "phones" });
+                    kit::divider(ui, 34.0);
+                    kit::figure(ui, 78.0, &i.served.to_string(), if i.served == 1 { "job served" } else { "jobs served" });
+                });
+            });
         });
+        kit::sheen(ui, r.response.rect, 14.0, 1.0);
+        if busy {
+            ui.ctx().request_repaint_after(Duration::from_millis(33));
+        }
     }
 
     fn speed(&self, ui: &mut Ui, i: &Info) {
@@ -499,7 +522,7 @@ impl Panel {
                 ui.label(RichText::new(name).size(11.0).color(DIM));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(RichText::new(sub).size(10.5).color(DIM));
-                    ui.label(RichText::new(main).size(12.0).color(TEXT).strong());
+                    ui.label(RichText::new(main).size(12.0).color(TEXT).family(kit::semibold_family()));
                 });
             });
         };
@@ -637,7 +660,7 @@ impl Panel {
                         if tinted_button(ui, "Allow", GREEN_BTN, "Let this phone use the node") {
                             self.send(Cmd::Phone("approve", w.id.clone()));
                         }
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| truncated(ui, RichText::new(&w.name).size(13.0).strong().color(TEXT)));
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| truncated(ui, RichText::new(&w.name).size(13.0).family(kit::semibold_family()).color(TEXT)));
                     });
                 });
             }
@@ -723,7 +746,7 @@ impl Panel {
                         dot(ui, if !p.reachable { RED } else if p.paused { AMBER } else { GREEN }, 4.0);
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(dim(model::peer_line(p)));
-                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| truncated(ui, RichText::new(&p.name).size(13.0).strong().color(TEXT)));
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| truncated(ui, RichText::new(&p.name).size(13.0).family(kit::semibold_family()).color(TEXT)));
                         });
                     });
                     if !p.addr.is_empty() {
@@ -740,7 +763,7 @@ impl Panel {
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
                         dot(ui, GREY, 4.0);
-                        truncated(ui, RichText::new(&n.name).size(13.0).strong().color(TEXT));
+                        truncated(ui, RichText::new(&n.name).size(13.0).family(kit::semibold_family()).color(TEXT));
                     });
                     if let Some(a) = &n.addr {
                         ui.label(RichText::new(a).font(FontId::monospace(11.0)).color(DIM));
@@ -780,30 +803,6 @@ impl Panel {
         }
         let Some((mut run, mut chat)) = self.draft.clone() else { return };
 
-        // Where things are right now, in one glance.
-        if let Some(r) = &i.runs_on {
-            card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    dot(ui, GREEN, 4.0);
-                    ui.label(RichText::new("Now").size(12.0).strong().color(TEXT));
-                    ui.label(dim(r));
-                });
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(3.0, 4.0);
-                    for (name, share) in [("Chat", i.now_chat), ("Search", i.now_search), ("Speech", i.now_speech_gpu.map(|g| if g { 100 } else { 0 })), ("Photos", i.now_photos_gpu.map(|g| if g { 100 } else { 0 }))] {
-                        if let Some(sh) = share {
-                            let (text, colour) = match sh {
-                                100 => (format!("{name} card"), BLUE),
-                                0 => (format!("{name} CPU"), GREY),
-                                p => (format!("{name} {p}%"), VIOLET),
-                            };
-                            kit::pill(ui, &text, colour);
-                        }
-                    }
-                });
-            });
-        }
-
         kit::heading(ui, "General");
         let mut startup = self.startup;
         let mut startup_clicked = false;
@@ -819,7 +818,7 @@ impl Panel {
             }
         }
 
-        kit::heading(ui, "Chat model");
+        kit::heading(ui, "Models");
         kit::group(ui, |ui, g| {
             g.setting(ui, "Chat model", Some("E2B is smaller and faster. E4B answers better and needs 2 GB more memory"), |ui| {
                 let mut idx = if chat == "e4b" { 1 } else { 0 };
@@ -827,10 +826,6 @@ impl Panel {
                     chat = if idx == 1 { "e4b" } else { "e2b" }.into();
                 }
             });
-        });
-
-        kit::heading(ui, "Where the models run");
-        kit::group(ui, |ui, g| {
             let line = RunDraft::MODES.iter().find(|(v, _, _)| *v == run.mode).map(|(_, _, l)| *l);
             g.setting(ui, "Run the models on", line, |ui| {
                 let labels: Vec<&str> = RunDraft::MODES.iter().map(|(_, n, _)| *n).collect();
@@ -847,11 +842,27 @@ impl Panel {
                     run.mode = value.into();
                 }
             });
+            // Auto decides by itself, so this is the one case where what is happening is not what was chosen.
+            if run.mode == "auto" {
+                g.setting(ui, "Right now", None, |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for (name, share) in [("Photos", i.now_photos_gpu.map(|g| if g { 100 } else { 0 })), ("Speech", i.now_speech_gpu.map(|g| if g { 100 } else { 0 })), ("Search", i.now_search), ("Chat", i.now_chat)] {
+                        if let Some(sh) = share {
+                            let (text, colour) = match sh {
+                                100 => (format!("{name} on card"), BLUE),
+                                0 => (format!("{name} on processor"), GREY),
+                                p => (format!("{name} {p}%"), VIOLET),
+                            };
+                            kit::pill(ui, &text, colour);
+                        }
+                    }
+                });
+            }
             if run.mode == "custom" {
                 for (label, hint, which) in [("Chat", "How much of the chat model is on the card, the rest uses the processor", 0), ("Search", "How much of the search model is on the card", 1)] {
                     g.setting(ui, label, Some(hint), |ui| {
                         let v = if which == 0 { &mut run.chat } else { &mut run.search };
-                        ui.label(RichText::new(match *v { 0 => "processor".to_string(), 100 => "card".to_string(), p => format!("{p}% on card") }).size(12.0).color(DIM));
+                        ui.label(RichText::new(match *v { 0 => "processor".to_string(), 100 => "card".to_string(), p => format!("{p}% on card") }).size(12.5).color(DIM));
                         let mut x = *v as f32;
                         ui.spacing_mut().slider_width = 150.0;
                         if ui.add(egui::Slider::new(&mut x, 0.0..=100.0).step_by(5.0).show_value(false)).changed() {
@@ -869,10 +880,6 @@ impl Panel {
                     });
                 }
             }
-        });
-
-        kit::heading(ui, "Speakers");
-        kit::group(ui, |ui, g| {
             g.setting(ui, "Tell speakers apart on", Some("The card needs the GPU helper and cuDNN"), |ui| {
                 let mut idx = if run.speakers_gpu { 0 } else { 1 };
                 if kit::segmented(ui, "speakers", &["Card", "Processor"], &mut idx) {
@@ -968,24 +975,43 @@ impl Panel {
         }
     }
 
-    /// Save and Undo, kept at the bottom of the Settings page. They light up only when something changed.
-    fn settings_footer(&mut self, ui: &mut Ui, i: &Info) {
+    /// Save and Undo float over the page only while there is something to save, rising from the bottom edge and going back the same way.
+    fn save_capsule(&mut self, ctx: &egui::Context, area: egui::Rect, i: &Info) {
         let current = Self::current_settings(i);
         let Some((run, chat)) = self.draft.clone() else { return };
         let changed = (run.clone(), chat.clone()) != current;
         let applying = self.applying;
+        let k = kit::spring(ctx, egui::Id::NULL.with("save-capsule"), if changed || applying { 1.0 } else { 0.0 }, 1.0, 0.32);
+        if k < 0.01 {
+            return;
+        }
+        let (w, h) = (440.0, 50.0);
+        let pos = egui::pos2(area.center().x - w / 2.0, area.bottom() - h - 18.0 + (1.0 - k) * (h + 26.0));
         let (mut save, mut undo) = (false, false);
-        ui.horizontal(|ui| {
-            ui.label(dim(if applying { "Restarting the node, about a minute." } else if changed { "Saving restarts the node." } else { "No changes." }));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let label = if applying { "Restarting" } else { "Save and restart" };
-                if kit::button(ui, "save", label, if changed && !applying { kit::Kind::Primary } else { kit::Kind::Plain }, "Save the settings and restart the node") && changed && !applying {
-                    save = true;
-                }
-                if kit::button(ui, "undo", "Undo changes", kit::Kind::Plain, "Back to what the node uses now") && !applying {
-                    undo = true;
-                }
-            });
+        egui::Area::new(egui::Id::NULL.with("save-area")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+            ui.set_opacity(clamp01(k * 1.5));
+            let r = Frame::NONE
+                .fill(kit::RAISED)
+                .corner_radius(CornerRadius::same(14))
+                .stroke(Stroke::new(1.0, Color32::from_white_alpha(14)))
+                .shadow(egui::epaint::Shadow { offset: [0, 8], blur: 26, spread: 0, color: Color32::from_black_alpha(130) })
+                .inner_margin(Margin { left: 18, right: 11, top: 11, bottom: 11 })
+                .show(ui, |ui| {
+                    ui.set_width(w - 29.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(if applying { "Restarting the node, about a minute" } else { "Saving restarts the node" }).size(12.5).color(kit::SOFT));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            if kit::button(ui, "save", if applying { "Restarting" } else { "Save and restart" }, if applying { kit::Kind::Plain } else { kit::Kind::Primary }, "Save the settings and restart the node") && changed && !applying {
+                                save = true;
+                            }
+                            if !applying && kit::button(ui, "undo", "Undo", kit::Kind::Plain, "Back to what the node uses now") {
+                                undo = true;
+                            }
+                        });
+                    });
+                });
+            kit::sheen(ui, r.response.rect, 14.0, 1.0);
         });
         if save {
             let mut cmds = vec![];
@@ -1023,7 +1049,7 @@ impl Panel {
                 });
             });
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new(code).font(FontId::monospace(30.0)).strong().color(TEXT));
+                ui.label(RichText::new(code).font(FontId::monospace(32.0)).extra_letter_spacing(6.0).color(TEXT));
             });
             ui.label(dim("On the phone open Settings, Compute nodes, Add a compute node, then type this code."));
             if let Some(a) = addresses.first() {
@@ -1036,27 +1062,38 @@ impl Panel {
         ui.ctx().request_repaint_after(Duration::from_millis(250));
     }
 
-    /// The sidebar: the node's name and state, then the pages, the selected one under a highlight that glides to it.
+    /// The sidebar: the mark with the node's state on it as a badge, as on the tray icon, the node's name, then the pages, the selected one
+    /// under a highlight that glides to it.
     fn sidebar(&mut self, ui: &mut Ui, view: &Option<View>, info: Option<&Info>) {
         let (title, sub, colour) = match view {
             Some(v) => match &v.poll {
-                Poll::Up(i) => (i.name.clone(), model::status_line(i), state_colour(v.state())),
-                Poll::Down => ("Marginalia node".to_string(), if v.starting { "Starting" } else { "Not running" }.to_string(), state_colour(State::Down)),
+                Poll::Up(i) => (i.name.clone(), hero_word(v.state()).to_string(), kit::state_colour(v.state())),
+                Poll::Down => ("Marginalia node".to_string(), if v.starting { "Starting" } else { "Not running" }.to_string(), kit::state_colour(State::Down)),
             },
-            None => ("Marginalia node".to_string(), "Looking for the node".to_string(), GREY),
+            None => ("Marginalia node".to_string(), "Looking for it".to_string(), kit::FAINT),
         };
+        let logo = self.logo.get_or_insert_with(|| ui.ctx().load_texture("mark", egui::ColorImage::from_rgba_unmultiplied([96, 96], &crate::glyph::mark_rgba(96)), egui::TextureOptions::LINEAR)).id();
         ui.horizontal(|ui| {
-            dot(ui, colour, 6.0);
-            truncated(ui, RichText::new(title).size(16.0).strong().color(TEXT));
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(34.0), Sense::hover());
+            ui.painter().image(logo, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+            let badge = rect.right_bottom() - Vec2::splat(4.0);
+            ui.painter().circle_filled(badge, 6.5, kit::SIDEBAR);
+            ui.painter().circle_filled(badge, 4.5, colour);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.add_space(0.0);
+                truncated(ui, RichText::new(title).font(kit::semibold(13.5)).color(TEXT));
+                ui.label(RichText::new(sub).size(12.0).color(DIM));
+            });
         });
-        ui.add(egui::Label::new(dim(sub)).wrap());
-        ui.add_space(20.0);
+        ui.add_space(18.0);
 
         let width = ui.available_width();
         let top = ui.cursor().min;
         // The highlight first, so the rows draw over it.
         let y = self.nav.value() * (NAV_H + NAV_GAP);
-        ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(top.x, top.y + y), Vec2::new(width, NAV_H)), CornerRadius::same(9), ACCENT.gamma_multiply(0.28));
+        ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(top.x, top.y + y), Vec2::new(width, NAV_H)), CornerRadius::same(7), Color32::from_white_alpha(26));
         let mut chosen = None;
         // The rows are NAV_H + NAV_GAP apart exactly, whatever the usual space between things is: the highlight is placed by that.
         ui.spacing_mut().item_spacing.y = 0.0;
@@ -1065,18 +1102,20 @@ impl Panel {
             let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
             // How much this row is the selected one, as the highlight arrives or leaves it.
             let lit = clamp01(1.0 - (self.nav.value() - page.index() as f32).abs());
-            if resp.hovered() && lit < 0.5 {
-                ui.painter().rect_filled(rect, CornerRadius::same(9), Color32::from_white_alpha(10));
+            // Pressing answers at once. The page changes when the pointer comes up.
+            let down = kit::spring(ui.ctx(), resp.id.with("down"), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, 1.0, 0.08);
+            let hover = kit::spring(ui.ctx(), resp.id.with("hover"), if resp.hovered() && lit < 0.5 { 1.0 } else { 0.0 }, 1.0, 0.1);
+            if hover > 0.01 || down > 0.01 {
+                ui.painter().rect_filled(rect, CornerRadius::same(7), Color32::from_white_alpha((10.0 * hover + 14.0 * down) as u8));
             }
-            let text = if lit > 0.5 { TEXT } else { Color32::from_rgb(190, 195, 205) };
-            draw_icon(ui.painter(), page.icon(), egui::pos2(rect.left() + 22.0, rect.center().y), if lit > 0.5 { ACCENT_TEXT } else { DIM });
-            ui.painter().text(egui::pos2(rect.left() + 44.0, rect.center().y), egui::Align2::LEFT_CENTER, page.title(), FontId::proportional(13.5), text);
+            draw_icon(ui.painter(), page.icon(), egui::pos2(rect.left() + 18.0, rect.center().y), kit::mix(kit::DIM, ACCENT_TEXT, lit));
+            ui.painter().text(egui::pos2(rect.left() + 36.0, rect.center().y), egui::Align2::LEFT_CENTER, page.title(), FontId::proportional(13.5), kit::mix(kit::SOFT, Color32::WHITE, lit));
             // The phones waiting to be let in, on the Phones row.
             if let (Page::Phones, Some(i)) = (page, info) {
                 if !i.asking.is_empty() {
                     let c = egui::pos2(rect.right() - 16.0, rect.center().y);
                     ui.painter().circle_filled(c, 9.0, AMBER);
-                    ui.painter().text(c, egui::Align2::CENTER_CENTER, i.asking.len().to_string(), FontId::proportional(11.0), Color32::BLACK);
+                    ui.painter().text(c, egui::Align2::CENTER_CENTER, i.asking.len().to_string(), kit::semibold(11.0), Color32::BLACK);
                 }
             }
             if resp.clicked() {
@@ -1087,26 +1126,22 @@ impl Panel {
         if let Some(p) = chosen {
             self.go(p);
         }
-        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-            ui.label(RichText::new("Right click the tray icon for the menu").size(11.0).color(FAINT));
-        });
     }
 
     /// The big title of a page, and a line under it.
     fn page_title(&self, ui: &mut Ui, title: &str, line: &str) {
-        ui.label(RichText::new(title).size(24.0).strong().color(TEXT));
+        ui.label(kit::title(title, 26.0));
         if !line.is_empty() {
-            ui.label(dim(line));
+            ui.label(RichText::new(line).size(13.0).color(DIM));
         }
-        ui.add_space(10.0);
+        ui.add_space(8.0);
     }
 
-    /// Pause, lock and stop, as switches and a button. A switch moved is shown at its new place at once, and the node's word follows.
+    /// Pause and lock, as switches. A switch moved is shown at its new place at once, and the node's word follows.
     fn node_card(&mut self, ui: &mut Ui, i: &Info) {
         let mut accept = self.shown("accept", !i.paused);
         let mut open = self.shown("open", !i.locked);
-        let confirming = self.confirm_stop;
-        let (mut accept_moved, mut open_moved, mut ask, mut yes, mut no) = (false, false, false, false, false);
+        let (mut accept_moved, mut open_moved) = (false, false);
         kit::heading(ui, "Node");
         kit::group(ui, |ui, g| {
             g.setting(ui, "Take new jobs", Some("Turn it off to pause. Jobs already running finish"), |ui| {
@@ -1114,18 +1149,6 @@ impl Panel {
             });
             g.setting(ui, "Let new phones join", Some("Turn it off and each new phone must be allowed first"), |ui| {
                 open_moved = kit::switch(ui, "open", &mut open);
-            });
-            g.setting(ui, "Stop the node", Some(if confirming { "Phones lose it until it is started" } else { "Finishes the jobs running, then shuts it down" }), |ui| {
-                if confirming {
-                    if kit::button(ui, "stop-yes", "Yes, stop it", kit::Kind::Danger, "") {
-                        yes = true;
-                    }
-                    if kit::button(ui, "stop-no", "Cancel", kit::Kind::Plain, "") {
-                        no = true;
-                    }
-                } else if kit::button(ui, "stop", "Stop node", kit::Kind::Danger, "Finish running jobs and shut the node down") {
-                    ask = true;
-                }
             });
         });
         if accept_moved {
@@ -1136,6 +1159,28 @@ impl Panel {
             self.expect("open", open);
             self.send(Cmd::Click(if open { Action::Unlock } else { Action::Lock }));
         }
+    }
+
+    /// Stopping is rare and cannot be undone from a phone, so it stands apart at the end of the page and asks once.
+    fn stop_group(&mut self, ui: &mut Ui) {
+        let confirming = self.confirm_stop;
+        let (mut ask, mut yes, mut no) = (false, false, false);
+        ui.add_space(14.0);
+        kit::group(ui, |ui, g| {
+            g.setting(ui, if confirming { "Stop the node?" } else { "Stop the node" }, Some(if confirming { "Phones lose it until it is started" } else { "Finishes the jobs running, then shuts it down" }), |ui| {
+                if confirming {
+                    if kit::button(ui, "stop-yes", "Yes, stop it", kit::Kind::Destructive, "") {
+                        yes = true;
+                    }
+                    ui.add_space(2.0);
+                    if kit::button(ui, "stop-no", "Cancel", kit::Kind::Plain, "") {
+                        no = true;
+                    }
+                } else if kit::button(ui, "stop", "Stop node", kit::Kind::Danger, "Finish running jobs and shut the node down") {
+                    ask = true;
+                }
+            });
+        });
         if ask {
             self.confirm_stop = true;
         }
@@ -1149,13 +1194,13 @@ impl Panel {
     }
 
     fn empty_state(&mut self, ui: &mut Ui, starting: bool) {
-        ui.add_space(70.0);
+        ui.add_space((ui.available_height() * 0.26).max(40.0));
         ui.vertical_centered(|ui| {
-            dot(ui, RED, 16.0);
-            ui.add_space(8.0);
-            ui.label(RichText::new(if starting { "Starting the node" } else { "The node is not running" }).size(17.0).strong().color(TEXT));
+            dot(ui, kit::FAINT, 7.0);
+            ui.add_space(10.0);
+            ui.label(RichText::new(if starting { "Starting the node" } else { "The node is not running" }).font(kit::semibold(20.0)).extra_letter_spacing(-0.2).color(TEXT));
             ui.add_space(4.0);
-            ui.label(dim(if starting { "It is loading its models. This can take a minute." } else { "Your phone uses its own speed until it is back." }));
+            ui.label(dim(if starting { "It is loading its models. This can take a minute." } else { "Your phone works on its own until it is back." }));
             ui.add_space(14.0);
             if !starting && kit::button(ui, "start", "Start node", kit::Kind::Primary, "Start marginalia-node on this machine") {
                 self.send(Cmd::Click(Action::Start));
@@ -1166,8 +1211,7 @@ impl Panel {
 
 impl eframe::App for Panel {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        let [r, g, b, _] = BG.to_normalized_gamma_f32();
-        [r, g, b, 1.0]
+        [0.0; 4]
     }
 
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
@@ -1185,49 +1229,68 @@ impl eframe::App for Panel {
             _ => None,
         };
 
-        egui::Panel::left("nav").exact_size(SIDEBAR_W).resizable(false).frame(Frame::NONE.fill(SIDEBAR).inner_margin(Margin { left: 14, right: 14, top: 20, bottom: 14 })).show(ui, |ui| {
+        // See-through where the system has a material to show behind it, solid where it does not.
+        let sidebar = if self.backdrop == Some(true) { Color32::from_rgba_unmultiplied(18, 18, 20, 205) } else { SIDEBAR };
+        egui::Panel::left("nav").exact_size(SIDEBAR_W).resizable(false).frame(Frame::NONE.fill(sidebar).inner_margin(Margin { left: 12, right: 12, top: 14, bottom: 12 })).show(ui, |ui| {
             self.sidebar(ui, &view, info.as_ref());
         });
 
-        // Settings keep their Save bar at the bottom of the window, in reach whatever the page's length.
-        if let (Page::Settings, Some(i)) = (self.page, &info) {
-            egui::Panel::bottom("save").frame(Frame::NONE.fill(SIDEBAR).inner_margin(Margin { left: 28, right: 28, top: 10, bottom: 12 })).show(ui, |ui| {
-                ui.set_max_width(ui.available_width().min(CONTENT_W));
-                self.settings_footer(ui, i);
-            });
-        }
-
+        let mut content = egui::Rect::NOTHING;
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            // The page comes in: a short fade and a rise of a few points.
-            let t = clamp01(self.page_in.value());
+            content = ui.max_rect();
+            ui.painter().rect_filled(content, 0.0, BG);
+            // The page comes in from the side it was moved towards: a short fade and a few points of travel.
+            let t = clamp01(self.page_in.value() * 1.3);
+            let travel = (1.0 - clamp01(self.page_in.value())) * 12.0 * self.page_dir;
             ui.set_opacity(t);
-            Frame::NONE.inner_margin(Margin { left: 28, right: 28, top: 22, bottom: 0 }).show(ui, |ui| {
-                ui.add_space((1.0 - t) * 10.0);
+            Frame::NONE.inner_margin(Margin { left: 26, right: 12, top: 8, bottom: 0 }).show(ui, |ui| {
+                ui.add_space((14.0 + travel).max(0.0));
                 match (&view, &info) {
                     (None, _) => {
-                        ui.label(dim("Looking for the node..."));
+                        ui.label(dim("Looking for the node"));
                     }
                     (Some(v), None) => {
                         self.empty_state(ui, v.starting);
                         if let Some((n, _)) = &self.notice {
                             ui.add_space(12.0);
-                            ui.vertical_centered(|ui| ui.label(RichText::new(n).size(12.0).color(RED)));
+                            ui.vertical_centered(|ui| ui.label(RichText::new(n).size(12.5).color(RED)));
                         }
                     }
-                    (Some(_), Some(i)) => {
+                    (Some(v), Some(i)) => {
                         if let Some((n, _)) = &self.notice {
                             ui.label(RichText::new(n).size(12.5).color(RED));
                         }
-                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                            ui.set_max_width(ui.available_width().min(CONTENT_W));
-                            ui.spacing_mut().item_spacing.y = 8.0;
-                            self.page_content(ui, i);
-                            ui.add_space(16.0);
+                        let state = v.state();
+                        let out = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                            // The column keeps its width in a wide window and stays in the middle of it, with the scroll bar outside.
+                            let room = ui.available_width() - 14.0;
+                            let col = room.min(CONTENT_W);
+                            ui.horizontal_top(|ui| {
+                                ui.add_space((room - col) / 2.0);
+                                ui.vertical(|ui| {
+                                    ui.set_width(col);
+                                    ui.spacing_mut().item_spacing.y = 8.0;
+                                    self.page_content(ui, state, i);
+                                    ui.add_space(if self.page == Page::Settings { 76.0 } else { 20.0 });
+                                });
+                            });
                         });
+                        // Soft edges where the page runs under the top and bottom of the window, only when there is more that way.
+                        let r = out.inner_rect;
+                        let offset = out.state.clamped_offset().y;
+                        if offset > 1.0 {
+                            kit::edge_fade(ui, egui::Rect::from_min_max(r.left_top(), egui::pos2(r.right(), r.top() + 22.0)), BG, true);
+                        }
+                        if offset + r.height() < out.content_size.y - 1.0 {
+                            kit::edge_fade(ui, egui::Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 30.0), r.right_bottom()), BG, false);
+                        }
                     }
                 }
             });
         });
+        if let (Page::Settings, Some(i)) = (self.page, &info) {
+            self.save_capsule(&ctx, content, i);
+        }
 
         if moving || self.nav.moving() {
             ctx.request_repaint();
@@ -1237,22 +1300,33 @@ impl eframe::App for Panel {
 
 impl Panel {
     /// The page's content, under its title.
-    fn page_content(&mut self, ui: &mut Ui, i: &Info) {
+    fn page_content(&mut self, ui: &mut Ui, state: State, i: &Info) {
         match self.page {
             Page::Overview => {
-                self.page_title(ui, "Overview", &model::status_line(i));
-                self.numbers(ui, i);
+                self.hero(ui, state, i);
                 self.node_card(ui, i);
-                self.speed(ui, i);
+                kit::heading(ui, "Activity");
                 self.activity(ui, i);
+                self.speed(ui, i);
                 self.addresses(ui, i);
+                self.stop_group(ui);
             }
             Page::Phones => {
-                self.page_title(ui, "Phones", "The phones that use this node, and how to add one");
-                if kit::button(ui, "pair", "Show pairing code", kit::Kind::Primary, "Show a code to type on a new phone") {
+                let mut pair = false;
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        ui.set_max_width(ui.available_width() - 170.0);
+                        self.page_title(ui, "Phones", "The phones that use this node, and how to add one");
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        ui.add_space(2.0);
+                        pair = kit::button(ui, "pair", "Show pairing code", kit::Kind::Primary, "Show a code to type on a new phone");
+                    });
+                });
+                if pair {
                     self.send(Cmd::Pair);
                 }
-                ui.add_space(2.0);
                 self.pairing_card(ui);
                 self.asking(ui, &i.asking);
                 self.phones(ui, &i.phones);
@@ -1263,10 +1337,20 @@ impl Panel {
                 self.models_section(ui);
             }
             Page::Settings => {
-                self.page_title(ui, "Settings", "Where the node runs its models, which chat model it uses, and how it starts");
+                self.page_title(ui, "Settings", "How the node starts and where its models run");
                 self.settings_page(ui, i);
             }
         }
+    }
+}
+
+/// The state in one word, for the large type on the Overview and under the name in the sidebar.
+fn hero_word(state: State) -> &'static str {
+    match state {
+        State::Running | State::Locked => "Running",
+        State::Busy => "Working",
+        State::Paused => "Paused",
+        State::Down => "Not running",
     }
 }
 
@@ -1277,6 +1361,8 @@ pub fn run(port: u16, page: Page) {
         .with_app_id("marginalia-node-tray")
         .with_inner_size(WINDOW)
         .with_min_inner_size(WINDOW_MIN)
+        // See-through only where the sidebar asks for it. Everything else is painted solid.
+        .with_transparent(true)
         .with_icon(egui::IconData { rgba, width: w, height: h });
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     let result = eframe::run_native(
@@ -1294,6 +1380,7 @@ pub fn run(port: u16, page: Page) {
             // Text is not selectable, so a click on a card's words reaches the card.
             style.interaction.selectable_labels = false;
             cc.egui_ctx.set_global_style(style);
+            kit::install_fonts(&cc.egui_ctx);
             Ok(Box::new(Panel::new(port, page, cc.egui_ctx.clone())))
         }),
     );
@@ -1322,6 +1409,14 @@ mod page_tests {
         for (i, p) in Page::ALL.iter().enumerate() {
             assert_eq!(p.index(), i);
         }
+    }
+
+    #[test]
+    fn every_state_has_a_word() {
+        assert_eq!(hero_word(State::Running), "Running");
+        assert_eq!(hero_word(State::Busy), "Working");
+        assert_eq!(hero_word(State::Paused), "Paused");
+        assert_eq!(hero_word(State::Down), "Not running");
     }
 
     #[test]

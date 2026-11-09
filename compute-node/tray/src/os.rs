@@ -168,6 +168,52 @@ pub fn focus_window(title: &str) -> bool {
     }
 }
 
+/// Asks Windows 11 to put its blurred material behind the window, so the sidebar can be see-through as a sidebar is. Returns Some(true)
+/// when the material is on, Some(false) when this system has none, and None when the window does not exist yet (try again next frame).
+pub fn apply_backdrop(title: &str, caption: [u8; 3]) -> Option<bool> {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct Margins {
+            left: i32,
+            right: i32,
+            top: i32,
+            bottom: i32,
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+        }
+        #[link(name = "dwmapi")]
+        extern "system" {
+            fn DwmSetWindowAttribute(hwnd: isize, attribute: u32, value: *const core::ffi::c_void, size: u32) -> i32;
+            fn DwmExtendFrameIntoClientArea(hwnd: isize, margins: *const Margins) -> i32;
+        }
+        let wide: Vec<u16> = title.encode_utf16().chain([0]).collect();
+        let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
+        if hwnd == 0 {
+            return None;
+        }
+        let set = |attribute: u32, value: u32| unsafe { DwmSetWindowAttribute(hwnd, attribute, &value as *const u32 as *const core::ffi::c_void, 4) };
+        // DWMWA_USE_IMMERSIVE_DARK_MODE, so the material and the title bar are the dark kind.
+        set(20, 1);
+        // DWMWA_CAPTION_COLOR, so the title bar is one surface with the page under it.
+        set(35, caption[0] as u32 | (caption[1] as u32) << 8 | (caption[2] as u32) << 16);
+        // DWMWA_SYSTEMBACKDROP_TYPE with DWMSBT_TRANSIENTWINDOW (acrylic). Older Windows says no, and the sidebar stays solid.
+        if set(38, 3) != 0 {
+            return Some(false);
+        }
+        let all = Margins { left: -1, right: -1, top: -1, bottom: -1 };
+        unsafe { DwmExtendFrameIntoClientArea(hwnd, &all) };
+        return Some(true);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (title, caption);
+        Some(false)
+    }
+}
+
 /// Lets the program with this id take the keyboard focus even though it was started by one that is in the background (the tray
 /// is, until its icon is clicked). Without it a menu window can open without focus and then not know when it is clicked away
 /// from. Other systems have no such rule.

@@ -1,29 +1,116 @@
-//! The building blocks of the details window, in the manner of the Settings windows of Hop and PeekABoo Notes: inset groups of
-//! rows, a switch whose knob runs on a spring, a segmented control whose pill glides to the chosen part with that part's label
-//! lighting up as it arrives, buttons that answer the pointer (a lift on hover, a press), and meters that glide to a new value.
+//! The look and the building blocks of the details window and the menu: type, colour, inset groups of rows, a switch, a segmented
+//! control, buttons, meters. The rules they follow:
 //!
-//! Every moving part keeps its spring in egui's own memory under its id, so a block needs no state of its own and a new one
-//! starts where it is (no motion on the first frame). Nothing here asks the system for anything but the Reduce Motion setting,
-//! read once. The same code runs on Windows and on Linux.
+//! - Feedback starts when the pointer goes down, not when it comes up. What is chosen is decided when it comes up.
+//! - Everything moves on springs, from where it is now, so a new target in mid-motion bends the path instead of jumping. Springs are
+//!   critically damped: a click carries no momentum, so nothing overshoots.
+//! - Weight, size and tracking make the hierarchy together, and the system's own font is used where it has one.
+//!
+//! Every moving part keeps its spring in egui's own memory under its id, so a block needs no state of its own and a new one starts
+//! where it is. Nothing here asks the system for anything but its fonts and the Reduce Motion setting. The same code runs on Windows
+//! and on Linux.
 
 use crate::anim::{clamp01, lerp, Spring};
-use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, CornerRadius, FontId, Id, Layout, Rect, Sense, Stroke, Ui};
+use crate::model::State;
+use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Id, Layout, Rect, RichText, Sense, Stroke, Ui};
+use std::sync::Arc;
 
-pub const GROUP: Color32 = Color32::from_rgb(31, 34, 41);
-pub const HAIR: Color32 = Color32::from_rgb(46, 50, 60);
-pub const TRACK: Color32 = Color32::from_rgb(54, 58, 69);
-pub const TEXT: Color32 = Color32::from_rgb(232, 234, 238);
-pub const SOFT: Color32 = Color32::from_rgb(190, 195, 205);
-pub const DIM: Color32 = Color32::from_rgb(142, 148, 160);
+pub const BG: Color32 = Color32::from_rgb(28, 28, 30);
+pub const SIDEBAR: Color32 = Color32::from_rgb(21, 21, 23);
+pub const GROUP: Color32 = Color32::from_rgb(40, 40, 43);
+/// A surface floating over the page.
+pub const RAISED: Color32 = Color32::from_rgb(54, 54, 58);
+pub const HAIR: Color32 = Color32::from_rgb(56, 56, 60);
+pub const TRACK: Color32 = Color32::from_rgb(62, 62, 66);
+pub const TEXT: Color32 = Color32::from_rgb(245, 245, 247);
+pub const SOFT: Color32 = Color32::from_rgb(209, 209, 214);
+pub const DIM: Color32 = Color32::from_rgb(152, 152, 157);
+pub const FAINT: Color32 = Color32::from_rgb(99, 99, 102);
+/// The mark's indigo.
 pub const ACCENT: Color32 = Color32::from_rgb(124, 108, 246);
+pub const ACCENT_LIGHT: Color32 = Color32::from_rgb(142, 128, 250);
+pub const GREEN: Color32 = Color32::from_rgb(48, 209, 88);
+pub const BLUE: Color32 = Color32::from_rgb(64, 156, 255);
+pub const ORANGE: Color32 = Color32::from_rgb(255, 159, 10);
+pub const RED: Color32 = Color32::from_rgb(255, 69, 58);
+pub const PURPLE: Color32 = Color32::from_rgb(191, 90, 242);
 
 /// The row height without and with a line of explanation under its name.
-pub const ROW: f32 = 46.0;
-pub const ROW_TALL: f32 = 58.0;
-const PAD: f32 = 14.0;
+pub const ROW: f32 = 44.0;
+pub const ROW_TALL: f32 = 56.0;
+const PAD: f32 = 16.0;
 
-/// A spring in egui's memory: where `id`'s value is now, moved on by the time since the last frame towards `target`. It starts
-/// at the target. Asks for frames while it moves and not when it is at rest.
+/// The two usual springs: things that glide to a new place, and quick answers to the pointer.
+const GLIDE: (f32, f32) = (1.0, 0.28);
+const ANSWER: (f32, f32) = (1.0, 0.10);
+
+const SEMIBOLD: &str = "semibold";
+
+pub fn state_colour(s: State) -> Color32 {
+    match s {
+        State::Running => GREEN,
+        State::Busy => BLUE,
+        State::Paused => ORANGE,
+        State::Locked => PURPLE,
+        State::Down => RED,
+    }
+}
+
+/// A heavier cut of the interface font. `install_fonts` must have run.
+pub fn semibold(size: f32) -> FontId {
+    FontId::new(size, semibold_family())
+}
+
+pub fn semibold_family() -> FontFamily {
+    FontFamily::Name(SEMIBOLD.into())
+}
+
+/// A large title. Big type reads too loose at normal spacing, so it is drawn a little tighter the larger it is.
+pub fn title(text: impl Into<String>, size: f32) -> RichText {
+    RichText::new(text.into()).font(semibold(size)).extra_letter_spacing(-size * 0.014).color(TEXT)
+}
+
+/// The font files to try, regular and semibold, best first.
+fn font_candidates() -> Vec<(String, String)> {
+    let mut list = Vec::new();
+    if cfg!(windows) {
+        let dir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+        list.push((format!(r"{dir}\Fonts\segoeui.ttf"), format!(r"{dir}\Fonts\seguisb.ttf")));
+    } else {
+        for (a, b) in [
+            ("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf", "/usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf"),
+            ("/usr/share/fonts/opentype/inter/Inter-Regular.otf", "/usr/share/fonts/opentype/inter/Inter-SemiBold.otf"),
+            ("/usr/share/fonts/truetype/inter/Inter-Regular.ttf", "/usr/share/fonts/truetype/inter/Inter-SemiBold.ttf"),
+            ("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-SemiBold.ttf"),
+            ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ] {
+            list.push((a.to_string(), b.to_string()));
+        }
+    }
+    list
+}
+
+/// Uses the system's interface font when it can be found, with egui's own fonts behind it for anything it lacks. Without one, egui's
+/// own stand in, so a machine with unusual fonts still shows everything.
+pub fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    let fallback = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let mut semibold = fallback.clone();
+    let found = font_candidates().into_iter().find_map(|(r, b)| Some((std::fs::read(r).ok()?, std::fs::read(b).ok()?)));
+    if let Some((regular, heavy)) = found {
+        fonts.font_data.insert("system".into(), Arc::new(FontData::from_owned(regular)));
+        fonts.font_data.insert("system-semibold".into(), Arc::new(FontData::from_owned(heavy)));
+        if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
+            family.insert(0, "system".into());
+        }
+        semibold.insert(0, "system-semibold".into());
+    }
+    fonts.families.insert(semibold_family(), semibold);
+    ctx.set_fonts(fonts);
+}
+
+/// A spring in egui's memory: where `id`'s value is now, moved on by the time since the last frame towards `target`. It starts at the
+/// target. Asks for frames while it moves and not when it is at rest.
 pub fn spring(ctx: &egui::Context, id: Id, target: f32, damping: f32, response: f32) -> f32 {
     let dt = ctx.input(|i| i.stable_dt);
     let reduced = reduced(ctx);
@@ -53,14 +140,35 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(lerp(a.r() as f32, b.r() as f32, t) as u8, lerp(a.g() as f32, b.g() as f32, t) as u8, lerp(a.b() as f32, b.b() as f32, t) as u8)
 }
 
+/// The focus ring is for people using the keys: it shows after Tab and goes when the pointer is used.
+fn keys_in_use(ctx: &egui::Context) -> bool {
+    let id = Id::NULL.with("kit-keys-in-use");
+    let (tab, pointer) = ctx.input(|i| (i.key_pressed(egui::Key::Tab), i.pointer.any_pressed()));
+    let mut on = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    if tab {
+        on = true;
+    }
+    if pointer {
+        on = false;
+    }
+    ctx.data_mut(|d| d.insert_temp(id, on));
+    on
+}
+
+fn focus_ring(ui: &Ui, resp: &egui::Response, rect: Rect, radius: u8) {
+    if resp.has_focus() && keys_in_use(ui.ctx()) {
+        ui.painter().rect_stroke(rect.expand(2.0), CornerRadius::same(radius + 2), Stroke::new(2.0, ACCENT_LIGHT), egui::StrokeKind::Outside);
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Headings and groups
 // ---------------------------------------------------------------------------------------------
 
 /// A quiet title above a group.
 pub fn heading(ui: &mut Ui, text: &str) {
-    ui.add_space(8.0);
-    ui.label(egui::RichText::new(text).size(12.0).strong().color(DIM));
+    ui.add_space(14.0);
+    ui.label(RichText::new(text).font(semibold(12.5)).color(SOFT));
     ui.add_space(2.0);
 }
 
@@ -71,11 +179,18 @@ pub struct Group {
 
 pub fn group(ui: &mut Ui, add: impl FnOnce(&mut Ui, &mut Group)) {
     let mut g = Group { rows: 0 };
-    egui::Frame::NONE.fill(GROUP).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
+    let r = egui::Frame::NONE.fill(GROUP).corner_radius(CornerRadius::same(12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.spacing_mut().item_spacing.y = 0.0;
         add(ui, &mut g);
     });
+    sheen(ui, r.response.rect, 12.0, 1.0);
+}
+
+/// Light catching the top edge of a surface: one faint line, inset by the corners.
+pub fn sheen(ui: &Ui, rect: Rect, radius: f32, alpha: f32) {
+    let y = rect.top() + 0.5;
+    ui.painter().line_segment([pos2(rect.left() + radius, y), pos2(rect.right() - radius, y)], Stroke::new(1.0, Color32::from_white_alpha((11.0 * alpha) as u8)));
 }
 
 impl Group {
@@ -85,7 +200,7 @@ impl Group {
         if self.rows > 0 {
             let y = ui.cursor().top();
             let left = ui.cursor().left();
-            ui.painter().line_segment([pos2(left + PAD, y), pos2(left + width - PAD, y)], Stroke::new(1.0, HAIR));
+            ui.painter().line_segment([pos2(left + PAD, y), pos2(left + width, y)], Stroke::new(1.0, HAIR));
         }
         self.rows += 1;
         ui.allocate_ui_with_layout(vec2(width, height), Layout::left_to_right(Align::Center), |ui| {
@@ -103,9 +218,9 @@ impl Group {
             // Room is kept for the control.
             let width = (ui.available_width() - 190.0).max(120.0);
             text_block(ui, width, height, if line.is_some() { NAME_H + LINE_H } else { NAME_H }, |ui| {
-                ui.label(egui::RichText::new(title).size(13.5).color(TEXT));
+                ui.label(RichText::new(title).size(13.5).color(TEXT));
                 if let Some(l) = line {
-                    ui.label(egui::RichText::new(l).size(11.5).color(DIM));
+                    ui.label(RichText::new(l).size(12.0).color(DIM));
                 }
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -132,25 +247,44 @@ pub fn text_block(ui: &mut Ui, width: f32, height: f32, content: f32, add: impl 
     });
 }
 
+/// A soft fade at the top or bottom edge of a scrolling area, where content meets what is above or below it: no hard line.
+pub fn edge_fade(ui: &Ui, rect: Rect, colour: Color32, solid_at_top: bool) {
+    let mut mesh = egui::Mesh::default();
+    let (top, bottom) = if solid_at_top { (colour, Color32::TRANSPARENT) } else { (Color32::TRANSPARENT, colour) };
+    mesh.colored_vertex(rect.left_top(), top);
+    mesh.colored_vertex(rect.right_top(), top);
+    mesh.colored_vertex(rect.left_bottom(), bottom);
+    mesh.colored_vertex(rect.right_bottom(), bottom);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(1, 2, 3);
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
 // ---------------------------------------------------------------------------------------------
 // Controls
 // ---------------------------------------------------------------------------------------------
 
-/// A switch. The knob runs on a spring to its side and the track takes the accent colour as it goes. True when clicked.
+/// A switch. The knob stretches the moment it is pressed, runs to its side on a spring, and the track takes the accent colour as it
+/// goes. True when clicked.
 pub fn switch(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, on: &mut bool) -> bool {
     let id = ui.scope_id().with(("kit-switch", id));
-    let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 22.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(42.0, 25.0), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    let k = spring(ui.ctx(), id, if *on { 1.0 } else { 0.0 }, 0.76, 0.26);
-    let hover = spring(ui.ctx(), id.with("h"), if resp.hovered() { 1.0 } else { 0.0 }, 1.0, 0.12);
+    let ctx = ui.ctx().clone();
+    let k = spring(&ctx, id, if *on { 1.0 } else { 0.0 }, GLIDE.0, 0.24);
+    let hover = spring(&ctx, id.with("h"), if resp.hovered() { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
+    let press = spring(&ctx, id.with("p"), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(11), mix(mix(TRACK, Color32::from_rgb(70, 75, 90), hover), ACCENT, k));
-    let x = lerp(rect.left() + 11.0, rect.right() - 11.0, k);
-    painter.circle_filled(pos2(x, rect.center().y + 0.8), 9.0, Color32::from_black_alpha(50));
-    painter.circle_filled(pos2(x, rect.center().y), 8.4, Color32::WHITE);
-    if resp.has_focus() {
-        painter.rect_stroke(rect.expand(2.0), CornerRadius::same(13), Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside);
-    }
+    painter.rect_filled(rect, CornerRadius::same(13), mix(mix(TRACK, Color32::from_rgb(76, 76, 80), hover), ACCENT, k));
+    let (r, inset) = (10.5, 2.0);
+    let x = lerp(rect.left() + inset + r, rect.right() - inset - r, k);
+    // The stretch reaches towards the side the knob would go to.
+    let stretch = press * 5.0;
+    let (left, right) = (x - r - stretch * k, x + r + stretch * (1.0 - k));
+    let knob = Rect::from_min_max(pos2(left, rect.center().y - r), pos2(right, rect.center().y + r));
+    painter.add(egui::epaint::Shadow { offset: [0, 1], blur: 4, spread: 0, color: Color32::from_black_alpha(70) }.as_shape(knob, CornerRadius::same(11)));
+    painter.rect_filled(knob, CornerRadius::same(11), Color32::WHITE);
+    focus_ring(ui, &resp, rect, 13);
     let clicked = resp.clicked();
     if clicked {
         *on = !*on;
@@ -158,38 +292,46 @@ pub fn switch(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, on: &mut 
     clicked
 }
 
-/// A choice of one among a few, side by side. The pill glides to the chosen one and its label lights as the pill arrives.
-/// Returns true when the choice was changed.
+/// A choice of one among a few, side by side. The pill glides to the chosen one and its label lights as the pill arrives. Returns true
+/// when the choice was changed.
 pub fn segmented(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, options: &[&str], selected: &mut usize) -> bool {
     let id = ui.scope_id().with(("kit-segmented", id));
     let font = FontId::proportional(12.5);
-    let widths: Vec<f32> = options.iter().map(|o| ui.painter().layout_no_wrap(o.to_string(), font.clone(), TEXT).size().x + 26.0).collect();
-    let total: f32 = widths.iter().sum::<f32>() + 6.0;
-    let (outer, _) = ui.allocate_exact_size(vec2(total, 30.0), Sense::hover());
+    let widths: Vec<f32> = options.iter().map(|o| ui.painter().layout_no_wrap(o.to_string(), font.clone(), TEXT).size().x + 24.0).collect();
+    let total: f32 = widths.iter().sum::<f32>() + 4.0;
+    let (outer, _) = ui.allocate_exact_size(vec2(total, 28.0), Sense::hover());
     let ctx = ui.ctx().clone();
     // Where each part is.
     let mut lefts = Vec::new();
-    let mut x = outer.left() + 3.0;
+    let mut x = outer.left() + 2.0;
     for w in &widths {
         lefts.push(x);
         x += w;
     }
     let sel = (*selected).min(options.len().saturating_sub(1));
-    let pill_x = spring(&ctx, id.with("x"), lefts[sel], 0.86, 0.22);
-    let pill_w = spring(&ctx, id.with("w"), widths[sel], 0.86, 0.22);
-    ui.painter().rect_filled(outer, CornerRadius::same(9), TRACK);
-    ui.painter().rect_filled(Rect::from_min_size(pos2(pill_x, outer.top() + 3.0), vec2(pill_w, 24.0)), CornerRadius::same(7), mix(TRACK, ACCENT, 0.62));
+    let pill_x = spring(&ctx, id.with("x"), lefts[sel], GLIDE.0, GLIDE.1);
+    let pill_w = spring(&ctx, id.with("w"), widths[sel], GLIDE.0, GLIDE.1);
+    ui.painter().rect_filled(outer, CornerRadius::same(8), Color32::from_rgb(30, 30, 32));
+    let mut responses = Vec::new();
+    for (i, w) in widths.iter().enumerate() {
+        let rect = Rect::from_min_size(pos2(lefts[i], outer.top() + 2.0), vec2(*w, 24.0));
+        responses.push((rect, ui.interact(rect, id.with(i), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand)));
+    }
+    let held = responses[sel].1.is_pointer_button_down_on();
+    let press = spring(&ctx, id.with("p"), if held { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
+    let pill = Rect::from_min_size(pos2(pill_x, outer.top() + 2.0), vec2(pill_w, 24.0)).shrink(press * 1.0);
+    ui.painter().add(egui::epaint::Shadow { offset: [0, 1], blur: 3, spread: 0, color: Color32::from_black_alpha(60) }.as_shape(pill, CornerRadius::same(6)));
+    ui.painter().rect_filled(pill, CornerRadius::same(6), Color32::from_rgb(92, 92, 96));
     let mut changed = false;
     for (i, label) in options.iter().enumerate() {
-        let rect = Rect::from_min_size(pos2(lefts[i], outer.top() + 3.0), vec2(widths[i], 24.0));
-        let resp = ui.interact(rect, id.with(i), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let (rect, resp) = &responses[i];
         // How much the pill is under this part now, so the label lights as it comes and dims as it goes.
         let lit = clamp01(1.0 - ((pill_x + pill_w / 2.0) - rect.center().x).abs() / (rect.width() * 0.9));
-        let hover = spring(&ctx, id.with(("h", i)), if resp.hovered() && i != sel { 1.0 } else { 0.0 }, 1.0, 0.12);
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font.clone(), mix(mix(DIM, SOFT, hover), Color32::WHITE, lit));
-        if resp.has_focus() {
-            ui.painter().rect_stroke(rect, CornerRadius::same(7), Stroke::new(1.5, ACCENT), egui::StrokeKind::Inside);
-        }
+        let down = spring(&ctx, id.with(("d", i)), if resp.is_pointer_button_down_on() && i != sel { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
+        let hover = spring(&ctx, id.with(("h", i)), if resp.hovered() && i != sel { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
+        let c = mix(mix(mix(DIM, TEXT, hover), DIM, down), Color32::WHITE, lit);
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, font.clone(), c);
+        focus_ring(ui, resp, *rect, 6);
         if resp.clicked() && i != sel {
             *selected = i;
             changed = true;
@@ -203,63 +345,72 @@ pub fn segmented(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, option
 pub enum Kind {
     Plain,
     Primary,
+    /// Ends something, asked for once: red words on a quiet ground.
     Danger,
+    /// The answer to "are you sure": solid red.
+    Destructive,
 }
 
-/// A button that answers the pointer: it lifts in colour on hover and sinks a little when pressed. True when clicked.
+/// A button that answers the pointer: it lifts on hover and sinks the moment it is pressed. True when clicked.
 pub fn button(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, text: &str, kind: Kind, hint: &str) -> bool {
     let id = ui.scope_id().with(("kit-button", id));
-    let font = FontId::proportional(12.5);
-    let w = ui.painter().layout_no_wrap(text.to_string(), font.clone(), TEXT).size().x + 28.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w.max(72.0), 30.0), Sense::click());
+    let font = if matches!(kind, Kind::Primary | Kind::Destructive) { semibold(13.0) } else { FontId::proportional(13.0) };
+    let w = ui.painter().layout_no_wrap(text.to_string(), font.clone(), TEXT).size().x + 26.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w.max(64.0), 28.0), Sense::click());
     let mut resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     if !hint.is_empty() {
         resp = resp.on_hover_text(hint);
     }
     let ctx = ui.ctx().clone();
-    let hover = spring(&ctx, id.with("h"), if resp.hovered() { 1.0 } else { 0.0 }, 1.0, 0.12);
-    let press = spring(&ctx, id.with("p"), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, 1.0, 0.08);
-    let (base, lifted) = match kind {
-        Kind::Plain => (TRACK, Color32::from_rgb(70, 75, 90)),
-        Kind::Primary => (Color32::from_rgb(38, 120, 66), Color32::from_rgb(48, 146, 80)),
-        Kind::Danger => (Color32::from_rgb(98, 44, 46), Color32::from_rgb(128, 54, 56)),
+    let hover = spring(&ctx, id.with("h"), if resp.hovered() { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
+    let press = spring(&ctx, id.with("p"), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, ANSWER.0, 0.06);
+    let (base, lifted, words) = match kind {
+        Kind::Plain => (Color32::from_rgb(68, 68, 72), Color32::from_rgb(84, 84, 88), TEXT),
+        Kind::Primary => (ACCENT, ACCENT_LIGHT, Color32::WHITE),
+        Kind::Danger => (Color32::from_rgb(64, 42, 44), Color32::from_rgb(82, 48, 50), Color32::from_rgb(255, 120, 110)),
+        Kind::Destructive => (Color32::from_rgb(214, 58, 50), RED, Color32::WHITE),
     };
-    let r = rect.shrink(press * 1.2);
-    ui.painter().rect_filled(r, CornerRadius::same(8), mix(base, lifted, hover));
-    ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, if kind == Kind::Plain { mix(SOFT, Color32::WHITE, hover) } else { Color32::WHITE });
-    if resp.has_focus() {
-        ui.painter().rect_stroke(rect.expand(1.5), CornerRadius::same(9), Stroke::new(1.5, ACCENT), egui::StrokeKind::Outside);
-    }
+    let r = rect.shrink(press * 1.0);
+    let fill = mix(mix(base, lifted, hover), Color32::BLACK, press * 0.14);
+    ui.painter().rect_filled(r, CornerRadius::same(7), fill);
+    sheen(ui, r, 7.0, 1.2);
+    ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, words);
+    focus_ring(ui, &resp, rect, 7);
     resp.clicked()
 }
 
 /// A meter: the filled part glides to `fraction` (0 to 1) when it changes.
 pub fn meter(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, width: f32, fraction: f32, colour: Color32) {
     let id = ui.scope_id().with(("kit-meter", id));
-    let (rect, _) = ui.allocate_exact_size(vec2(width.max(20.0), 8.0), Sense::hover());
-    let f = spring(ui.ctx(), id, clamp01(fraction), 0.9, 0.35);
-    ui.painter().rect_filled(rect, CornerRadius::same(4), TRACK);
+    let (rect, _) = ui.allocate_exact_size(vec2(width.max(20.0), 6.0), Sense::hover());
+    let f = spring(ui.ctx(), id, clamp01(fraction), GLIDE.0, 0.4);
+    ui.painter().rect_filled(rect, CornerRadius::same(3), Color32::from_white_alpha(20));
     if f > 0.002 {
         let mut fill = rect;
-        fill.set_width((rect.width() * f).max(8.0));
-        ui.painter().rect_filled(fill, CornerRadius::same(4), colour);
+        fill.set_width((rect.width() * f).max(6.0));
+        ui.painter().rect_filled(fill, CornerRadius::same(3), colour);
     }
 }
 
-/// A big number with a caption under it, for the figures at the top of the overview.
-pub fn stat(ui: &mut Ui, width: f32, value: &str, caption: &str) {
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 74.0), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(12), GROUP);
-    ui.painter().text(pos2(rect.center().x, rect.top() + 28.0), Align2::CENTER_CENTER, value, FontId::proportional(24.0), TEXT);
-    ui.painter().text(pos2(rect.center().x, rect.top() + 54.0), Align2::CENTER_CENTER, caption, FontId::proportional(12.0), DIM);
+/// A figure and its caption, one above the other, in `width`.
+pub fn figure(ui: &mut Ui, width: f32, value: &str, caption: &str) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 46.0), Sense::hover());
+    ui.painter().text(pos2(rect.center().x, rect.top() + 15.0), Align2::CENTER_CENTER, value, semibold(20.0), TEXT);
+    ui.painter().text(pos2(rect.center().x, rect.top() + 36.0), Align2::CENTER_CENTER, caption, FontId::proportional(11.5), DIM);
+}
+
+/// A thin upright line between things in a row.
+pub fn divider(ui: &mut Ui, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(vec2(1.0, height), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, HAIR);
 }
 
 /// A small coloured label.
 pub fn pill(ui: &mut Ui, text: &str, colour: Color32) {
-    let font = FontId::proportional(11.5);
+    let font = FontId::proportional(12.0);
     let w = ui.painter().layout_no_wrap(text.to_string(), font.clone(), colour).size().x + 18.0;
     let (rect, _) = ui.allocate_exact_size(vec2(w, 22.0), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(11), colour.gamma_multiply(0.18));
+    ui.painter().rect_filled(rect, CornerRadius::same(11), colour.gamma_multiply(0.16));
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, text, font, colour);
 }
 
@@ -291,5 +442,26 @@ mod tests {
         assert_eq!(seen[0], 0.0, "no motion on the first frame");
         assert!(seen[10] > 0.0 && seen[10] < 1.0, "moving: {}", seen[10]);
         assert!((seen[89] - 1.0).abs() < 0.002, "arrived: {}", seen[89]);
+    }
+
+    #[test]
+    fn every_state_has_its_own_colour() {
+        let all = [State::Running, State::Busy, State::Paused, State::Locked, State::Down];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(state_colour(*a), state_colour(*b));
+            }
+        }
+    }
+
+    #[test]
+    fn the_fallback_fonts_always_give_a_semibold_family() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        // Without a semibold family, asking for it would panic at the first label.
+        ctx.begin_pass(egui::RawInput::default());
+        let w = ctx.fonts_mut(|f| f.layout_no_wrap("Marginalia".to_string(), semibold(14.0), TEXT).size().x);
+        let _ = ctx.end_pass();
+        assert!(w > 10.0);
     }
 }

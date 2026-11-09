@@ -9,26 +9,21 @@
 
 use crate::anim::{clamp01, lerp, Fade, Spring};
 use crate::menuspec::{self, Icon, Nav, Row, Spec};
+use crate::kit;
 use crate::model::{Action, State};
 use eframe::egui::{self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, Ui};
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-const BG: Color32 = Color32::from_rgb(24, 26, 32);
-const EDGE: Color32 = Color32::from_rgb(64, 68, 82);
-const TEXT: Color32 = Color32::from_rgb(232, 234, 238);
-const DIM: Color32 = Color32::from_rgb(150, 156, 168);
-const FAINT: Color32 = Color32::from_rgb(98, 104, 116);
-const RED: Color32 = Color32::from_rgb(244, 112, 106);
-const LINE: Color32 = Color32::from_rgb(48, 52, 62);
-/// The mark's indigo, for the switch and the selected row's edge.
-const ACCENT: Color32 = Color32::from_rgb(124, 108, 246);
-const TRACK_OFF: Color32 = Color32::from_rgb(66, 70, 82);
-
-fn state_colour(s: State) -> Color32 {
-    let [r, g, b] = crate::icon::colour(s);
-    Color32::from_rgb(r, g, b)
-}
+const BG: Color32 = Color32::from_rgb(38, 38, 41);
+const EDGE: Color32 = Color32::from_rgb(70, 70, 74);
+const TEXT: Color32 = kit::TEXT;
+const DIM: Color32 = kit::DIM;
+const FAINT: Color32 = kit::FAINT;
+const RED: Color32 = Color32::from_rgb(255, 110, 100);
+const LINE: Color32 = Color32::from_rgb(62, 62, 66);
+const ACCENT: Color32 = kit::ACCENT;
+const TRACK_OFF: Color32 = Color32::from_rgb(76, 76, 80);
 
 /// A colour with part of its opacity, as the window fades.
 fn fade(c: Color32, a: f32) -> Color32 {
@@ -70,7 +65,7 @@ impl Popover {
             .rows
             .iter()
             .map(|r| match r {
-                Row::Item { switch: Some(on), .. } => Spring::new(if *on { 1.0 } else { 0.0 }, 0.78, 0.26),
+                Row::Item { switch: Some(on), .. } => Spring::new(if *on { 1.0 } else { 0.0 }, 1.0, 0.24),
                 _ => Spring::new(0.0, 1.0, 0.2),
             })
             .collect();
@@ -78,9 +73,10 @@ impl Popover {
             spec,
             tops,
             nav,
-            enter: Spring::new(0.0, 0.78, 0.30),
-            hl_y: Spring::new(0.0, 0.88, 0.17),
-            hl_a: Spring::new(0.0, 1.0, 0.12),
+            // Critically damped: nothing about opening a menu carries momentum, so it arrives and stays.
+            enter: Spring::new(0.0, 1.0, 0.26),
+            hl_y: Spring::new(0.0, 1.0, 0.11),
+            hl_a: Spring::new(0.0, 1.0, 0.08),
             knobs,
             closing: None,
             close_at: None,
@@ -105,7 +101,7 @@ impl Popover {
 
     fn begin_close(&mut self) {
         if self.closing.is_none() {
-            self.closing = Some(Fade::new(1.0, 0.0, 0.14));
+            self.closing = Some(Fade::new(1.0, 0.0, 0.16));
         }
     }
 
@@ -237,15 +233,14 @@ impl Popover {
 
     fn paint(&self, painter: &Painter, window: Rect) {
         let out = self.closing.map(|f| f.value()).unwrap_or(1.0);
-        let alpha = clamp01(self.enter.value()) * out;
-        let dir = if self.spec.rise { 1.0 } else { -1.0 };
-        // Rising into place from a little below (or dropping from a little above), and a short slide away on the way out.
-        let offset = (1.0 - self.enter.value()) * 14.0 * dir + (1.0 - out) * 5.0 * dir;
-        let card = window.shrink(menuspec::SHADOW).translate(vec2(0.0, offset));
+        let alpha = clamp01(self.enter.value() * 1.5) * out;
+        let card = window.shrink(menuspec::SHADOW);
 
-        painter.add(egui::epaint::Shadow { offset: [0, 3], blur: 12, spread: 0, color: Color32::from_black_alpha((110.0 * alpha) as u8) }.as_shape(card, CornerRadius::same(13)));
-        painter.rect_filled(card, CornerRadius::same(13), fade(BG, alpha * 0.985));
-        painter.rect_stroke(card.shrink(0.5), CornerRadius::same(13), Stroke::new(1.0, fade(EDGE, alpha)), StrokeKind::Inside);
+        painter.add(egui::epaint::Shadow { offset: [0, 3], blur: 12, spread: 0, color: Color32::from_black_alpha((120.0 * alpha) as u8) }.as_shape(card, CornerRadius::same(12)));
+        painter.rect_filled(card, CornerRadius::same(12), fade(BG, alpha * 0.99));
+        painter.rect_stroke(card.shrink(0.5), CornerRadius::same(12), Stroke::new(1.0, fade(EDGE, alpha)), StrokeKind::Inside);
+        // Light catching the top edge.
+        painter.line_segment([pos2(card.left() + 12.0, card.top() + 1.5), pos2(card.right() - 12.0, card.top() + 1.5)], Stroke::new(1.0, Color32::from_white_alpha((14.0 * alpha) as u8)));
 
         self.paint_header(painter, card, alpha);
 
@@ -253,8 +248,9 @@ impl Popover {
         let ha = self.hl_a.value();
         if ha > 0.003 {
             let pressed = self.pressed.is_some() && self.pressed == self.nav.selected();
-            let rect = Rect::from_min_size(pos2(card.left() + menuspec::PAD, card.top() + self.hl_y.value() + 1.0), vec2(card.width() - 2.0 * menuspec::PAD, menuspec::ROW_H - 2.0));
-            painter.rect_filled(rect, CornerRadius::same(8), fade(Color32::from_white_alpha(if pressed { 34 } else { 22 }), alpha * ha));
+            let rect = Rect::from_min_size(pos2(card.left() + menuspec::PAD, card.top() + self.hl_y.value()), vec2(card.width() - 2.0 * menuspec::PAD, menuspec::ROW_H));
+            // Lit the moment the pointer goes down: a shade deeper while held.
+            painter.rect_filled(rect, CornerRadius::same(6), fade(if pressed { kit::mix(ACCENT, Color32::BLACK, 0.16) } else { ACCENT }, alpha * ha));
         }
 
         for (i, row) in self.spec.rows.iter().enumerate() {
@@ -262,7 +258,7 @@ impl Popover {
             match row {
                 Row::Separator => {
                     let y = rect.center().y;
-                    painter.line_segment([pos2(rect.left() + 8.0, y), pos2(rect.right() - 8.0, y)], Stroke::new(1.0, fade(LINE, alpha)));
+                    painter.line_segment([pos2(rect.left() + 10.0, y), pos2(rect.right() - 10.0, y)], Stroke::new(1.0, fade(LINE, alpha)));
                 }
                 Row::Note(t) => {
                     painter.text(pos2(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, t, FontId::proportional(12.5), fade(FAINT, alpha));
@@ -270,13 +266,13 @@ impl Popover {
                 Row::Item { text, icon, switch, danger, .. } => {
                     // How much this row is the selected one, so its words brighten as the highlight arrives.
                     let lit = if self.nav.selected() == Some(i) { ha } else { 0.0 };
-                    let base = if *danger { RED } else { TEXT };
-                    let colour = |dim: Color32| if *danger { RED } else { blend(dim, TEXT, lit) };
-                    let icon_c = pos2(rect.left() + 20.0, rect.center().y);
-                    draw_icon(painter, *icon, icon_c, fade(if *danger { RED } else { colour(DIM) }, alpha));
-                    painter.text(pos2(rect.left() + 40.0, rect.center().y), Align2::LEFT_CENTER, text, FontId::proportional(13.0), fade(if *danger { base } else { colour(Color32::from_rgb(214, 218, 226)) }, alpha));
+                    let rest = if *danger { RED } else { TEXT };
+                    let words = blend(rest, Color32::WHITE, lit);
+                    let picture = blend(if *danger { RED } else { DIM }, Color32::WHITE, lit);
+                    draw_icon(painter, *icon, pos2(rect.left() + 18.0, rect.center().y), fade(picture, alpha));
+                    painter.text(pos2(rect.left() + 36.0, rect.center().y), Align2::LEFT_CENTER, text, FontId::proportional(13.0), fade(words, alpha));
                     if switch.is_some() {
-                        draw_switch(painter, pos2(rect.right() - 30.0, rect.center().y), self.knobs[i].value(), alpha);
+                        draw_switch(painter, pos2(rect.right() - 26.0, rect.center().y), self.knobs[i].value(), alpha, lit);
                     }
                 }
             }
@@ -286,13 +282,13 @@ impl Popover {
     fn paint_header(&self, painter: &Painter, card: Rect, alpha: f32) {
         let left = card.left() + menuspec::PAD + 12.0;
         let mid_y = card.top() + menuspec::PAD + menuspec::HEADER_H / 2.0 - 1.0;
-        let colour = state_colour(self.spec.state);
+        let colour = kit::state_colour(self.spec.state);
         // The state's colour as a dot with a soft ring, the way the icon's badge is.
         painter.circle_filled(pos2(left + 6.0, mid_y), 10.0, fade(colour, alpha * 0.16));
         painter.circle_filled(pos2(left + 6.0, mid_y), 5.0, fade(colour, alpha));
         let max_w = card.right() - menuspec::PAD - 12.0 - (left + 26.0);
-        let title = fit(painter, &self.spec.title, FontId::proportional(14.0), max_w);
-        painter.text(pos2(left + 26.0, mid_y - 8.0), Align2::LEFT_CENTER, title, FontId::proportional(14.0), fade(TEXT, alpha));
+        let title = fit(painter, &self.spec.title, kit::semibold(13.5), max_w);
+        painter.text(pos2(left + 26.0, mid_y - 8.0), Align2::LEFT_CENTER, title, kit::semibold(13.5), fade(TEXT, alpha));
         let sub = fit(painter, &self.spec.subtitle, FontId::proportional(12.0), max_w);
         painter.text(pos2(left + 26.0, mid_y + 9.0), Align2::LEFT_CENTER, sub, FontId::proportional(12.0), fade(DIM, alpha));
     }
@@ -320,12 +316,14 @@ fn fit(painter: &Painter, text: &str, font: FontId, max_w: f32) -> String {
     String::new()
 }
 
-fn draw_switch(painter: &Painter, centre: Pos2, on: f32, alpha: f32) {
-    let track = Rect::from_center_size(centre, vec2(34.0, 18.0));
-    painter.rect_filled(track, CornerRadius::same(9), fade(blend(TRACK_OFF, ACCENT, on), alpha));
-    let x = lerp(track.left() + 9.0, track.right() - 9.0, on);
-    painter.circle_filled(pos2(x, centre.y + 0.5), 7.6, Color32::from_black_alpha((40.0 * alpha) as u8));
-    painter.circle_filled(pos2(x, centre.y), 7.0, fade(Color32::WHITE, alpha));
+/// `lit` is how much its row is highlighted: on the accent colour the track goes pale so it still reads.
+fn draw_switch(painter: &Painter, centre: Pos2, on: f32, alpha: f32, lit: f32) {
+    let track = Rect::from_center_size(centre, vec2(32.0, 19.0));
+    let colour = blend(blend(TRACK_OFF, ACCENT, on), Color32::from_rgb(190, 182, 252), lit * 0.75);
+    painter.rect_filled(track, CornerRadius::same(10), fade(colour, alpha));
+    let x = lerp(track.left() + 9.5, track.right() - 9.5, on);
+    painter.circle_filled(pos2(x, centre.y + 0.6), 8.0, Color32::from_black_alpha((46.0 * alpha) as u8));
+    painter.circle_filled(pos2(x, centre.y), 7.8, fade(Color32::WHITE, alpha));
 }
 
 /// The row pictures, drawn with lines and shapes so there are no image files. Each fits a box about 14 points across.
@@ -409,6 +407,12 @@ impl eframe::App for Popover {
         let card = window.shrink(menuspec::SHADOW);
         self.pointer(&ctx, card);
         let moving = self.animate(dt);
+        // The window grows out of the edge nearest the icon and goes back the same way, text and all.
+        let out = self.closing.map(|f| f.value()).unwrap_or(1.0);
+        let scale = lerp(0.94, 1.0, clamp01(self.enter.value())) * lerp(0.96, 1.0, out);
+        let edge = if self.spec.rise { card.bottom() } else { card.top() };
+        let at = vec2(card.center().x, edge);
+        ctx.set_transform_layer(ui.layer_id(), egui::emath::TSTransform::new(at * (1.0 - scale), scale));
         self.paint(ui.painter(), window);
         if self.closing.as_ref().map(|f| f.done()).unwrap_or(false) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -456,6 +460,7 @@ pub fn run(spec: Spec, at: Option<(f32, f32)>) {
             style.visuals.window_shadow = egui::epaint::Shadow::NONE;
             style.interaction.selectable_labels = false;
             cc.egui_ctx.set_global_style(style);
+            kit::install_fonts(&cc.egui_ctx);
             Ok(Box::new(Popover::new(spec)))
         }),
     );
