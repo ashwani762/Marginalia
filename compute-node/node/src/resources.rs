@@ -190,6 +190,8 @@ impl Resources {
                 cmd.creation_flags(0x0800_0000); // no console window
             }
             let Ok(mut child) = cmd.spawn() else { return };
+            #[cfg(windows)]
+            die_with_this_process(&child);
             let Some(out) = child.stdout.take() else { return };
             for line in BufReader::new(out).lines().map_while(Result::ok) {
                 if let Some(g) = parse_gpu_line(&line) {
@@ -198,6 +200,59 @@ impl Resources {
             }
             let _ = child.wait();
         });
+    }
+}
+
+/// Ends `child` when this program ends, however it ends. On Linux a reader that goes away ends `nvidia-smi` through the broken pipe, but
+/// on Windows it carries on for ever, one more with every start of the node. It also inherits the node's output, so the launcher's
+/// `node.log` stays locked and the next start at login fails before the node has run. A job object with kill-on-close ties them together.
+#[cfg(windows)]
+fn die_with_this_process(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimits {
+        process_time: i64,
+        job_time: i64,
+        flags: u32,
+        min_working_set: usize,
+        max_working_set: usize,
+        active_processes: u32,
+        affinity: usize,
+        priority: u32,
+        scheduling: u32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimits {
+        basic: BasicLimits,
+        io: [u64; 6],
+        process_memory: usize,
+        job_memory: usize,
+        peak_process: usize,
+        peak_job: usize,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateJobObjectW(attributes: *const core::ffi::c_void, name: *const u16) -> isize;
+        fn SetInformationJobObject(job: isize, class: i32, info: *const core::ffi::c_void, size: u32) -> i32;
+        fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
+    }
+    // One job for the life of the program. Its handle is never closed by hand: the system closes it when the program ends, which is the point.
+    static JOB: OnceLock<isize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job != 0 {
+            // JobObjectExtendedLimitInformation with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+            let limits = ExtendedLimits { basic: BasicLimits { flags: 0x2000, ..Default::default() }, ..Default::default() };
+            SetInformationJobObject(job, 9, &limits as *const ExtendedLimits as *const core::ffi::c_void, std::mem::size_of::<ExtendedLimits>() as u32);
+        }
+        job
+    });
+    if job != 0 {
+        unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as isize) };
     }
 }
 

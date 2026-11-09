@@ -427,6 +427,12 @@ function Stop-MnProcesses([string]$which = 'both') {
         Get-Process -Name $n -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($MN_InstallDir, [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force -ErrorAction SilentlyContinue
     }
     Start-Sleep -Milliseconds 500
+    if ($doNode) {
+        # Nodes before 2026-11-09 left their nvidia-smi reader running after they ended, holding node.log so the next start failed.
+        Get-CimInstance Win32_Process -Filter "Name='nvidia-smi.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -like '*--query-gpu=name,utilization.gpu*-l 1*' -and -not (Get-Process -Id $_.ParentProcessId -ErrorAction SilentlyContinue) } |
+            ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 # Stops what is running, then copies the built programs into the install folder. $which is both, node or tray.
