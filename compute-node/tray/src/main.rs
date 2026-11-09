@@ -13,6 +13,7 @@ mod charts;
 mod control;
 mod glyph;
 mod icon;
+mod kit;
 mod menuspec;
 mod usage;
 mod model;

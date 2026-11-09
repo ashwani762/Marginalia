@@ -6,6 +6,7 @@
 use crate::anim::{clamp01, Spring};
 use crate::charts::{self, Line};
 use crate::control::{Controller, Pairing};
+use crate::kit;
 use crate::menuspec::Icon;
 use crate::model::{self, Action, Activity, Download, Info, ModelItem, Phone, Poll, RunDraft, State, View, Waiting};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,7 +33,6 @@ const BG: Color32 = Color32::from_rgb(22, 24, 29);
 const SIDEBAR: Color32 = Color32::from_rgb(17, 19, 24);
 /// The mark's indigo: the selected row of the sidebar.
 const ACCENT: Color32 = Color32::from_rgb(124, 108, 246);
-const CARD: Color32 = Color32::from_rgb(32, 35, 42);
 const TRACK: Color32 = Color32::from_rgb(52, 56, 66);
 const TEXT: Color32 = Color32::from_rgb(232, 234, 238);
 const DIM: Color32 = Color32::from_rgb(142, 148, 160);
@@ -48,7 +48,6 @@ const FAINT: Color32 = Color32::from_rgb(98, 104, 116);
 /// The sidebar's icon on the selected row: the indigo, lightened to read on its own tint.
 const ACCENT_TEXT: Color32 = Color32::from_rgb(176, 166, 255);
 const GREEN_BTN: Color32 = Color32::from_rgb(38, 120, 66);
-const RED_BTN: Color32 = Color32::from_rgb(110, 42, 44);
 
 fn state_colour(s: State) -> Color32 {
     match s {
@@ -225,6 +224,8 @@ struct Panel {
     /// "Stop node" asks once more before it does anything.
     confirm_stop: bool,
     notice: Option<(String, Instant)>,
+    /// A switch the person just moved, shown at its new place until the node says the same: (name, value, when).
+    pending: Vec<(&'static str, bool, Instant)>,
     /// The page showing.
     page: Page,
     /// Where the sidebar's selected row is, in rows, and how far the page has come in (0 to 1) since it was chosen.
@@ -267,7 +268,7 @@ impl Panel {
             let h = home.clone();
             std::thread::spawn(move || worker(port, ctx, tx, cmd_rx, h));
         }
-        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, page, nav: Spring::new(page.index() as f32, 0.86, 0.22), page_in: Spring::new(1.0, 1.0, 0.18), reduced: crate::os::reduced_motion(), theme_set: false, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
+        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, pending: Vec::new(), page, nav: Spring::new(page.index() as f32, 0.86, 0.22), page_in: Spring::new(1.0, 1.0, 0.18), reduced: crate::os::reduced_motion(), theme_set: false, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
     }
 
     fn send(&self, c: Cmd) {
@@ -330,6 +331,16 @@ impl Panel {
         }
     }
 
+    /// What a switch shows: the place the person just put it, for a few seconds, then what the node says.
+    fn shown(&self, key: &'static str, actual: bool) -> bool {
+        self.pending.iter().find(|(k, _, t)| *k == key && t.elapsed() < Duration::from_secs(4)).map(|(_, v, _)| *v).unwrap_or(actual)
+    }
+
+    fn expect(&mut self, key: &'static str, value: bool) {
+        self.pending.retain(|(k, _, _)| *k != key);
+        self.pending.push((key, value, Instant::now()));
+    }
+
     fn go(&mut self, page: Page) {
         if page != self.page {
             self.page = page;
@@ -367,7 +378,7 @@ fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 
 /// A rounded block of related things. `stroke` is for the ones that ask for attention.
 fn card_with(ui: &mut Ui, stroke: Stroke, add: impl FnOnce(&mut Ui)) {
-    Frame::NONE.fill(CARD).stroke(stroke).corner_radius(CornerRadius::same(10)).inner_margin(Margin::symmetric(10, 8)).show(ui, |ui| {
+    Frame::NONE.fill(kit::GROUP).stroke(stroke).corner_radius(CornerRadius::same(12)).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         add(ui);
     });
@@ -392,105 +403,13 @@ fn small_button(ui: &mut Ui, text: &str, hint: &str) -> bool {
     finish(ui.add(egui::Button::new(RichText::new(text).size(12.0)).min_size(Vec2::new(0.0, 22.0))), hint)
 }
 
-/// A small button with a colour that says what kind of action it is.
-/// A name at the start of a row, left aligned in a fixed width so the rows line up.
-fn row_label(ui: &mut Ui, text: &str, width: f32) -> egui::Response {
-    ui.allocate_ui_with_layout(Vec2::new(width, 18.0), Layout::left_to_right(Align::Center), |ui| {
-        ui.set_min_width(width);
-        ui.label(RichText::new(text).size(12.5).color(TEXT))
-    })
-    .inner
-}
-
-/// A small coloured label.
-fn pill(ui: &mut Ui, text: &str, colour: Color32) {
-    Frame::NONE.fill(colour.gamma_multiply(0.18)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::symmetric(7, 2)).show(ui, |ui| {
-        ui.label(RichText::new(text).size(11.0).color(colour));
-    });
-}
-
-/// A quiet title over a group of settings.
-fn section(ui: &mut Ui, text: &str) {
-    ui.add_space(4.0);
-    ui.label(RichText::new(text.to_uppercase()).size(10.5).strong().color(DIM));
-}
-
-/// One choice as a whole card with a round marker, its name and a line on what it does. Returns true when clicked.
-fn option_card(ui: &mut Ui, title: &str, line: &str, selected: bool) -> bool {
-    let stroke = if selected { Stroke::new(1.5, BLUE) } else { Stroke::new(1.0, TRACK) };
-    let r = Frame::NONE.fill(if selected { BLUE.gamma_multiply(0.10) } else { CARD }).stroke(stroke).corner_radius(CornerRadius::same(10)).inner_margin(Margin::symmetric(10, 7)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
-            let c = rect.center();
-            ui.painter().circle_stroke(c, 6.0, Stroke::new(1.5, if selected { BLUE } else { GREY }));
-            if selected {
-                ui.painter().circle_filled(c, 3.2, BLUE);
-            }
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 1.0;
-                ui.label(RichText::new(title).size(13.0).strong().color(TEXT));
-                ui.label(RichText::new(line).size(11.0).color(DIM));
-            });
-        });
-    });
-    let resp = ui.interact(r.response.rect, ui.scope_id().with(("option", title)), Sense::click());
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp.clicked()
-}
-
-/// Two sides of one choice, side by side. `on` is true for the first.
-fn segmented(ui: &mut Ui, on: &mut bool, first: &str, second: &str) {
-    ui.spacing_mut().item_spacing.x = 2.0;
-    if choice(ui, first, *on, "") {
-        *on = true;
-    }
-    if choice(ui, second, !*on, "") {
-        *on = false;
-    }
-}
-
-/// One option of a group, filled when it is the chosen one.
-fn choice(ui: &mut Ui, text: &str, selected: bool, hint: &str) -> bool {
-    let b = egui::Button::new(RichText::new(text).size(12.0).color(if selected { Color32::WHITE } else { TEXT })).fill(if selected { BLUE.gamma_multiply(0.55) } else { TRACK }).min_size(Vec2::new(0.0, 22.0));
-    finish(ui.add(b), hint)
-}
-
 fn tinted_button(ui: &mut Ui, text: &str, fill: Color32, hint: &str) -> bool {
     finish(ui.add(egui::Button::new(RichText::new(text).size(12.0).color(TEXT)).fill(fill).min_size(Vec2::new(0.0, 22.0))), hint)
-}
-
-fn big_button(ui: &mut Ui, text: &str, fill: Option<Color32>, hint: &str) -> bool {
-    let mut b = egui::Button::new(RichText::new(text).size(12.5).color(TEXT));
-    if let Some(f) = fill {
-        b = b.fill(f);
-    }
-    finish(ui.add_sized([ui.available_width(), 28.0], b), hint)
 }
 
 fn dot(ui: &mut Ui, colour: Color32, radius: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(radius * 2.0 + 2.0), Sense::hover());
     ui.painter().circle_filled(rect.center(), radius, colour);
-}
-
-fn bar(ui: &mut Ui, width: f32, fraction: f32, colour: Color32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(width.max(10.0), 8.0), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(4), TRACK);
-    if fraction > 0.0 {
-        let mut fill = rect;
-        fill.set_width((rect.width() * fraction).max(8.0));
-        ui.painter().rect_filled(fill, CornerRadius::same(4), colour);
-    }
-}
-
-fn speed_row(ui: &mut Ui, label: &str, fraction: f32, text: &str, colour: Color32) {
-    ui.horizontal(|ui| {
-        ui.add_sized([52.0, 14.0], egui::Label::new(dim(label)));
-        bar(ui, ui.available_width() - 112.0, fraction, colour);
-        ui.label(RichText::new(text).size(12.0).color(TEXT));
-    });
 }
 
 fn truncated(ui: &mut Ui, text: RichText) {
@@ -503,21 +422,18 @@ fn now_epoch() -> u64 {
 
 impl Panel {
     fn numbers(&self, ui: &mut Ui, i: &Info) {
-        card(ui, |ui| {
-            ui.columns(3, |cols| {
-                for (col, (value, caption)) in cols.iter_mut().zip([(i.served.to_string(), if i.served == 1 { "job served" } else { "jobs served" }), (i.phones.len().to_string(), if i.phones.len() == 1 { "phone" } else { "phones" }), (model::uptime_short(i.uptime_s), "up for")]) {
-                    col.vertical_centered(|ui| {
-                        ui.label(RichText::new(value).size(20.0).strong().color(TEXT));
-                        ui.label(dim(caption));
-                    });
-                }
-            });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let w = (ui.available_width() - 20.0) / 3.0;
+            kit::stat(ui, w, &i.served.to_string(), if i.served == 1 { "job served" } else { "jobs served" });
+            kit::stat(ui, w, &i.phones.len().to_string(), if i.phones.len() == 1 { "phone" } else { "phones" });
+            kit::stat(ui, w, &model::uptime_short(i.uptime_s), "up for");
         });
     }
 
     fn speed(&self, ui: &mut Ui, i: &Info) {
-        card(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 3.0;
+        kit::heading(ui, "What it runs");
+        kit::group(ui, |ui, g| {
             let mut rows = vec![
                 ("Chat", model::gauge(i.chat_tok_s, model::CHAT_TOK_S_MAX), model::chat_speed_text(i.chat_tok_s), BLUE, &i.chat_model),
                 ("Search", model::gauge(i.search_per_s, model::SEARCH_PER_S_MAX), model::search_speed_text(i.search_per_s), GREEN, &i.search_model),
@@ -525,44 +441,34 @@ impl Panel {
             if i.speech_model.is_some() {
                 rows.push(("Speech", model::gauge(i.speech_x, model::SPEECH_X_MAX), model::speech_speed_text(i.speech_x), AMBER, &i.speech_model));
             }
-            for (label, fraction, text, colour, model) in rows {
-                speed_row(ui, label, fraction, &text, colour);
-                ui.horizontal(|ui| {
-                    ui.add_space(58.0);
-                    truncated(ui, RichText::new(model.clone().unwrap_or_else(|| "not served".into())).size(11.0).color(DIM));
+            for (label, fraction, text, colour, name) in rows {
+                g.row(ui, kit::ROW_TALL, |ui| {
+                    kit::text_block(ui, 150.0, kit::ROW_TALL, kit::NAME_H + kit::LINE_H, |ui| {
+                        ui.label(RichText::new(label).size(13.5).color(TEXT));
+                        truncated(ui, RichText::new(name.clone().unwrap_or_else(|| "not served".into())).size(11.0).color(DIM));
+                    });
+                    let w = (ui.available_width() - 150.0).max(40.0);
+                    kit::meter(ui, label, w, fraction, colour);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(14.0);
+                        ui.label(RichText::new(text).size(12.5).color(TEXT));
+                    });
                 });
             }
             // Reading photos has no speed to show: it is either set up or not.
             if i.chat_model.is_some() {
-                ui.horizontal(|ui| {
-                    // The same label width as the rows above, so this text and the model name under it line up with theirs.
-                    ui.add_sized([52.0, 14.0], egui::Label::new(dim("Photos")));
-                    ui.label(RichText::new(model::photos_text(i)).size(12.0).color(if i.vision_model.is_some() { TEXT } else { DIM }));
+                g.setting(ui, "Photos", i.vision_model.as_deref(), |ui| {
+                    ui.label(RichText::new(model::photos_text(i)).size(12.5).color(if i.vision_model.is_some() { TEXT } else { DIM }));
                 });
-                if let Some(m) = &i.vision_model {
-                    ui.horizontal(|ui| {
-                        ui.add_space(58.0);
-                        truncated(ui, RichText::new(m).size(11.0).color(DIM));
-                    });
-                }
             }
             if let Some(r) = &i.runs_on {
-                ui.horizontal(|ui| {
-                    ui.add_sized([52.0, 14.0], egui::Label::new(dim("Runs on")));
-                    ui.label(RichText::new(r).size(12.0).color(TEXT))
-                        .on_hover_text("Change it on the Settings page, or with: marginalia-node run-on auto|gpu|cpu|mixed. COMMANDS.md has the details.");
+                g.setting(ui, "Runs on", i.runs_on_detail.as_deref(), |ui| {
+                    ui.label(RichText::new(r).size(12.5).color(TEXT)).on_hover_text("Change it on the Settings page, or with: marginalia-node run-on auto|gpu|cpu|mixed. COMMANDS.md has the details.");
                 });
-                if let Some(d) = &i.runs_on_detail {
-                    ui.horizontal(|ui| {
-                        ui.add_space(58.0);
-                        truncated(ui, RichText::new(d).size(11.0).color(DIM));
-                    });
-                }
             }
             // Telling speakers apart is opt-in, so "off" is a normal state, shown in the quiet colour.
-            ui.horizontal(|ui| {
-                ui.add_sized([52.0, 14.0], egui::Label::new(dim("Speakers")));
-                ui.label(RichText::new(model::speakers_text(i)).size(12.0).color(if i.speakers { TEXT } else { DIM }))
+            g.setting(ui, "Speakers", None, |ui| {
+                ui.label(RichText::new(model::speakers_text(i)).size(12.5).color(if i.speakers { TEXT } else { DIM }))
                     .on_hover_text("Opt in with: marginalia-node models download --only speakers. The helper program marginalia-node-speakers must be next to the node.");
             });
         });
@@ -739,45 +645,67 @@ impl Panel {
     }
 
     fn phones(&mut self, ui: &mut Ui, phones: &[Phone]) {
-        card(ui, |ui| {
-            heading(ui, &format!("PHONES ({})", phones.len()));
-            if phones.is_empty() {
-                ui.label(dim("No phones yet. Open the app on a phone, Settings, Compute nodes, or use Show pairing code."));
-            }
-            let now = now_epoch();
+        kit::heading(ui, &format!("Paired phones ({})", phones.len()));
+        if phones.is_empty() {
+            kit::group(ui, |ui, g| {
+                g.row(ui, kit::ROW, |ui| {
+                    ui.label(dim("No phones yet. Open the app on a phone, Settings, Compute nodes, or use Show pairing code."));
+                });
+            });
+            return;
+        }
+        let now = now_epoch();
+        let confirm = self.confirm.clone();
+        let (mut ask, mut yes, mut no): (Option<(String, Confirm)>, Option<(String, Confirm)>, bool) = (None, None, false);
+        kit::group(ui, |ui, g| {
             for p in phones {
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
+                let confirming = match &confirm {
+                    Some((id, what)) if *id == p.id => Some(*what),
+                    _ => None,
+                };
+                g.row(ui, kit::ROW_TALL, |ui| {
+                    let width = (ui.available_width() - 220.0).max(120.0);
+                    kit::text_block(ui, width, kit::ROW_TALL, kit::NAME_H + kit::LINE_H, |ui| {
+                        truncated(ui, RichText::new(&p.name).size(13.5).color(TEXT));
+                        match confirming {
+                            Some(what) => ui.label(RichText::new(if what == Confirm::Block { "Block this phone for good?" } else { "Forget this phone?" }).size(11.5).color(AMBER)),
+                            None => ui.label(dim(model::phone_line(p, now))),
+                        };
+                    });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if small_button(ui, "Remove", "Forget this phone. It can pair again later.") {
-                            self.confirm = Some((p.id.clone(), Confirm::Remove));
+                        ui.add_space(14.0);
+                        match confirming {
+                            Some(what) => {
+                                if kit::button(ui, ("yes", &p.id), "Yes", kit::Kind::Danger, "") {
+                                    yes = Some((p.id.clone(), what));
+                                }
+                                if kit::button(ui, ("no", &p.id), "No", kit::Kind::Plain, "") {
+                                    no = true;
+                                }
+                            }
+                            None => {
+                                if kit::button(ui, ("remove", &p.id), "Remove", kit::Kind::Plain, "Forget this phone. It can pair again later.") {
+                                    ask = Some((p.id.clone(), Confirm::Remove));
+                                }
+                                if kit::button(ui, ("block", &p.id), "Block", kit::Kind::Danger, "Turn this phone away for good, even when new phones can join") {
+                                    ask = Some((p.id.clone(), Confirm::Block));
+                                }
+                            }
                         }
-                        if finish(ui.add(egui::Button::new(RichText::new("Block").size(12.0).color(RED)).min_size(Vec2::new(0.0, 22.0))), "Turn this phone away for good, even when new phones can join") {
-                            self.confirm = Some((p.id.clone(), Confirm::Block));
-                        }
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| truncated(ui, RichText::new(&p.name).size(13.0).strong().color(TEXT)));
                     });
                 });
-                match &self.confirm {
-                    Some((id, what)) if *id == p.id => {
-                        let what = *what;
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(if what == Confirm::Block { "Block this phone for good?" } else { "Forget this phone?" }).size(12.0).color(AMBER));
-                            if tinted_button(ui, "Yes", RED_BTN, "") {
-                                self.send(Cmd::Phone(if what == Confirm::Block { "block" } else { "revoke" }, p.id.clone()));
-                                self.confirm = None;
-                            }
-                            if small_button(ui, "No", "") {
-                                self.confirm = None;
-                            }
-                        });
-                    }
-                    _ => {
-                        ui.label(dim(model::phone_line(p, now)));
-                    }
-                }
             }
         });
+        if ask.is_some() {
+            self.confirm = ask;
+        }
+        if no {
+            self.confirm = None;
+        }
+        if let Some((id, what)) = yes {
+            self.send(Cmd::Phone(if what == Confirm::Block { "block" } else { "revoke" }, id));
+            self.confirm = None;
+        }
     }
 
     /// Other compute nodes this node works together with, and the ones seen on the network that it has not joined.
@@ -825,15 +753,16 @@ impl Panel {
     }
 
     fn addresses(&self, ui: &mut Ui, i: &Info) {
-        card(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
+        kit::heading(ui, "Reach it at");
+        kit::group(ui, |ui, g| {
             if i.addresses.is_empty() {
-                ui.label(dim("No network address found"));
+                g.row(ui, kit::ROW, |ui| {
+                    ui.label(dim("No network address found"));
+                });
             }
             for a in &i.addresses {
-                ui.horizontal(|ui| {
-                    ui.add_sized([58.0, 14.0], egui::Label::new(dim("Address")));
-                    ui.label(RichText::new(a).font(FontId::monospace(12.0)).color(TEXT));
+                g.setting(ui, "Address", None, |ui| {
+                    ui.label(RichText::new(a).font(FontId::monospace(12.5)).color(TEXT));
                 });
             }
         });
@@ -868,102 +797,100 @@ impl Panel {
                                 0 => (format!("{name} CPU"), GREY),
                                 p => (format!("{name} {p}%"), VIOLET),
                             };
-                            pill(ui, &text, colour);
+                            kit::pill(ui, &text, colour);
                         }
                     }
                 });
             });
         }
 
-        section(ui, "General");
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                row_label(ui, "Start at sign in", 110.0).on_hover_text("Start the tray and the node when you sign in");
-                let mut on = self.startup;
-                segmented(ui, &mut on, "On", "Off");
-                if on != self.startup {
-                    match crate::autostart::set(on) {
-                        Ok(()) => self.startup = on,
-                        Err(e) => self.notice = Some((e, Instant::now())),
-                    }
+        kit::heading(ui, "General");
+        let mut startup = self.startup;
+        let mut startup_clicked = false;
+        kit::group(ui, |ui, g| {
+            g.setting(ui, "Start at sign in", Some("The tray and the node come up by themselves"), |ui| {
+                startup_clicked = kit::switch(ui, "startup", &mut startup);
+            });
+        });
+        if startup_clicked {
+            match crate::autostart::set(startup) {
+                Ok(()) => self.startup = startup,
+                Err(e) => self.notice = Some((e, Instant::now())),
+            }
+        }
+
+        kit::heading(ui, "Chat model");
+        kit::group(ui, |ui, g| {
+            g.setting(ui, "Chat model", Some("E2B is smaller and faster. E4B answers better and needs 2 GB more memory"), |ui| {
+                let mut idx = if chat == "e4b" { 1 } else { 0 };
+                if kit::segmented(ui, "chat", &["E2B", "E4B"], &mut idx) {
+                    chat = if idx == 1 { "e4b" } else { "e2b" }.into();
                 }
             });
-            ui.label(dim("The tray and the node come up by themselves."));
         });
 
-        section(ui, "Chat model");
-        for (value, name, line) in [("e2b", "E2B", "Smaller, faster"), ("e4b", "E4B", "Better answers, 2 GB more memory")] {
-            if option_card(ui, name, line, chat == value) {
-                chat = value.into();
-            }
-        }
-
-        section(ui, "Where the models run");
-        for (value, name, line) in RunDraft::MODES {
-            if option_card(ui, name, line, run.mode == value) {
-                if value == "custom" && run.mode != "custom" {
-                    // Start from where the models are now.
-                    run.chat = i.now_chat.unwrap_or(run.chat);
-                    run.search = i.now_search.unwrap_or(run.search);
-                    run.speech_gpu = i.now_speech_gpu.unwrap_or(run.speech_gpu);
-                    run.photos_gpu = i.now_photos_gpu.unwrap_or(run.photos_gpu);
+        kit::heading(ui, "Where the models run");
+        kit::group(ui, |ui, g| {
+            let line = RunDraft::MODES.iter().find(|(v, _, _)| *v == run.mode).map(|(_, _, l)| *l);
+            g.setting(ui, "Run the models on", line, |ui| {
+                let labels: Vec<&str> = RunDraft::MODES.iter().map(|(_, n, _)| *n).collect();
+                let mut idx = RunDraft::MODES.iter().position(|(v, _, _)| *v == run.mode).unwrap_or(0);
+                if kit::segmented(ui, "mode", &labels, &mut idx) {
+                    let value = RunDraft::MODES[idx].0;
+                    if value == "custom" && run.mode != "custom" {
+                        // Start from where the models are now.
+                        run.chat = i.now_chat.unwrap_or(run.chat);
+                        run.search = i.now_search.unwrap_or(run.search);
+                        run.speech_gpu = i.now_speech_gpu.unwrap_or(run.speech_gpu);
+                        run.photos_gpu = i.now_photos_gpu.unwrap_or(run.photos_gpu);
+                    }
+                    run.mode = value.into();
                 }
-                run.mode = value.into();
-            }
-        }
-        if run.mode == "custom" {
-            card(ui, |ui| {
-                ui.spacing_mut().item_spacing.y = 8.0;
-                let share = |ui: &mut Ui, label: &str, hint: &str, v: &mut u8| {
-                    ui.horizontal(|ui| {
-                        row_label(ui, label, 60.0).on_hover_text(hint);
+            });
+            if run.mode == "custom" {
+                for (label, hint, which) in [("Chat", "How much of the chat model is on the card, the rest uses the processor", 0), ("Search", "How much of the search model is on the card", 1)] {
+                    g.setting(ui, label, Some(hint), |ui| {
+                        let v = if which == 0 { &mut run.chat } else { &mut run.search };
+                        ui.label(RichText::new(match *v { 0 => "processor".to_string(), 100 => "card".to_string(), p => format!("{p}% on card") }).size(12.0).color(DIM));
                         let mut x = *v as f32;
-                        ui.spacing_mut().slider_width = 130.0;
-                        if ui.add(egui::Slider::new(&mut x, 0.0..=100.0).step_by(5.0).fixed_decimals(0).suffix("%").show_value(false)).changed() {
+                        ui.spacing_mut().slider_width = 150.0;
+                        if ui.add(egui::Slider::new(&mut x, 0.0..=100.0).step_by(5.0).show_value(false)).changed() {
                             *v = x as u8;
                         }
-                        ui.label(RichText::new(match *v { 0 => "processor".to_string(), 100 => "card".to_string(), p => format!("{p}% on card") }).size(12.0).color(DIM));
                     });
-                };
-                share(ui, "Chat", "Share of layers on the card. The rest uses the processor.", &mut run.chat);
-                share(ui, "Search", "Share of layers on the card.", &mut run.search);
-                let side = |ui: &mut Ui, label: &str, gpu: &mut bool| {
-                    ui.horizontal(|ui| {
-                        row_label(ui, label, 60.0).on_hover_text("Runs on one side only");
-                        segmented(ui, gpu, "Card", "Processor");
+                }
+                for (label, which) in [("Speech", 0), ("Photos", 1)] {
+                    g.setting(ui, label, Some("Runs on one side only"), |ui| {
+                        let gpu = if which == 0 { &mut run.speech_gpu } else { &mut run.photos_gpu };
+                        let mut idx = if *gpu { 0 } else { 1 };
+                        if kit::segmented(ui, ("side", which), &["Card", "Processor"], &mut idx) {
+                            *gpu = idx == 0;
+                        }
                     });
-                };
-                side(ui, "Speech", &mut run.speech_gpu);
-                side(ui, "Photos", &mut run.photos_gpu);
-                ui.label(dim("Speech and photos run on one side only."));
-            });
-        }
+                }
+            }
+        });
 
-        section(ui, "Speakers");
-        card(ui, |ui| {
-            ui.horizontal(|ui| {
-                row_label(ui, "Run on", 60.0);
-                let mut gpu = run.speakers_gpu;
-                segmented(ui, &mut gpu, "Card", "Processor");
-                run.speakers_gpu = gpu;
+        kit::heading(ui, "Speakers");
+        kit::group(ui, |ui, g| {
+            g.setting(ui, "Tell speakers apart on", Some("The card needs the GPU helper and cuDNN"), |ui| {
+                let mut idx = if run.speakers_gpu { 0 } else { 1 };
+                if kit::segmented(ui, "speakers", &["Card", "Processor"], &mut idx) {
+                    run.speakers_gpu = idx == 0;
+                }
             });
-            ui.label(dim("Card needs the GPU helper and cuDNN."));
         });
 
         if let Some(dir) = &i.log_dir {
-            section(ui, "Logs");
-            card(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("node.log").size(12.5).color(TEXT));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if small_button(ui, "Open folder", "Open the folder with the log files") {
-                            open_folder(dir);
-                        }
-                    });
+            kit::heading(ui, "Logs");
+            kit::group(ui, |ui, g| {
+                g.setting(ui, "node.log", Some("Keeps the last 5 files, 5 MB each. Events and numbers only"), |ui| {
+                    if kit::button(ui, "open-logs", "Open folder", kit::Kind::Plain, "Open the folder with the log files") {
+                        open_folder(dir);
+                    }
                 });
-                ui.label(dim("Keeps the last 5 files, 5 MB each. Events and numbers only."));
-                truncated(ui, RichText::new(dir).font(FontId::monospace(10.5)).color(DIM));
             });
+            truncated(ui, RichText::new(dir).font(FontId::monospace(10.5)).color(DIM));
         }
         ui.add_space(4.0);
         if !self.applying {
@@ -973,56 +900,54 @@ impl Panel {
 
     /// The model files: which are there, a Get button for the missing ones, and the download in progress.
     fn models_section(&mut self, ui: &mut Ui) {
-        section(ui, "Models");
         let Some((items, dl)) = self.models.clone() else {
-            card(ui, |ui| {
-                ui.label(dim("Looking at the models folder..."));
+            kit::group(ui, |ui, g| {
+                g.row(ui, kit::ROW, |ui| {
+                    ui.label(dim("Looking at the models folder..."));
+                });
             });
             return;
         };
         let running = matches!(dl, Some(Download::Running { .. }));
         let mut start: Option<ModelItem> = None;
         let mut restart = false;
-        card(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
+        kit::group(ui, |ui, g| {
             for it in &items {
-                ui.horizontal(|ui| {
-                    row_label(ui, &it.label, 86.0);
-                    let busy = running && self.fetching.as_ref().map(|(l, _)| l == &it.label).unwrap_or(false);
+                let busy = running && self.fetching.as_ref().map(|(l, _)| l == &it.label).unwrap_or(false);
+                g.setting(ui, &it.label, None, |ui| {
                     if it.ready {
-                        ui.label(RichText::new(format!("Ready  {}", model::size_text(it.bytes))).size(11.5).color(GREEN));
+                        kit::pill(ui, &format!("Ready  {}", model::size_text(it.bytes)), GREEN);
                     } else if busy {
-                        ui.label(RichText::new("Downloading").size(11.5).color(BLUE));
+                        kit::pill(ui, "Downloading", BLUE);
                     } else {
-                        ui.label(RichText::new("Not downloaded").size(11.5).color(DIM));
-                    }
-                    if !it.ready && !running {
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if small_button(ui, "Get", "Download it from Hugging Face") {
-                                start = Some(it.clone());
-                            }
-                        });
+                        if !running && kit::button(ui, ("get", &it.label), "Get", kit::Kind::Plain, "Download it from Hugging Face") {
+                            start = Some(it.clone());
+                        }
+                        ui.label(dim("Not downloaded"));
                     }
                 });
             }
             match &dl {
                 Some(Download::Running { file, done, total }) => {
                     let f = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
-                    ui.add_space(2.0);
-                    bar(ui, ui.available_width(), f, BLUE);
-                    ui.label(dim(format!("{file}  {}  {}", if *total > 0 { format!("{}%", (f * 100.0) as u32) } else { String::new() }, model::size_text(*done))));
+                    g.row(ui, kit::ROW_TALL, |ui| {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 5.0;
+                            kit::meter(ui, "download", ui.available_width() - 14.0, f, BLUE);
+                            ui.label(dim(format!("{file}  {}  {}", if *total > 0 { format!("{}%", (f * 100.0) as u32) } else { String::new() }, model::size_text(*done))));
+                        });
+                    });
                 }
                 Some(Download::Failed(e)) if self.fetching.is_some() => {
-                    ui.label(RichText::new(e).size(11.0).color(RED));
+                    g.row(ui, kit::ROW, |ui| {
+                        ui.label(RichText::new(e).size(11.5).color(RED));
+                    });
                 }
                 Some(Download::Done) if self.fetching.as_ref().map(|(_, r)| *r).unwrap_or(false) => {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Downloaded. Restart to use it.").size(11.5).color(GREEN));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if small_button(ui, "Restart node", "Restart the node so it loads the new model") {
-                                restart = true;
-                            }
-                        });
+                    g.setting(ui, "Downloaded", Some("Restart the node so it loads the new model"), |ui| {
+                        if kit::button(ui, "restart-node", "Restart node", kit::Kind::Primary, "Restart the node so it loads the new model") {
+                            restart = true;
+                        }
                     });
                 }
                 _ => {}
@@ -1048,24 +973,34 @@ impl Panel {
         let current = Self::current_settings(i);
         let Some((run, chat)) = self.draft.clone() else { return };
         let changed = (run.clone(), chat.clone()) != current;
-        ui.label(dim(if self.applying { "Restarting the node, about a minute." } else if changed { "Saving restarts the node." } else { "No changes." }));
-        ui.columns(2, |cols| {
-            let save = if self.applying { "Restarting..." } else { "Save and restart" };
-            if big_button(&mut cols[0], save, if changed && !self.applying { Some(GREEN_BTN) } else { None }, "Save the settings and restart the node") && changed && !self.applying {
-                let mut cmds = vec![];
-                if chat != current.1 {
-                    cmds.push(vec!["chat-model".to_string(), chat.clone()]);
+        let applying = self.applying;
+        let (mut save, mut undo) = (false, false);
+        ui.horizontal(|ui| {
+            ui.label(dim(if applying { "Restarting the node, about a minute." } else if changed { "Saving restarts the node." } else { "No changes." }));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let label = if applying { "Restarting" } else { "Save and restart" };
+                if kit::button(ui, "save", label, if changed && !applying { kit::Kind::Primary } else { kit::Kind::Plain }, "Save the settings and restart the node") && changed && !applying {
+                    save = true;
                 }
-                if run != current.0 {
-                    cmds.push(run.args());
+                if kit::button(ui, "undo", "Undo changes", kit::Kind::Plain, "Back to what the node uses now") && !applying {
+                    undo = true;
                 }
-                self.applying = true;
-                self.send(Cmd::Apply(cmds));
-            }
-            if big_button(&mut cols[1], "Undo changes", None, "Back to what the node uses now") && !self.applying {
-                self.draft = Some(current.clone());
-            }
+            });
         });
+        if save {
+            let mut cmds = vec![];
+            if chat != current.1 {
+                cmds.push(vec!["chat-model".to_string(), chat.clone()]);
+            }
+            if run != current.0 {
+                cmds.push(run.args());
+            }
+            self.applying = true;
+            self.send(Cmd::Apply(cmds));
+        }
+        if undo {
+            self.draft = Some(current);
+        }
     }
 
     fn pairing_card(&mut self, ui: &mut Ui) {
@@ -1166,55 +1101,51 @@ impl Panel {
         ui.add_space(10.0);
     }
 
-    /// Pause, lock and stop: what the old footer held.
+    /// Pause, lock and stop, as switches and a button. A switch moved is shown at its new place at once, and the node's word follows.
     fn node_card(&mut self, ui: &mut Ui, i: &Info) {
-        card(ui, |ui| {
-            heading(ui, "NODE");
-            ui.add_space(2.0);
-            let wide = |text: &str, fill: Option<Color32>| {
-                let mut b = egui::Button::new(RichText::new(text).size(12.5).color(TEXT)).min_size(Vec2::new(150.0, 30.0));
-                if let Some(f) = fill {
-                    b = b.fill(f);
-                }
-                b
-            };
-            if self.confirm_stop {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Stop the node? Phones lose it until it is started.").size(12.0).color(AMBER));
-                });
-                ui.horizontal(|ui| {
-                    if finish(ui.add(wide("Yes, stop it", Some(RED_BTN))), "") {
-                        self.send(Cmd::Click(Action::Stop));
-                        self.confirm_stop = false;
+        let mut accept = self.shown("accept", !i.paused);
+        let mut open = self.shown("open", !i.locked);
+        let confirming = self.confirm_stop;
+        let (mut accept_moved, mut open_moved, mut ask, mut yes, mut no) = (false, false, false, false, false);
+        kit::heading(ui, "Node");
+        kit::group(ui, |ui, g| {
+            g.setting(ui, "Take new jobs", Some("Turn it off to pause. Jobs already running finish"), |ui| {
+                accept_moved = kit::switch(ui, "accept", &mut accept);
+            });
+            g.setting(ui, "Let new phones join", Some("Turn it off and each new phone must be allowed first"), |ui| {
+                open_moved = kit::switch(ui, "open", &mut open);
+            });
+            g.setting(ui, "Stop the node", Some(if confirming { "Phones lose it until it is started" } else { "Finishes the jobs running, then shuts it down" }), |ui| {
+                if confirming {
+                    if kit::button(ui, "stop-yes", "Yes, stop it", kit::Kind::Danger, "") {
+                        yes = true;
                     }
-                    if finish(ui.add(wide("Cancel", None)), "") {
-                        self.confirm_stop = false;
+                    if kit::button(ui, "stop-no", "Cancel", kit::Kind::Plain, "") {
+                        no = true;
                     }
-                });
-                return;
-            }
-            ui.horizontal_wrapped(|ui| {
-                let (label, hint, action) = if i.paused {
-                    ("Resume", "Take new jobs again", Action::Resume)
-                } else {
-                    ("Pause", "Turn new jobs away. Jobs already running finish.", Action::Pause)
-                };
-                if finish(ui.add(wide(label, None)), hint) {
-                    self.send(Cmd::Click(action));
-                }
-                let (label, hint, action) = if i.locked {
-                    ("Unlock", "Let any phone on the network join again", Action::Unlock)
-                } else {
-                    ("Lock new phones", "New phones must be allowed before they can join", Action::Lock)
-                };
-                if finish(ui.add(wide(label, None)), hint) {
-                    self.send(Cmd::Click(action));
-                }
-                if finish(ui.add(wide("Stop node", Some(RED_BTN))), "Finish running jobs and shut the node down") {
-                    self.confirm_stop = true;
+                } else if kit::button(ui, "stop", "Stop node", kit::Kind::Danger, "Finish running jobs and shut the node down") {
+                    ask = true;
                 }
             });
         });
+        if accept_moved {
+            self.expect("accept", accept);
+            self.send(Cmd::Click(if accept { Action::Resume } else { Action::Pause }));
+        }
+        if open_moved {
+            self.expect("open", open);
+            self.send(Cmd::Click(if open { Action::Unlock } else { Action::Lock }));
+        }
+        if ask {
+            self.confirm_stop = true;
+        }
+        if no {
+            self.confirm_stop = false;
+        }
+        if yes {
+            self.send(Cmd::Click(Action::Stop));
+            self.confirm_stop = false;
+        }
     }
 
     fn empty_state(&mut self, ui: &mut Ui, starting: bool) {
@@ -1226,7 +1157,7 @@ impl Panel {
             ui.add_space(4.0);
             ui.label(dim(if starting { "It is loading its models. This can take a minute." } else { "Your phone uses its own speed until it is back." }));
             ui.add_space(14.0);
-            if !starting && finish(ui.add(egui::Button::new(RichText::new("Start node").size(14.0).color(TEXT)).fill(GREEN_BTN).min_size(Vec2::new(150.0, 34.0))), "Start marginalia-node on this machine") {
+            if !starting && kit::button(ui, "start", "Start node", kit::Kind::Primary, "Start marginalia-node on this machine") {
                 self.send(Cmd::Click(Action::Start));
             }
         });
@@ -1318,7 +1249,7 @@ impl Panel {
             }
             Page::Phones => {
                 self.page_title(ui, "Phones", "The phones that use this node, and how to add one");
-                if finish(ui.add(egui::Button::new(RichText::new("Show pairing code").size(12.5).color(TEXT)).fill(GREEN_BTN).min_size(Vec2::new(170.0, 30.0))), "Show a code to type on a new phone") {
+                if kit::button(ui, "pair", "Show pairing code", kit::Kind::Primary, "Show a code to type on a new phone") {
                     self.send(Cmd::Pair);
                 }
                 ui.add_space(2.0);
