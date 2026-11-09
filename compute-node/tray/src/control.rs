@@ -30,7 +30,7 @@ impl Notice {
 }
 
 /// A pairing code the node just opened.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Pairing {
     pub code: String,
     pub minutes: u64,

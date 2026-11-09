@@ -9,6 +9,7 @@ use crate::control::{Controller, Pairing, POLL_CHANGING};
 use crate::kit;
 use crate::menuspec::Icon;
 use crate::model::{self, Action, Activity, Download, Info, ModelItem, Phone, Poll, RunDraft, State, View, Waiting};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use crate::popover::draw_icon;
@@ -137,14 +138,20 @@ fn progress_path(state_dir: &str) -> std::path::PathBuf {
     std::path::Path::new(state_dir).join("download.json")
 }
 
-/// While the Settings page shows, lists the models on disk and reads the download progress every 1.5 seconds.
+/// While the Models page shows, lists the models on disk and reads the download progress: at once when it opens, then every 1.5 seconds.
 fn models_worker(ctx: egui::Context, tx: Sender<Msg>, visible: Arc<AtomicBool>, home: Arc<Mutex<Option<(String, String)>>>) {
+    let mut looked: Option<Instant> = None;
     loop {
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(Duration::from_millis(100));
         if !visible.load(Ordering::Relaxed) {
+            looked = None;
+            continue;
+        }
+        if looked.map(|t| t.elapsed() < Duration::from_millis(1500)).unwrap_or(false) {
             continue;
         }
         let Some((state, models)) = home.lock().ok().and_then(|h| h.clone()) else { continue };
+        looked = Some(Instant::now());
         let Ok(list) = crate::os::models_list(&state, &models) else { continue };
         let path = progress_path(&state);
         let dl = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok()).and_then(|v| {
@@ -207,9 +214,13 @@ struct Panel {
     started: Instant,
     /// The code on show and when it stops being valid.
     pairing: Option<(Pairing, Instant)>,
+    /// The last code shown, so its card can close with its words still on it.
+    pairing_last: Option<(Pairing, Instant)>,
     confirm: Option<(String, Confirm)>,
-    /// "Stop node" asks once more before it does anything.
+    /// "Stop" asks once more before it does anything.
     confirm_stop: bool,
+    /// Start or Stop just pressed: what the node was told to become, and when. Shown at once, before the node has answered.
+    acted: Option<(State, Instant)>,
     notice: Option<(String, Instant)>,
     /// A switch the person just moved, shown at its new place until the node says the same: (name, value, when).
     pending: Vec<(&'static str, bool, Instant)>,
@@ -220,6 +231,11 @@ struct Panel {
     page_in: Spring,
     /// Which way the last move through the sidebar went: 1 down, -1 up. The new page comes from that side.
     page_dir: f32,
+    /// When the page was chosen, and which of waiting, not running or the pages is showing.
+    page_at: Instant,
+    page_kind: u8,
+    /// How high the charts were last, so the space is kept while the first readings are on their way.
+    charts_h: Cell<f32>,
     /// The last message shown, kept so its capsule can leave with its words still on it.
     toast: String,
     /// The address just copied, and when, so its button can say so for a moment.
@@ -265,7 +281,7 @@ impl Panel {
             let h = home.clone();
             std::thread::spawn(move || worker(port, ctx, tx, cmd_rx, h));
         }
-        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, pending: Vec::new(), page, nav: Spring::new(page.index() as f32, 1.0, 0.26), page_in: Spring::new(1.0, 1.0, 0.24), page_dir: 1.0, toast: String::new(), copied: None, logo: None, backdrop: None, reduced: crate::os::reduced_motion(), theme_set: false, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
+        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, pairing_last: None, confirm: None, confirm_stop: false, acted: None, notice: None, pending: Vec::new(), page, nav: Spring::new(page.index() as f32, 1.0, 0.2), page_in: Spring::new(1.0, 1.0, 0.2), page_dir: 1.0, page_at: Instant::now(), page_kind: 0, charts_h: Cell::new(156.0), toast: String::new(), copied: None, logo: None, backdrop: None, reduced: crate::os::reduced_motion(), theme_set: false, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
     }
 
     fn send(&self, c: Cmd) {
@@ -331,6 +347,11 @@ impl Panel {
         }
     }
 
+    /// The state to show: what the node says, or what it was just told to become while it has not answered yet.
+    fn showing(&self, state: State) -> State {
+        showing_state(state, self.acted.filter(|(_, t)| t.elapsed() < ACT_WAIT).map(|(s, _)| s))
+    }
+
     /// What a switch shows: the place the person just put it, for a few seconds, then what the node says.
     fn shown(&self, key: &'static str, actual: bool) -> bool {
         self.pending.iter().find(|(k, _, t)| *k == key && t.elapsed() < Duration::from_secs(4)).map(|(_, v, _)| *v).unwrap_or(actual)
@@ -345,11 +366,17 @@ impl Panel {
         if page != self.page {
             self.page_dir = if page.index() > self.page.index() { 1.0 } else { -1.0 };
             self.page = page;
-            self.page_in.snap(0.0);
-            self.page_in.set_target(1.0);
+            self.page_at = Instant::now();
+            self.begin_page();
             // The model files are only looked at while the Models page is showing.
             self.settings_visible.store(page == Page::Models, Ordering::Relaxed);
         }
+    }
+
+    /// The new content comes in from here.
+    fn begin_page(&mut self) {
+        self.page_in.snap(0.0);
+        self.page_in.set_target(1.0);
     }
 
     /// Moves the springs on, and says whether any is still moving.
@@ -385,7 +412,7 @@ fn card(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 
 /// A rounded block of related things. `stroke` is for the ones that ask for attention.
 fn card_with(ui: &mut Ui, stroke: Stroke, add: impl FnOnce(&mut Ui)) {
-    Frame::NONE.fill(kit::GROUP).stroke(stroke).corner_radius(CornerRadius::same(12)).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
+    Frame::NONE.fill(kit::GROUP).stroke(stroke).corner_radius(CornerRadius::same(12)).inner_margin(Margin::symmetric(kit::PAD as i8, 12)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         add(ui);
     });
@@ -413,12 +440,15 @@ fn now_epoch() -> u64 {
 }
 
 impl Panel {
-    /// The first thing on the Overview: is the node all right. Its state in large type with the state's colour glowing beside it, and the
-    /// three figures that say how it has been doing. The dot only pulses while the node is working.
-    fn hero(&self, ui: &mut Ui, state: State, i: &Info) {
+    /// The first thing on the Overview: is the node all right, and what can be done about it. Its state in large type with the state's
+    /// colour glowing beside it, the three figures that say how it has been doing, and under them Start, Pause and Stop. A node that is
+    /// not there has no figures. The dot only pulses while the node is working.
+    fn hero(&mut self, ui: &mut Ui, state: State, i: Option<&Info>) {
+        let state = self.showing(state);
         let colour = kit::state_colour(state);
         let busy = state == State::Busy;
-        let r = Frame::NONE.fill(kit::GROUP).corner_radius(CornerRadius::same(14)).inner_margin(Margin { left: 16, right: 12, top: 16, bottom: 16 }).show(ui, |ui| {
+        let paused = i.map(|i| !self.shown("accept", !i.paused)).unwrap_or(false);
+        let r = Frame::NONE.fill(kit::GROUP).corner_radius(CornerRadius::same(14)).inner_margin(Margin { left: 16, right: 12, top: 16, bottom: 14 }).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
@@ -429,28 +459,88 @@ impl Panel {
                 ui.add_space(4.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    kit::figure(ui, 78.0, &model::uptime_short(i.uptime_s), "up for");
-                    kit::divider(ui, 34.0);
-                    let phones = kit::spring(ui.ctx(), egui::Id::NULL.with("count-phones"), i.phones.len() as f32, 1.0, 0.5).round() as u64;
-                    kit::figure(ui, 78.0, &phones.to_string(), if i.phones.len() == 1 { "phone" } else { "phones" });
-                    kit::divider(ui, 34.0);
-                    let served = kit::spring(ui.ctx(), egui::Id::NULL.with("count-served"), i.served as f32, 1.0, 0.5).round() as u64;
-                    kit::figure(ui, 78.0, &served.to_string(), if i.served == 1 { "job served" } else { "jobs served" });
-                    ui.add_space(10.0);
+                    if let Some(i) = i {
+                        // Closer together in a narrow window, so the sentence beside them still fits.
+                        let fig = if ui.available_width() < 460.0 { 66.0 } else { 78.0 };
+                        kit::figure(ui, fig, &model::uptime_short(i.uptime_s), "up for");
+                        kit::divider(ui, 34.0);
+                        let phones = kit::spring(ui.ctx(), egui::Id::NULL.with("count-phones"), i.phones.len() as f32, 1.0, 0.5).round() as u64;
+                        kit::figure(ui, fig, &phones.to_string(), if i.phones.len() == 1 { "phone" } else { "phones" });
+                        kit::divider(ui, 34.0);
+                        let served = kit::spring(ui.ctx(), egui::Id::NULL.with("count-served"), i.served as f32, 1.0, 0.5).round() as u64;
+                        kit::figure(ui, fig, &served.to_string(), if i.served == 1 { "job served" } else { "jobs served" });
+                        ui.add_space(10.0);
+                    }
                     // The figures take their room first, and the sentence ends in dots if a narrow window leaves it too little.
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.label(kit::title(hero_word(state), 24.0));
-                            ui.add(egui::Label::new(RichText::new(model::status_line(i)).size(12.5).color(DIM)).truncate());
+                            let line = match (i, state) {
+                                (Some(i), _) => model::status_line(i),
+                                (None, State::Starting) => "Loading its models, this can take a minute".to_string(),
+                                (None, State::Stopping) => "Finishing the jobs it has".to_string(),
+                                _ => "Your phone works on its own until it is back".to_string(),
+                            };
+                            ui.add(egui::Label::new(RichText::new(line).size(12.5).color(DIM)).truncate());
                         });
                     });
                 });
             });
+            ui.add_space(12.0);
+            self.controls(ui, state, paused);
         });
         kit::sheen(ui, r.response.rect, 14.0, 1.0);
         if busy {
             ui.ctx().request_repaint_after(Duration::from_millis(33));
+        }
+    }
+
+    /// Start, Pause and Stop, always in the same three places, each lit only when it can be used. Stop asks once, in the same row.
+    fn controls(&mut self, ui: &mut Ui, state: State, paused: bool) {
+        let can = Controls::for_state(state);
+        if !can.stop {
+            self.confirm_stop = false;
+        }
+        const W: f32 = 98.0;
+        let width = ui.available_width();
+        let (mut yes, mut no) = (false, false);
+        if self.confirm_stop {
+            ui.allocate_ui_with_layout(Vec2::new(width, 28.0), Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(4.0);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                yes = kit::button(ui, "stop-yes", "Yes, stop it", kit::Kind::Destructive, "");
+                no = kit::button(ui, "stop-no", "Cancel", kit::Kind::Plain, "");
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new("Stop the node? Phones lose it until it is started").size(12.5).color(TEXT)).truncate());
+                });
+            });
+        } else {
+            ui.allocate_ui_with_layout(Vec2::new(width, 28.0), Layout::left_to_right(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                if kit::button_with(ui, "node-start", Some(Icon::Play), if state == State::Starting { "Starting" } else { "Start" }, kit::Kind::Primary, Some(W), can.start, "Start the node on this machine") {
+                    self.send(Cmd::Click(Action::Start));
+                    self.acted = Some((State::Starting, Instant::now()));
+                }
+                if kit::button_with(ui, "node-pause", Some(if paused { Icon::Play } else { Icon::Pause }), if paused { "Resume" } else { "Pause" }, kit::Kind::Plain, Some(W), can.pause, if paused { "Take new jobs again" } else { "Stop taking new jobs. Jobs already running finish" }) {
+                    self.expect("accept", paused);
+                    self.send(Cmd::Click(if paused { Action::Resume } else { Action::Pause }));
+                }
+                if kit::button_with(ui, "node-stop", Some(Icon::Stop), if state == State::Stopping { "Stopping" } else { "Stop" }, kit::Kind::Danger, Some(W), can.stop, "Finish the running jobs and shut the node down") {
+                    self.confirm_stop = true;
+                }
+            });
+        }
+        if yes {
+            self.send(Cmd::Click(Action::Stop));
+            self.acted = Some((State::Stopping, Instant::now()));
+            self.confirm_stop = false;
+        }
+        if no {
+            self.confirm_stop = false;
+        }
+        if self.acted.map(|(_, t)| t.elapsed() < ACT_WAIT).unwrap_or(false) {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
     }
 
@@ -466,14 +556,14 @@ impl Panel {
             }
             for (label, fraction, text, colour, name) in rows {
                 g.row(ui, kit::ROW_TALL, |ui| {
-                    kit::text_block(ui, 150.0, kit::ROW_TALL, kit::NAME_H + kit::LINE_H, |ui| {
+                    kit::text_block(ui, 170.0, kit::ROW_TALL, kit::NAME_H + kit::LINE_H, |ui| {
                         ui.label(RichText::new(label).size(13.5).color(TEXT));
                         truncated(ui, RichText::new(name.clone().unwrap_or_else(|| "not served".into())).size(11.0).color(DIM));
                     });
                     let w = (ui.available_width() - 150.0).max(40.0);
                     kit::meter(ui, label, w, fraction, colour);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_space(14.0);
+                        ui.add_space(kit::PAD);
                         ui.label(RichText::new(text).size(12.5).color(TEXT));
                     });
                 });
@@ -498,36 +588,47 @@ impl Panel {
     }
 
     /// The four live charts: processor, memory, graphics card and network, the last two minutes of each.
-    fn live_charts(&self, ui: &mut Ui) {
+    fn live_charts(&self, ui: &mut Ui) -> f32 {
         const WINDOW_MS: f64 = 120_000.0;
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
         let display_ms = now_ms - charts::DELAY_MS;
         let h = &self.history;
-        let Some(last) = h.latest().cloned() else { return };
+        let Some(last) = h.latest().cloned() else { return 0.0 };
         let bands = h.busy_spans();
         let band = BLUE.gamma_multiply(0.13);
         let grid = Color32::from_white_alpha(8);
         let back = Color32::from_rgb(33, 33, 36);
-        // A line turns amber and then red as the thing it shows fills up.
-        let by_load = |base: Color32, fraction: f32| match usage::load_of(fraction) {
-            Load::Calm => base,
-            Load::Busy => AMBER,
-            Load::Hot => RED,
-        };
         let ctx = ui.ctx().clone();
         let smooth = |id: &str, v: f32| ctx.animate_value_with_time(egui::Id::unique(("live", id)), v, 0.45);
+        // A line turns amber and then red as the thing it shows fills up, passing through the colours between.
+        let by_load = |id: &str, base: Color32, fraction: f32| {
+            let level = smooth(id, match usage::load_of(fraction) {
+                Load::Calm => 0.0,
+                Load::Busy => 1.0,
+                Load::Hot => 2.0,
+            });
+            if level <= 1.0 { kit::mix(base, AMBER, level) } else { kit::mix(AMBER, RED, level - 1.0) }
+        };
         let head = |ui: &mut Ui, colour: Color32, name: &str, main: String, sub: String| {
+            let measure = |ui: &Ui, text: &str, font: FontId| ui.painter().layout_no_wrap(text.to_string(), font, TEXT).size().x;
+            let needed = 8.0 + 6.0 + measure(ui, name, FontId::proportional(11.0)) + 12.0 + measure(ui, &main, FontId::new(12.0, kit::semibold_family())) + 6.0 + measure(ui, &sub, FontId::proportional(10.5));
+            let room = ui.available_width() >= needed;
             ui.horizontal(|ui| {
                 dot(ui, colour, 3.0);
                 ui.label(RichText::new(name).size(11.0).color(DIM));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(sub).size(10.5).color(DIM));
+                    // The smaller figure gives way when a narrow window has no room for both.
+                    if room {
+                        ui.label(RichText::new(sub).size(10.5).color(DIM));
+                    }
                     ui.label(RichText::new(main).size(12.0).color(TEXT).family(kit::semibold_family()));
                 });
             });
         };
         let peak = h.readings.iter().map(|r| r.net_rx.max(r.net_tx) as f32).fold(0.0, f32::max);
         let top = usage::nice_max(peak, 20_000.0);
+        // The scale changes in steps, the lines must not: they ease to the new scale.
+        let scale = smooth("net-scale", top).max(1.0);
         // Two across, so the four fit on one screen.
         let gap = 18.0;
         let col = (ui.available_width() - gap) / 2.0;
@@ -544,9 +645,9 @@ impl Panel {
         ui.spacing_mut().item_spacing.x = 6.0;
         // Processor
         let cpu = smooth("cpu", last.cpu);
-        head(ui, by_load(BLUE, last.cpu / 100.0), "Processor", format!("{cpu:.0}%"), format!("this node {:.0}%", smooth("node_cpu", last.node_cpu)));
+        head(ui, by_load("cpu-load", BLUE, last.cpu / 100.0), "Processor", format!("{cpu:.0}%"), format!("this node {:.0}%", smooth("node_cpu", last.node_cpu)));
         let (cpu_l, node_l) = (h.series(|r| Some(r.cpu / 100.0)), h.series(|r| Some(r.node_cpu / 100.0)));
-        let lines = [Line { points: cpu_l.clone(), colour: by_load(BLUE, last.cpu / 100.0), fill: true, width: 1.6, head: true }, Line { points: node_l, colour: Color32::WHITE.gamma_multiply(0.85), fill: false, width: 1.1, head: false }];
+        let lines = [Line { points: cpu_l.clone(), colour: by_load("cpu-load", BLUE, last.cpu / 100.0), fill: true, width: 1.6, head: true }, Line { points: node_l, colour: Color32::WHITE.gamma_multiply(0.85), fill: false, width: 1.1, head: false }];
         let hit = charts::chart(ui, size, display_ms, WINDOW_MS, &bands, band, &lines, back, grid);
         if let Some(t) = hit.at_ms {
             let at = |s: &Vec<(u64, f32)>| usage::value_at(s, t).map(|v| v * 100.0).unwrap_or(0.0);
@@ -560,9 +661,9 @@ impl Panel {
         ui.set_width(col);
         ui.spacing_mut().item_spacing.x = 6.0;
         // Memory
-        head(ui, by_load(VIOLET, last.mem_fraction()), "Memory", format!("{} of {}", usage::size_text(last.mem_used), usage::size_text(last.mem_total)), format!("this node {}", usage::size_text(last.node_rss)));
+        head(ui, by_load("mem-load", VIOLET, last.mem_fraction()), "Memory", format!("{} of {}", usage::size_text(last.mem_used), usage::size_text(last.mem_total)), format!("this node {}", usage::size_text(last.node_rss)));
         let (mem_l, node_m) = (h.series(|r| Some(r.mem_fraction())), h.series(|r| Some(r.node_mem_fraction())));
-        let lines = [Line { points: mem_l.clone(), colour: by_load(VIOLET, last.mem_fraction()), fill: true, width: 1.6, head: true }, Line { points: node_m, colour: Color32::WHITE.gamma_multiply(0.85), fill: false, width: 1.1, head: false }];
+        let lines = [Line { points: mem_l.clone(), colour: by_load("mem-load", VIOLET, last.mem_fraction()), fill: true, width: 1.6, head: true }, Line { points: node_m, colour: Color32::WHITE.gamma_multiply(0.85), fill: false, width: 1.1, head: false }];
         let hit = charts::chart(ui, size, display_ms, WINDOW_MS, &bands, band, &lines, back, grid);
         if let Some(t) = hit.at_ms {
             let total = last.mem_total as f32;
@@ -588,9 +689,9 @@ impl Panel {
                 _ => String::new(),
             };
             let temp = last.gpu_temp.map(|c| format!("{c:.0} C")).unwrap_or_default();
-            head(ui, by_load(GREEN, gpu_pct / 100.0), "Graphics", format!("{:.0}%", smooth("gpu", gpu_pct)), [vram, temp].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(", "));
+            head(ui, by_load("gpu-load", GREEN, gpu_pct / 100.0), "Graphics", format!("{:.0}%", smooth("gpu", gpu_pct)), [vram, temp].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(", "));
             let (gpu_l, vram_l) = (h.series(|r| r.gpu.map(|g| g / 100.0)), h.series(|r| r.vram_fraction()));
-            let lines = [Line { points: gpu_l.clone(), colour: by_load(GREEN, gpu_pct / 100.0), fill: true, width: 1.6, head: true }, Line { points: vram_l, colour: AMBER.gamma_multiply(0.9), fill: false, width: 1.1, head: false }];
+            let lines = [Line { points: gpu_l.clone(), colour: by_load("gpu-load", GREEN, gpu_pct / 100.0), fill: true, width: 1.6, head: true }, Line { points: vram_l, colour: AMBER.gamma_multiply(0.9), fill: false, width: 1.1, head: false }];
             let hit = charts::chart(ui, size, display_ms, WINDOW_MS, &bands, band, &lines, back, grid);
                 if let Some(t) = hit.at_ms {
                     hit.response.on_hover_ui_at_pointer(|ui| {
@@ -606,24 +707,19 @@ impl Panel {
         ui.spacing_mut().item_spacing.x = 6.0;
         // Network, both ways on one scale that grows and shrinks with the traffic
         head(ui, TEAL, "Network", format!("in {}", usage::rate_text(smooth("rx", last.net_rx as f32))), format!("out {}", usage::rate_text(smooth("tx", last.net_tx as f32))));
-        let (rx_l, tx_l) = (h.series(|r| Some(r.net_rx as f32 / top)), h.series(|r| Some(r.net_tx as f32 / top)));
+        let (rx_l, tx_l) = (h.series(|r| Some(r.net_rx as f32 / scale)), h.series(|r| Some(r.net_tx as f32 / scale)));
         let lines = [Line { points: rx_l.clone(), colour: TEAL, fill: true, width: 1.6, head: true }, Line { points: tx_l, colour: ORANGE, fill: false, width: 1.3, head: true }];
         let hit = charts::chart(ui, size, display_ms, WINDOW_MS, &bands, band, &lines, back, grid);
             if let Some(t) = hit.at_ms {
                 hit.response.on_hover_ui_at_pointer(|ui| {
-                ui.label(hover_text(t, vec![format!("in {}", usage::rate_text(usage::value_at(&rx_l, t).unwrap_or(0.0) * top)), format!("out {}", usage::rate_text(usage::value_at(&lines[1].points, t).unwrap_or(0.0) * top))]));
+                ui.label(hover_text(t, vec![format!("in {}", usage::rate_text(usage::value_at(&rx_l, t).unwrap_or(0.0) * scale)), format!("out {}", usage::rate_text(usage::value_at(&lines[1].points, t).unwrap_or(0.0) * scale))]));
                 });
         }
         });
         });
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("2 min ago").size(10.0).color(DIM));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(format!("scale up to {}", usage::rate_text(top))).size(10.0).color(DIM));
-            });
-        });
         // Keeps the charts gliding.
         ui.ctx().request_repaint_after(Duration::from_millis(33));
+        top
     }
 
     fn activity(&self, ui: &mut Ui, i: &Info) {
@@ -641,8 +737,14 @@ impl Panel {
                     ui.label(RichText::new(format!("{} failed", i.failed)).size(12.0).color(if i.failed > 0 { RED } else { DIM }));
                 });
             });
-            if self.history.readings.len() >= 3 {
-                self.live_charts(ui);
+            let mut scale = None;
+            if !self.history.readings.is_empty() {
+                let top = ui.cursor().top();
+                scale = Some(self.live_charts(ui));
+                self.charts_h.set(ui.cursor().top() - top);
+            } else if self.started.elapsed() < Duration::from_secs(4) || i.uptime_s < 8 {
+                // The readings are on their way: their space is kept, so the page does not jump when they come.
+                ui.add_space(self.charts_h.get());
             } else {
                 // A node that sends no readings (an older one): the bars of finished jobs.
                 let now = self.started.elapsed().as_secs_f64();
@@ -659,9 +761,11 @@ impl Panel {
             let n = self.activity.finished();
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{n} {} finished in the last 2 min", if n == 1 { "job" } else { "jobs" })).size(11.0).color(DIM));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new("now").size(11.0).color(DIM));
-                });
+                if let Some(top) = scale {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(format!("Last 2 min, network up to {}", usage::rate_text(top))).size(11.0).color(DIM));
+                    });
+                }
             });
         });
         if in_flight > 0 {
@@ -686,7 +790,7 @@ impl Panel {
                         ui.label(RichText::new("Asking to use this node").size(12.0).color(AMBER));
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_space(16.0);
+                        ui.add_space(kit::PAD);
                         if kit::button(ui, ("allow", &w.id), "Allow", kit::Kind::Primary, "Let this phone use the node") {
                             answer = Some(("approve", w.id.clone()));
                         }
@@ -734,7 +838,7 @@ impl Panel {
                         };
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add_space(14.0);
+                        ui.add_space(kit::PAD);
                         match confirming {
                             Some(what) => {
                                 if kit::button(ui, ("yes", &p.id), "Yes", kit::Kind::Destructive, "") {
@@ -846,7 +950,8 @@ impl Panel {
 
     fn settings_page(&mut self, ui: &mut Ui, i: &Info) {
         let current = Self::current_settings(i);
-        if self.draft.is_none() || self.applying {
+        // Kept as chosen while the node restarts, and filled again from the node once it is back.
+        if self.draft.is_none() {
             self.draft = Some(current.clone());
         }
         let Some((mut run, mut chat)) = self.draft.clone() else { return };
@@ -868,7 +973,7 @@ impl Panel {
 
         kit::heading(ui, "Models");
         kit::group(ui, |ui, g| {
-            g.setting(ui, "Chat model", Some("E2B is smaller and faster. E4B answers better and needs 2 GB more memory"), |ui| {
+            g.setting(ui, "Chat model", Some("E2B is faster. E4B answers better and needs 2 GB more"), |ui| {
                 let mut idx = if chat == "e4b" { 1 } else { 0 };
                 if kit::segmented(ui, "chat", &["E2B", "E4B"], &mut idx) {
                     chat = if idx == 1 { "e4b" } else { "e2b" }.into();
@@ -891,7 +996,8 @@ impl Panel {
                 }
             });
             // Auto decides by itself, so this is the one case where what is happening is not what was chosen.
-            if run.mode == "auto" {
+            let auto = run.mode == "auto";
+            kit::reveal(ui, "right-now", auto, |ui| {
                 g.setting(ui, "Right now", None, |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for (name, share) in [("Photos", i.now_photos_gpu.map(|g| if g { 100 } else { 0 })), ("Speech", i.now_speech_gpu.map(|g| if g { 100 } else { 0 })), ("Search", i.now_search), ("Chat", i.now_chat)] {
@@ -905,12 +1011,17 @@ impl Panel {
                         }
                     }
                 });
-            }
-            if run.mode == "custom" {
-                for (label, hint, which) in [("Chat", "How much of the chat model is on the card, the rest uses the processor", 0), ("Search", "How much of the search model is on the card", 1)] {
+            });
+            let custom = run.mode == "custom";
+            kit::reveal(ui, "custom-rows", custom, |ui| {
+                for (label, hint, which) in [("Chat", "How much of it is on the card, the rest uses the processor", 0), ("Search", "How much of it is on the card", 1)] {
                     g.setting(ui, label, Some(hint), |ui| {
                         let v = if which == 0 { &mut run.chat } else { &mut run.search };
-                        ui.label(RichText::new(match *v { 0 => "processor".to_string(), 100 => "card".to_string(), p => format!("{p}% on card") }).size(12.5).color(DIM));
+                        // Its own fixed space, so the slider stays where it is as the words change length.
+                        ui.allocate_ui_with_layout(Vec2::new(76.0, 22.0), Layout::right_to_left(Align::Center), |ui| {
+                            ui.set_min_width(76.0);
+                            ui.label(RichText::new(match *v { 0 => "processor".to_string(), 100 => "card".to_string(), p => format!("{p}% on card") }).size(12.5).color(DIM));
+                        });
                         kit::slider(ui, ("share", which), 170.0, v, 5);
                     });
                 }
@@ -923,7 +1034,7 @@ impl Panel {
                         }
                     });
                 }
-            }
+            });
             g.setting(ui, "Tell speakers apart on", Some("The card needs the GPU helper and cuDNN"), |ui| {
                 let mut idx = if run.speakers_gpu { 0 } else { 1 };
                 if kit::segmented(ui, "speakers", &["Card", "Processor"], &mut idx) {
@@ -952,11 +1063,16 @@ impl Panel {
     /// The model files: which are there, a Get button for the missing ones, and the download in progress.
     fn models_section(&mut self, ui: &mut Ui) {
         let Some((items, dl)) = self.models.clone() else {
-            kit::group(ui, |ui, g| {
-                g.row(ui, kit::ROW, |ui| {
-                    ui.label(dim("Looking at the models folder..."));
+            // Usually here within a frame or two: a message is only for when it takes a while.
+            if self.page_at.elapsed() > Duration::from_millis(900) {
+                kit::group(ui, |ui, g| {
+                    g.row(ui, kit::ROW, |ui| {
+                        ui.label(dim("Looking at the models folder..."));
+                    });
                 });
-            });
+            } else {
+                ui.ctx().request_repaint_after(Duration::from_millis(120));
+            }
             return;
         };
         let running = matches!(dl, Some(Download::Running { .. }));
@@ -985,7 +1101,7 @@ impl Panel {
                     g.row(ui, kit::ROW_TALL, |ui| {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 5.0;
-                            kit::meter(ui, "download", ui.available_width() - 14.0, f, BLUE);
+                            kit::meter(ui, "download", ui.available_width() - kit::PAD, f, BLUE);
                             ui.label(dim(format!("{file}  {}  {}", if *total > 0 { format!("{}%", (f * 100.0) as u32) } else { String::new() }, model::size_text(*done))));
                         });
                     });
@@ -1021,12 +1137,12 @@ impl Panel {
     }
 
     /// Save and Undo float over the page only while there is something to save, rising from the bottom edge and going back the same way.
-    fn save_capsule(&mut self, ctx: &egui::Context, area: egui::Rect, i: &Info) {
+    fn save_capsule(&mut self, ctx: &egui::Context, area: egui::Rect, i: &Info, on_page: bool) {
         let current = Self::current_settings(i);
         let Some((run, chat)) = self.draft.clone() else { return };
         let changed = (run.clone(), chat.clone()) != current;
         let applying = self.applying;
-        let k = kit::spring(ctx, egui::Id::NULL.with("save-capsule"), if changed || applying { 1.0 } else { 0.0 }, 1.0, 0.32);
+        let k = kit::spring(ctx, egui::Id::NULL.with("save-capsule"), if on_page && (changed || applying) { 1.0 } else { 0.0 }, 1.0, 0.26);
         if k < 0.01 {
             return;
         }
@@ -1043,16 +1159,18 @@ impl Panel {
                 .inner_margin(Margin { left: 18, right: 11, top: 11, bottom: 11 })
                 .show(ui, |ui| {
                     ui.set_width(w - 29.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(if applying { "Restarting the node, about a minute" } else { "Saving restarts the node" }).size(12.5).color(kit::SOFT));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.allocate_ui_with_layout(Vec2::new(w - 29.0, 28.0), Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        {
                             if kit::button(ui, "save", if applying { "Restarting" } else { "Save and restart" }, if applying { kit::Kind::Plain } else { kit::Kind::Primary }, "Save the settings and restart the node") && changed && !applying {
                                 save = true;
                             }
                             if !applying && kit::button(ui, "undo", "Undo", kit::Kind::Plain, "Back to what the node uses now") {
                                 undo = true;
                             }
+                        }
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.label(RichText::new(if applying { "Restarting the node, about a minute" } else { "Saving restarts the node" }).size(12.5).color(kit::SOFT));
                         });
                     });
                 });
@@ -1076,14 +1194,22 @@ impl Panel {
 
     /// The code to type on a new phone: each character on its own tile so it reads at a glance, and a ring that empties as it runs out.
     fn pairing_card(&mut self, ui: &mut Ui) {
-        let Some((p, until)) = &self.pairing else { return };
-        let left = until.saturating_duration_since(Instant::now()).as_secs_f32();
-        if left <= 0.0 {
+        if self.pairing.as_ref().map(|(_, until)| *until <= Instant::now()).unwrap_or(false) {
             self.pairing = None;
-            return;
         }
+        if self.pairing.is_some() {
+            self.pairing_last = self.pairing.clone();
+        }
+        let open = self.pairing.is_some();
+        let Some((p, until)) = self.pairing_last.clone() else {
+            // Nothing to show yet, but the card learns it is closed, so that it opens when a code comes.
+            kit::reveal(ui, "pairing", false, |_| {});
+            return;
+        };
+        let left = until.saturating_duration_since(Instant::now()).as_secs_f32();
         let (code, addresses, minutes) = (p.code.clone(), p.addresses.clone(), p.minutes);
         let mut hide = false;
+        kit::reveal(ui, "pairing", open, |ui| {
         ui.add_space(6.0);
         card(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1123,6 +1249,7 @@ impl Panel {
                 ui.vertical_centered(|ui| ui.label(RichText::new(format!("Or add it by address, {a}")).size(12.0).color(DIM)));
             }
         });
+        });
         if hide {
             self.pairing = None;
         }
@@ -1134,9 +1261,8 @@ impl Panel {
     fn sidebar(&mut self, ui: &mut Ui, view: &Option<View>, info: Option<&Info>) {
         let (title, sub, colour) = match view {
             Some(v) => match &v.poll {
-                Poll::Up(i) => (i.name.clone(), hero_word(v.state()).to_string(), kit::state_colour(v.state())),
-                Poll::Stopping => ("Marginalia node".to_string(), hero_word(v.state()).to_string(), kit::state_colour(v.state())),
-                Poll::Down => ("Marginalia node".to_string(), hero_word(v.state()).to_string(), kit::state_colour(v.state())),
+                Poll::Up(i) => (i.name.clone(), hero_word(self.showing(v.state())).to_string(), kit::state_colour(self.showing(v.state()))),
+                Poll::Stopping | Poll::Down => ("Marginalia node".to_string(), hero_word(self.showing(v.state())).to_string(), kit::state_colour(self.showing(v.state()))),
             },
             None => ("Marginalia node".to_string(), "Looking for it".to_string(), kit::FAINT),
         };
@@ -1202,90 +1328,52 @@ impl Panel {
     /// The big title of a page, and a line under it.
     fn page_title(&self, ui: &mut Ui, title: &str, line: &str) {
         ui.label(kit::title(title, 26.0));
-        if !line.is_empty() {
-            ui.label(RichText::new(line).size(13.0).color(DIM));
-        }
+        // The line keeps its height while its words are still unknown, so the page below does not jump when they come.
+        ui.label(RichText::new(if line.is_empty() { " " } else { line }).size(13.0).color(DIM));
         ui.add_space(8.0);
     }
 
-    /// Pause and lock, as switches. A switch moved is shown at its new place at once, and the node's word follows.
+    /// Whether new phones can join, as a switch. A switch moved is shown at its new place at once, and the node's word follows.
     fn node_card(&mut self, ui: &mut Ui, i: &Info) {
-        let mut accept = self.shown("accept", !i.paused);
         let mut open = self.shown("open", !i.locked);
-        let (mut accept_moved, mut open_moved) = (false, false);
+        let mut open_moved = false;
         kit::heading(ui, "Node");
         kit::group(ui, |ui, g| {
-            g.setting(ui, "Take new jobs", Some("Turn it off to pause. Jobs already running finish"), |ui| {
-                accept_moved = kit::switch(ui, "accept", &mut accept);
-            });
             g.setting(ui, "Let new phones join", Some("Turn it off and each new phone must be allowed first"), |ui| {
                 open_moved = kit::switch(ui, "open", &mut open);
             });
         });
-        if accept_moved {
-            self.expect("accept", accept);
-            self.send(Cmd::Click(if accept { Action::Resume } else { Action::Pause }));
-        }
         if open_moved {
             self.expect("open", open);
             self.send(Cmd::Click(if open { Action::Unlock } else { Action::Lock }));
         }
     }
 
-    /// Stopping is rare and cannot be undone from a phone, so it stands apart at the end of the page and asks once.
-    fn stop_group(&mut self, ui: &mut Ui) {
-        let confirming = self.confirm_stop;
-        let (mut ask, mut yes, mut no) = (false, false, false);
-        ui.add_space(14.0);
-        kit::group(ui, |ui, g| {
-            g.setting(ui, if confirming { "Stop the node?" } else { "Stop the node" }, Some(if confirming { "Phones lose it until it is started" } else { "Finishes the jobs running, then shuts it down" }), |ui| {
-                if confirming {
-                    if kit::button(ui, "stop-yes", "Yes, stop it", kit::Kind::Destructive, "") {
-                        yes = true;
-                    }
-                    ui.add_space(2.0);
-                    if kit::button(ui, "stop-no", "Cancel", kit::Kind::Plain, "") {
-                        no = true;
-                    }
-                } else if kit::button(ui, "stop", "Stop node", kit::Kind::Danger, "Finish running jobs and shut the node down") {
-                    ask = true;
-                }
-            });
-        });
-        if ask {
-            self.confirm_stop = true;
-        }
-        if no {
-            self.confirm_stop = false;
-        }
-        if yes {
-            self.send(Cmd::Click(Action::Stop));
-            self.confirm_stop = false;
-        }
-    }
-
-    /// The node is not there: the mark, one sentence, and the one thing to do about it.
-    fn empty_state(&mut self, ui: &mut Ui, state: State) {
+    /// The node is not there: the mark, one sentence, and the one thing to do about it. `compact` is for under the Overview's first card,
+    /// which already says all that and has the button: just the mark, and the spinner while something is happening.
+    fn empty_state(&mut self, ui: &mut Ui, state: State, compact: bool) {
         let (working, title, line) = match state {
             State::Starting => (true, "Starting the node", "It is loading its models. This can take a minute."),
             State::Stopping => (true, "Stopping the node", "It is finishing the jobs it has."),
             _ => (false, "The node is not running", "Your phone works on its own until it is back."),
         };
-        ui.add_space((ui.available_height() * 0.22).max(30.0));
+        ui.add_space((ui.available_height() * if compact { 0.16 } else { 0.22 }).max(30.0));
         ui.vertical_centered(|ui| {
             if let Some(t) = &self.logo {
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(72.0), Sense::hover());
                 let tint = if state == State::Starting { Color32::WHITE } else { Color32::from_white_alpha(120) };
                 ui.painter().image(t.id(), rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), tint);
             }
-            ui.add_space(16.0);
-            ui.label(kit::title(title, 22.0));
-            ui.add_space(2.0);
-            ui.label(RichText::new(line).size(13.0).color(DIM));
+            if !compact {
+                ui.add_space(16.0);
+                ui.label(kit::title(title, 22.0));
+                ui.add_space(2.0);
+                ui.label(RichText::new(line).size(13.0).color(DIM));
+            }
             ui.add_space(18.0);
             if working {
                 kit::spinner(ui, 22.0, kit::SOFT);
-            } else if kit::button(ui, "start", "Start node", kit::Kind::Primary, "Start marginalia-node on this machine") {
+            } else if !compact && kit::button(ui, "start", "Start node", kit::Kind::Primary, "Start marginalia-node on this machine") {
                 self.send(Cmd::Click(Action::Start));
             }
         });
@@ -1357,24 +1445,55 @@ impl eframe::App for Panel {
             ui.painter().rect_filled(content, CornerRadius { nw: 0, sw: 0, ne: radius, se: radius }, BG);
             // The strip along the top moves the window, where there is no title bar to take hold of.
             kit::drag_region(ui, egui::Rect::from_min_size(content.min, Vec2::new(content.width(), 32.0)), "top");
-            // The page comes in from the side it was moved towards: a short fade and a few points of travel.
-            let t = clamp01(self.page_in.value() * 1.3);
-            let travel = (1.0 - clamp01(self.page_in.value())) * 12.0 * self.page_dir;
-            ui.set_opacity(t);
+            // The page comes in from the side it was moved towards as one piece. It is partly there from the very first frame, so a click
+            // never shows an empty window, and it moves by whole pixels so the text stays sharp.
+            let kind = match (&view, &info) {
+                (None, _) => 0,
+                (Some(_), None) => 1,
+                _ => 2,
+            };
+            if kind != self.page_kind {
+                self.page_kind = kind;
+                self.page_dir = 1.0;
+                self.begin_page();
+            }
+            let arrived = clamp01(self.page_in.value());
+            let ppp = ctx.pixels_per_point();
+            let travel = ((1.0 - arrived) * 8.0 * self.page_dir * ppp).round() / ppp;
+            let moved = ui.max_rect().translate(Vec2::new(0.0, travel));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(moved), |ui| {
+            ui.set_opacity(0.3 + 0.7 * clamp01(arrived * 1.25));
             Frame::NONE.inner_margin(Margin { left: 26, right: 12, top: 12, bottom: 0 }).show(ui, |ui| {
                 // Clear of the window's buttons in the top right corner.
-                ui.add_space((26.0 + travel).max(0.0));
+                ui.add_space(26.0);
                 match (&view, &info) {
                     (None, _) => {
                         ui.add_space((ui.available_height() * 0.36).max(30.0));
                         ui.vertical_centered(|ui| kit::spinner(ui, 22.0, kit::SOFT));
                     }
                     (Some(v), None) => {
-                        self.empty_state(ui, v.state());
+                        let state = v.state();
+                        if self.page == Page::Overview {
+                            // The same column as when the node is up, so the card stays where it was.
+                            let room = ui.available_width() - 14.0;
+                            let col = room.min(CONTENT_W);
+                            ui.horizontal_top(|ui| {
+                                ui.add_space((room - col) / 2.0);
+                                ui.vertical(|ui| {
+                                    ui.set_width(col);
+                                    self.hero(ui, state, None);
+                                    let state = self.showing(state);
+                                    self.empty_state(ui, state, true);
+                                });
+                            });
+                        } else {
+                            self.empty_state(ui, state, false);
+                        }
                     }
                     (Some(v), Some(i)) => {
                         let state = v.state();
-                        let out = egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        // Each page keeps its own place.
+                        let out = egui::ScrollArea::vertical().id_salt(self.page.title()).auto_shrink([false, false]).show(ui, |ui| {
                             // The column keeps its width in a wide window and stays in the middle of it, with the scroll bar outside.
                             let room = ui.available_width() - 14.0;
                             let col = room.min(CONTENT_W);
@@ -1400,15 +1519,18 @@ impl eframe::App for Panel {
                     }
                 }
             });
+            });
         });
-        if let (Page::Settings, Some(i)) = (self.page, &info) {
-            self.save_capsule(&ctx, content, i);
+        // Asked on every page, so it leaves the way it came when the page changes.
+        if let Some(i) = &info {
+            let on_page = self.page == Page::Settings;
+            self.save_capsule(&ctx, content, i, on_page);
         }
         self.toast(&ctx, content);
         let buttons = kit::caption_buttons(&ctx, window, radius);
         kit::resize_edges(&ctx, window, buttons);
 
-        if moving || self.nav.moving() {
+        if moving || self.nav.moving() || self.page_in.moving() {
             ctx.request_repaint();
         }
     }
@@ -1419,13 +1541,12 @@ impl Panel {
     fn page_content(&mut self, ui: &mut Ui, state: State, i: &Info) {
         match self.page {
             Page::Overview => {
-                self.hero(ui, state, i);
+                self.hero(ui, state, Some(i));
                 self.node_card(ui, i);
                 kit::heading(ui, "Activity");
                 self.activity(ui, i);
                 self.speed(ui, i);
                 self.addresses(ui, i);
-                self.stop_group(ui);
             }
             Page::Phones => {
                 let mut pair = false;
@@ -1436,8 +1557,11 @@ impl Panel {
                         self.page_title(ui, "Phones", "The phones that use this node, and how to add one");
                     });
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        ui.add_space(2.0);
-                        pair = kit::button(ui, "pair", "Show pairing code", kit::Kind::Primary, "Show a code to type on a new phone");
+                        ui.with_layout(Layout::top_down(Align::Max), |ui| {
+                            // Level with the middle of the title, and with the right edge of what is below it.
+                            ui.add_space(5.0);
+                            pair = kit::button(ui, "pair", "Show pairing code", kit::Kind::Primary, "Show a code to type on a new phone");
+                        });
                     });
                 });
                 if pair {
@@ -1464,6 +1588,37 @@ impl Panel {
                 self.settings_page(ui, i);
             }
         }
+    }
+}
+
+/// How long a press of Start or Stop is shown before the node has answered.
+const ACT_WAIT: Duration = Duration::from_millis(1500);
+
+/// Which of Start, Pause and Stop can be used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Controls {
+    start: bool,
+    pause: bool,
+    stop: bool,
+}
+
+impl Controls {
+    fn for_state(state: State) -> Controls {
+        match state {
+            State::Running | State::Busy | State::Locked | State::Paused => Controls { start: false, pause: true, stop: true },
+            State::Down => Controls { start: true, pause: false, stop: false },
+            State::Starting | State::Stopping => Controls { start: false, pause: false, stop: false },
+        }
+    }
+}
+
+/// What to show for a node in `state` that was just told to become `asked`. Only while it has not moved yet: once the node says anything
+/// else, the node is right.
+fn showing_state(state: State, asked: Option<State>) -> State {
+    match (state, asked) {
+        (State::Down, Some(State::Starting)) => State::Starting,
+        (State::Running | State::Busy | State::Locked | State::Paused, Some(State::Stopping)) => State::Stopping,
+        _ => state,
     }
 }
 
@@ -1526,6 +1681,39 @@ pub fn run(port: u16, page: Page, pair: bool) {
     );
     if let Err(e) = result {
         eprintln!("Could not open the details window: {e}");
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    #[test]
+    fn a_running_node_can_be_paused_or_stopped_and_not_started() {
+        for s in [State::Running, State::Busy, State::Locked, State::Paused] {
+            assert_eq!(Controls::for_state(s), Controls { start: false, pause: true, stop: true }, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn a_node_that_is_down_can_only_be_started() {
+        assert_eq!(Controls::for_state(State::Down), Controls { start: true, pause: false, stop: false });
+    }
+
+    #[test]
+    fn nothing_can_be_pressed_while_it_is_changing() {
+        let none = Controls { start: false, pause: false, stop: false };
+        assert_eq!(Controls::for_state(State::Starting), none);
+        assert_eq!(Controls::for_state(State::Stopping), none);
+    }
+
+    #[test]
+    fn a_press_shows_at_once_until_the_node_says_otherwise() {
+        assert_eq!(showing_state(State::Down, Some(State::Starting)), State::Starting);
+        assert_eq!(showing_state(State::Busy, Some(State::Stopping)), State::Stopping);
+        assert_eq!(showing_state(State::Running, Some(State::Starting)), State::Running, "it has come up: the node is right");
+        assert_eq!(showing_state(State::Down, Some(State::Stopping)), State::Down, "it has gone: the node is right");
+        assert_eq!(showing_state(State::Down, None), State::Down);
     }
 }
 

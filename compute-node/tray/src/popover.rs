@@ -265,7 +265,7 @@ impl Popover {
                 }
                 Row::Item { text, icon, switch, danger, .. } => {
                     // How much this row is the selected one, so its words brighten as the highlight arrives.
-                    let lit = if self.nav.selected() == Some(i) { ha } else { 0.0 };
+                    let lit = ha * clamp01(1.0 - (self.hl_y.value() - self.tops[i]).abs() / menuspec::ROW_H);
                     let rest = if *danger { RED } else { TEXT };
                     let words = blend(rest, Color32::WHITE, lit);
                     let picture = blend(if *danger { RED } else { DIM }, Color32::WHITE, lit);

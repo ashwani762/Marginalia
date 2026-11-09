@@ -11,6 +11,7 @@
 //! and on Linux.
 
 use crate::anim::{clamp01, lerp, Spring};
+use crate::menuspec::Icon;
 use crate::model::State;
 use eframe::egui::{self, pos2, vec2, Align, Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Id, Layout, Rect, RichText, Sense, Stroke, Ui};
 use std::sync::Arc;
@@ -38,7 +39,8 @@ pub const PURPLE: Color32 = Color32::from_rgb(191, 90, 242);
 /// The row height without and with a line of explanation under its name.
 pub const ROW: f32 = 44.0;
 pub const ROW_TALL: f32 = 56.0;
-const PAD: f32 = 16.0;
+/// How far text and controls sit in from the sides of a group. Everything on a page keeps to this, so edges line up from block to block.
+pub const PAD: f32 = 16.0;
 
 /// The two usual springs: things that glide to a new place, and quick answers to the pointer.
 const GLIDE: (f32, f32) = (1.0, 0.28);
@@ -246,10 +248,41 @@ pub const LINE_H: f32 = 17.0;
 pub fn text_block(ui: &mut Ui, width: f32, height: f32, content: f32, add: impl FnOnce(&mut Ui)) {
     ui.allocate_ui_with_layout(vec2(width, height), Layout::top_down(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        ui.set_max_width(width);
+        // Exactly this wide, however short the words, so what comes after it lines up from row to row.
+        ui.set_width(width);
         ui.add_space(((height - content) / 2.0).max(0.0));
         add(ui);
     });
+}
+
+/// Content that opens and closes in place: its height grows from nothing on a spring, so what is below moves aside instead of being
+/// shoved, and it fades as it comes. Call it every frame with `open`, also while closed, so it knows where it started.
+pub fn reveal(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, open: bool, add: impl FnOnce(&mut Ui)) {
+    let id = ui.scope_id().with(("kit-reveal", id));
+    let ctx = ui.ctx().clone();
+    let k = spring(&ctx, id, if open { 1.0 } else { 0.0 }, GLIDE.0, 0.24);
+    if k < 0.003 {
+        return;
+    }
+    let height_id = id.with("height");
+    let known: f32 = ctx.data(|d| d.get_temp(height_id)).unwrap_or(0.0);
+    let top = ui.cursor().min;
+    let width = ui.available_width();
+    let shown = (known * k).round();
+    let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(top, vec2(width, 4000.0))).layout(Layout::top_down(Align::Min)));
+    if k < 1.0 {
+        // A little wider than the content, so a shadow or a focus ring at its side is not cut.
+        inner.set_clip_rect(ui.clip_rect().intersect(Rect::from_min_size(top - vec2(8.0, 0.0), vec2(width + 16.0, shown))));
+        inner.set_opacity(clamp01(k * 1.4));
+    }
+    add(&mut inner);
+    let full = inner.min_rect().height();
+    ctx.data_mut(|d| d.insert_temp(height_id, full));
+    // The gap after it opens with it too, so nothing below jumps on the first frame.
+    let gap = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = gap * k;
+    ui.advance_cursor_after_rect(Rect::from_min_size(top, vec2(width, if k < 1.0 { shown } else { full })));
+    ui.spacing_mut().item_spacing.y = gap;
 }
 
 /// A soft fade at the top or bottom edge of a scrolling area, where content meets what is above or below it: no hard line.
@@ -358,30 +391,52 @@ pub enum Kind {
 
 /// A button that answers the pointer: it lifts on hover and sinks the moment it is pressed. True when clicked.
 pub fn button(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, text: &str, kind: Kind, hint: &str) -> bool {
+    button_with(ui, id, None, text, kind, None, true, hint)
+}
+
+/// A button with a picture before its words, a set width so buttons side by side do not move as their words change, or switched off.
+#[allow(clippy::too_many_arguments)]
+pub fn button_with(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, icon: Option<Icon>, text: &str, kind: Kind, width: Option<f32>, enabled: bool, hint: &str) -> bool {
     let id = ui.scope_id().with(("kit-button", id));
-    let font = if matches!(kind, Kind::Primary | Kind::Destructive) { semibold(13.0) } else { FontId::proportional(13.0) };
-    let w = ui.painter().layout_no_wrap(text.to_string(), font.clone(), TEXT).size().x + 26.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w.max(64.0), 28.0), Sense::click());
-    let mut resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    let font = if enabled && matches!(kind, Kind::Primary | Kind::Destructive) { semibold(13.0) } else { FontId::proportional(13.0) };
+    let words_w = ui.painter().layout_no_wrap(text.to_string(), font.clone(), TEXT).size().x;
+    let w = width.unwrap_or((words_w + 26.0).max(64.0));
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 28.0), if enabled { Sense::click() } else { Sense::hover() });
+    let mut resp = if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
     if !hint.is_empty() {
         resp = resp.on_hover_text(hint);
     }
     let ctx = ui.ctx().clone();
-    let hover = spring(&ctx, id.with("h"), if resp.hovered() { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
-    let press = spring(&ctx, id.with("p"), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, ANSWER.0, 0.06);
+    let hover = spring(&ctx, id.with("h"), if enabled && resp.hovered() { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
+    let press = spring(&ctx, id.with("p"), if enabled && resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, ANSWER.0, 0.06);
+    let on = spring(&ctx, id.with("on"), if enabled { 1.0 } else { 0.0 }, ANSWER.0, 0.2);
     let (base, lifted, words) = match kind {
         Kind::Plain => (Color32::from_rgb(68, 68, 72), Color32::from_rgb(84, 84, 88), TEXT),
         Kind::Primary => (ACCENT, ACCENT_LIGHT, Color32::WHITE),
         Kind::Danger => (Color32::from_rgb(64, 42, 44), Color32::from_rgb(82, 48, 50), Color32::from_rgb(255, 120, 110)),
         Kind::Destructive => (Color32::from_rgb(214, 58, 50), RED, Color32::WHITE),
     };
+    // Switched off, every kind is the same quiet ground: what cannot be pressed does not ask for attention.
+    let (off_fill, off_words) = (Color32::from_rgb(50, 50, 54), FAINT);
+    let words = mix(off_words, words, on);
     let r = rect.shrink(press * 1.0);
-    let fill = mix(mix(base, lifted, hover), Color32::BLACK, press * 0.14);
+    let fill = mix(off_fill, mix(mix(base, lifted, hover), Color32::BLACK, press * 0.14), on);
     ui.painter().rect_filled(r, CornerRadius::same(7), fill);
-    sheen(ui, r, 7.0, 1.2);
-    ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, words);
+    sheen(ui, r, 7.0, 1.2 * on);
+    match icon {
+        Some(icon) => {
+            // The picture and the words are centred as one.
+            let total = 14.0 + 7.0 + words_w;
+            let left = (r.center().x - total / 2.0).round();
+            crate::popover::draw_icon(ui.painter(), icon, pos2(left + 7.0, r.center().y), words);
+            ui.painter().text(pos2(left + 21.0, r.center().y), Align2::LEFT_CENTER, text, font, words);
+        }
+        None => {
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, text, font, words);
+        }
+    }
     focus_ring(ui, &resp, rect, 7);
-    resp.clicked()
+    enabled && resp.clicked()
 }
 
 /// A meter: the filled part glides to `fraction` (0 to 1) when it changes.
