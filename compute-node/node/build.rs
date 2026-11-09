@@ -12,6 +12,23 @@ fn main() {
     let ggml_include = manifest.join("../vendor/llama-cpp-sys-2/llama.cpp/ggml/include");
 
     println!("cargo:rerun-if-changed=build.rs");
+
+    // Windows: the program icon and version details, so Explorer, Task Manager and the installer show the mark.
+    println!("cargo:rerun-if-changed=../packaging/app.ico");
+    #[cfg(windows)]
+    {
+        if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+            let mut res = winresource::WindowsResource::new();
+            res.set_icon("../packaging/app.ico");
+            res.set("FileDescription", "Marginalia compute node");
+            res.set("ProductName", "Marginalia compute node");
+            res.set("OriginalFilename", "marginalia-node.exe");
+            if let Err(e) = res.compile() {
+                // A missing resource compiler is no reason to fail the build: the program works without its icon.
+                println!("cargo:warning=could not add the icon to the program: {e}");
+            }
+        }
+    }
     println!("cargo:rerun-if-changed=../../vendor/whisper.cpp/src/whisper.cpp");
     println!("cargo:rerun-if-changed=../../vendor/whisper.cpp/src/whisper-arch.h");
     println!("cargo:rerun-if-changed=../../vendor/whisper.cpp/include/whisper.h");

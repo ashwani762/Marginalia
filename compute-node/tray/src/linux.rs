@@ -3,7 +3,7 @@
 //! A left click opens the details panel, a right click shows the short menu.
 
 use crate::control::{spawn_poller, Controller};
-use crate::icon;
+use crate::glyph;
 use crate::model::{Action, Entry, View};
 use ksni::blocking::TrayMethods;
 use ksni::menu::{MenuItem, StandardItem};
@@ -21,7 +21,7 @@ fn label(s: &str) -> String {
 }
 
 fn pixmaps(view: &View) -> Vec<ksni::Icon> {
-    [24, 48].into_iter().map(|size| ksni::Icon { width: size as i32, height: size as i32, data: icon::argb(view.state(), size) }).collect()
+    [16, 24, 32, 48, 64].into_iter().map(|size| ksni::Icon { width: size as i32, height: size as i32, data: glyph::argb(view.state(), size) }).collect()
 }
 
 impl ksni::Tray for NodeTray {

@@ -13,7 +13,8 @@ pub fn colour(state: State) -> [u8; 3] {
     }
 }
 
-/// RGBA pixels, `size` by `size`, with soft (anti-aliased) edges.
+/// RGBA pixels, `size` by `size`, with soft (anti-aliased) edges. The plain ring and dot: the tray now shows `glyph.rs`, this is kept as it was.
+#[allow(dead_code)]
 pub fn rgba(state: State, size: u32) -> Vec<u8> {
     let [r, g, b] = colour(state);
     let s = size as f32;
@@ -33,7 +34,7 @@ pub fn rgba(state: State, size: u32) -> Vec<u8> {
 }
 
 /// The same picture as ARGB32, which is what the StatusNotifierItem protocol wants.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[allow(dead_code)]
 pub fn argb(state: State, size: u32) -> Vec<u8> {
     let mut px = rgba(state, size);
     for p in px.chunks_exact_mut(4) {

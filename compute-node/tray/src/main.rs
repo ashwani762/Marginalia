@@ -10,6 +10,7 @@ mod admin;
 mod autostart;
 mod charts;
 mod control;
+mod glyph;
 mod icon;
 mod usage;
 mod model;
@@ -64,6 +65,9 @@ struct Cli {
     /// Turn starting at sign in on or off, or show whether it is on, then exit.
     #[arg(long, value_name = "on|off|status")]
     startup: Option<String>,
+    /// Write the program icon (app.ico) and a picture of every tray state (icons.png) into a folder, then exit. For packaging.
+    #[arg(long, value_name = "FOLDER", hide = true)]
+    make_icons: Option<std::path::PathBuf>,
 }
 
 /// Only one tray icon per node: the first one holds a port on this machine for as long as it runs (the node's control port plus one),
@@ -74,6 +78,24 @@ fn single_instance(admin_port: u16) -> Result<Option<std::net::TcpListener>, ()>
         Ok(l) => Ok(Some(l)),
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(()),
         Err(_) => Ok(None),
+    }
+}
+
+/// `--make-icons FOLDER`: the icon file the installer and the programs use, and a picture of the tray states to look at.
+fn make_icons(dir: &std::path::Path) -> i32 {
+    let (w, h, px) = glyph::sheet();
+    let wrote = std::fs::create_dir_all(dir)
+        .and_then(|_| std::fs::write(dir.join("app.ico"), glyph::ico(&[16, 24, 32, 48, 64, 128, 256])))
+        .and_then(|_| std::fs::write(dir.join("icons.png"), glyph::png(w, h, &px)));
+    match wrote {
+        Ok(()) => {
+            println!("Wrote {} and {}.", dir.join("app.ico").display(), dir.join("icons.png").display());
+            0
+        }
+        Err(e) => {
+            eprintln!("Could not write the icons: {e}");
+            1
+        }
     }
 }
 
@@ -102,6 +124,9 @@ fn startup_command(what: &str) -> i32 {
 
 fn main() {
     let cli = Cli::parse();
+    if let Some(dir) = &cli.make_icons {
+        std::process::exit(make_icons(dir));
+    }
     if let Some(what) = &cli.startup {
         std::process::exit(startup_command(what));
     }
@@ -112,7 +137,11 @@ fn main() {
         match single_instance(cli.admin_port) {
             Ok(l) => l,
             Err(()) => {
-                eprintln!("The tray icon is already running.");
+                // Opened again (from the Start menu, say) while it runs: show its window instead of doing nothing. The
+                // system's own sign in start has nothing to show.
+                if !cli.at_login && cli.startup.is_none() {
+                    panel::run(cli.admin_port, false, false);
+                }
                 return;
             }
         }

@@ -4,7 +4,7 @@
 //! NOTE: this file could not be compiled where it was written (no Windows target installed).
 
 use crate::control::{spawn_poller, Controller};
-use crate::icon;
+use crate::glyph;
 use crate::model::{Action, Entry, View};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver};
@@ -22,8 +22,10 @@ fn label(s: &str) -> String {
     s.replace('&', "&&")
 }
 
-fn icon_for(view: &View) -> Option<Icon> {
-    Icon::from_rgba(icon::rgba(view.state(), 32), 32, 32).ok()
+/// The icon drawn at the size the screen wants: 16 pixels at 100 percent, more on a sharper screen, so it is never stretched.
+fn icon_for(view: &View, scale: f64) -> Option<Icon> {
+    let size = (16.0 * scale).round().clamp(16.0, 64.0) as u32;
+    Icon::from_rgba(glyph::rgba(view.state(), size), size, size).ok()
 }
 
 struct App {
@@ -33,6 +35,8 @@ struct App {
     shown: Option<View>,
     /// Whether the menu on show was built with starting at sign in on, so a click on that entry rebuilds it.
     shown_startup: bool,
+    /// The screen's scale (1.0 at 100 percent), as the icon's size follows it.
+    scale: f64,
     actions: HashMap<String, Action>,
 }
 
@@ -65,13 +69,13 @@ impl App {
         self.actions = actions;
         match &self.tray {
             Some(t) => {
-                let _ = t.set_icon(icon_for(&view));
+                let _ = t.set_icon(icon_for(&view, self.scale));
                 let _ = t.set_tooltip(Some(crate::model::tooltip(&view)));
                 t.set_menu(Some(Box::new(menu)));
             }
             None => {
                 let mut b = TrayIconBuilder::new().with_menu(Box::new(menu)).with_menu_on_left_click(false).with_tooltip(crate::model::tooltip(&view));
-                if let Some(i) = icon_for(&view) {
+                if let Some(i) = icon_for(&view, self.scale) {
                     b = b.with_icon(i);
                 }
                 self.tray = b.build().ok();
@@ -87,6 +91,14 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(m) = event_loop.primary_monitor() {
+            let scale = m.scale_factor();
+            if (scale - self.scale).abs() > 0.01 {
+                // The screen's scale changed (or is known now): draw the icon again at the right size.
+                self.scale = scale;
+                self.shown = None;
+            }
+        }
         while let Ok(view) = self.views.try_recv() {
             self.show(view);
         }
@@ -117,6 +129,6 @@ pub fn run(ctl: Arc<Controller>, rx: Receiver<()>) {
         let _ = tx.send(view);
     });
     let Ok(event_loop) = EventLoop::new() else { return };
-    let mut app = App { ctl, views, tray: None, shown: None, shown_startup: false, actions: HashMap::new() };
+    let mut app = App { ctl, views, tray: None, shown: None, shown_startup: false, scale: 1.0, actions: HashMap::new() };
     let _ = event_loop.run_app(&mut app);
 }
