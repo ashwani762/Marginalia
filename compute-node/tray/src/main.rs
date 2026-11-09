@@ -7,15 +7,18 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod admin;
+mod anim;
 mod autostart;
 mod charts;
 mod control;
 mod glyph;
 mod icon;
+mod menuspec;
 mod usage;
 mod model;
 mod os;
 mod panel;
+mod popover;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -65,6 +68,19 @@ struct Cli {
     /// Turn starting at sign in on or off, or show whether it is on, then exit.
     #[arg(long, value_name = "on|off|status")]
     startup: Option<String>,
+    /// Use the system's own menu on a right click instead of the menu window. For a machine where the window cannot open.
+    #[arg(long = "native-menu", hide = true)]
+    #[cfg_attr(not(windows), allow(dead_code))]
+    native_menu: bool,
+    /// Show the tray's menu window and nothing else. The tray starts this itself on a right click, with the rows as a line of JSON on its input.
+    #[arg(long, hide = true)]
+    menu: bool,
+    /// With `--menu`: where the window goes, "x,y" in points. Left out, the system places it.
+    #[arg(long, value_name = "X,Y", hide = true)]
+    at: Option<String>,
+    /// With `--menu`: show every kind of row instead of reading them, to look at the menu.
+    #[arg(long, hide = true)]
+    sample: bool,
     /// Write the program icon (app.ico) and a picture of every tray state (icons.png) into a folder, then exit. For packaging.
     #[arg(long, value_name = "FOLDER", hide = true)]
     make_icons: Option<std::path::PathBuf>,
@@ -79,6 +95,29 @@ fn single_instance(admin_port: u16) -> Result<Option<std::net::TcpListener>, ()>
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(()),
         Err(_) => Ok(None),
     }
+}
+
+/// `--menu`: draw the menu window for the rows on the input, and print the chosen action. Returns the exit code.
+fn menu_command(cli: &Cli) -> i32 {
+    let spec = if cli.sample {
+        popover::sample()
+    } else {
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        match menuspec::Spec::from_json(line.trim().trim_start_matches('\u{feff}')) {
+            Some(s) => s,
+            None => {
+                eprintln!("The menu got no rows to show.");
+                return 2;
+            }
+        }
+    };
+    let at = cli.at.as_deref().and_then(|s| {
+        let (x, y) = s.split_once(',')?;
+        Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+    });
+    popover::run(spec, at);
+    0
 }
 
 /// `--make-icons FOLDER`: the icon file the installer and the programs use, and a picture of the tray states to look at.
@@ -124,6 +163,9 @@ fn startup_command(what: &str) -> i32 {
 
 fn main() {
     let cli = Cli::parse();
+    if cli.menu {
+        std::process::exit(menu_command(&cli));
+    }
     if let Some(dir) = &cli.make_icons {
         std::process::exit(make_icons(dir));
     }
@@ -172,7 +214,7 @@ fn main() {
     #[cfg(target_os = "linux")]
     linux::run(ctl, rx);
     #[cfg(windows)]
-    windows::run(ctl, rx);
+    windows::run(ctl, rx, cli.native_menu);
     #[cfg(not(any(target_os = "linux", windows)))]
     {
         let _ = (ctl, rx);

@@ -1084,3 +1084,48 @@ mod startup_menu_tests {
         }
     }
 }
+
+macro_rules! action_names {
+    ($($variant:ident),* $(,)?) => {
+        impl Action {
+            /// Every action, so a name read back from the menu window finds its action.
+            pub const ALL: &'static [Action] = &[$(Action::$variant),*];
+
+            /// The action's name as it travels between the tray and its menu window. A new action that is not listed here
+            /// does not compile: the match below must name every one.
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(Action::$variant => stringify!($variant)),*
+                }
+            }
+
+            pub fn from_name(name: &str) -> Option<Action> {
+                Action::ALL.iter().copied().find(|a| a.name() == name)
+            }
+        }
+    };
+}
+
+action_names!(Pause, Resume, Lock, Unlock, ShowDetails, Stop, Start, ShowSettings, ToggleStartup, Quit);
+
+#[cfg(test)]
+mod action_name_tests {
+    use super::*;
+
+    #[test]
+    fn every_action_comes_back_by_its_name() {
+        for a in Action::ALL {
+            assert_eq!(Action::from_name(a.name()), Some(*a));
+        }
+        assert_eq!(Action::from_name("Nonsense"), None);
+        assert_eq!(Action::from_name(""), None);
+    }
+
+    #[test]
+    fn the_names_are_all_different() {
+        let mut names: Vec<_> = Action::ALL.iter().map(|a| a.name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), Action::ALL.len());
+    }
+}

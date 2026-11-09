@@ -138,6 +138,94 @@ pub fn node_says(args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// Lets the program with this id take the keyboard focus even though it was started by one that is in the background (the tray
+/// is, until its icon is clicked). Without it a menu window can open without focus and then not know when it is clicked away
+/// from. Other systems have no such rule.
+pub fn allow_foreground(pid: u32) {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn AllowSetForegroundWindow(process_id: u32) -> i32;
+        }
+        unsafe { AllowSetForegroundWindow(pid) };
+    }
+    #[cfg(not(windows))]
+    let _ = pid;
+}
+
+/// Windows 11 draws a thin border round every window without a frame, which shows as a square box behind a card with rounded
+/// corners. This turns it off for the window with this title (it is found by the title: the menu and the panel have their own).
+/// Returns true when the window was found, so the caller can try again on the next frame until it is. Other systems have no such
+/// border and nothing to do.
+pub fn remove_window_border(title: &str) -> bool {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+        }
+        #[link(name = "dwmapi")]
+        extern "system" {
+            fn DwmSetWindowAttribute(hwnd: isize, attribute: u32, value: *const core::ffi::c_void, size: u32) -> i32;
+        }
+        let wide: Vec<u16> = title.encode_utf16().chain([0]).collect();
+        let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
+        if hwnd == 0 {
+            return false;
+        }
+        // DWMWA_BORDER_COLOR with DWMWA_COLOR_NONE. Windows 10 does not know it and says so, which is fine: it has no border.
+        let none: u32 = 0xFFFF_FFFE;
+        unsafe { DwmSetWindowAttribute(hwnd, 34, &none as *const u32 as *const core::ffi::c_void, 4) };
+        // DWMWA_WINDOW_CORNER_PREFERENCE with DWMWCP_DONOTROUND: the card has its own corners and the frame has none.
+        let square: u32 = 1;
+        unsafe { DwmSetWindowAttribute(hwnd, 33, &square as *const u32 as *const core::ffi::c_void, 4) };
+        // DWMWA_NCRENDERING_POLICY with DWMNCRP_DISABLED: no frame is drawn at all, which takes the hairline off the top edge.
+        let disabled: u32 = 1;
+        unsafe { DwmSetWindowAttribute(hwnd, 2, &disabled as *const u32 as *const core::ffi::c_void, 4) };
+        // Windows still leaves a one pixel line along the top edge of such a window. A region that starts one row down cuts it off.
+        #[link(name = "gdi32")]
+        extern "system" {
+            fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) -> isize;
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn SetWindowRgn(hwnd: isize, region: isize, redraw: i32) -> i32;
+        }
+        // Larger than any window: the window's own edges clip it. The system owns the region once it is set.
+        unsafe { SetWindowRgn(hwnd, CreateRectRgn(0, 1, 16384, 16384), 1) };
+        return true;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = title;
+        true
+    }
+}
+
+/// True when the person has asked for less motion: the menu then lands where it goes with no springs. On Windows that is
+/// "Show animations in Windows" turned off. `MARGINALIA_REDUCE_MOTION=1` asks for it on any system. Linux can read GNOME's
+/// `enable-animations` setting here too: nothing else in the menu needs to change for it.
+pub fn reduced_motion() -> bool {
+    if std::env::var_os("MARGINALIA_REDUCE_MOTION").is_some_and(|v| v != "0") {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn SystemParametersInfoW(action: u32, param: u32, value: *mut core::ffi::c_void, win_ini: u32) -> i32;
+        }
+        // SPI_GETCLIENTAREAANIMATION: 0 when animations are off.
+        let mut on: i32 = 1;
+        let ok = unsafe { SystemParametersInfoW(0x1042, 0, &mut on as *mut i32 as *mut core::ffi::c_void, 0) };
+        if ok != 0 && on == 0 {
+            return true;
+        }
+    }
+    false
+}
+
 pub const DEFAULT_ADMIN_PORT: u16 = 47616;
 
 /// A short message that goes away by itself.

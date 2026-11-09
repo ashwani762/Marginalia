@@ -3,6 +3,8 @@
 use crate::admin;
 use crate::model::{self, Action, Poll, View};
 use crate::os;
+use std::io::{BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -130,12 +132,17 @@ pub struct Controller {
     /// The node's own state folder and port, as it last said in `status`. Settings are saved there, and a node that
     /// is not the installed service is started again with them.
     node_home: Mutex<Option<os::NodeHome>>,
+    /// The menu window while it is open (`--menu`), and when it last closed.
+    menu: Mutex<Option<std::process::Child>>,
+    menu_closed_at: Mutex<Option<Instant>>,
+    /// Set when "Quit tray" was chosen in the menu window: the icon layer sees it and ends the program.
+    quit: AtomicBool,
 }
 
 impl Controller {
     pub fn new(port: u16) -> (Arc<Controller>, Receiver<()>) {
         let (refresh, rx) = channel();
-        (Arc::new(Controller { port, panel: PanelHost::new(port), starting: Mutex::new(None), refresh, node_home: Mutex::new(None) }), rx)
+        (Arc::new(Controller { port, panel: PanelHost::new(port), starting: Mutex::new(None), refresh, node_home: Mutex::new(None), menu: Mutex::new(None), menu_closed_at: Mutex::new(None), quit: AtomicBool::new(false) }), rx)
     }
 
     fn starting(&self) -> bool {
@@ -154,6 +161,76 @@ impl Controller {
             }
             Err(_) => View { poll: Poll::Down, starting: self.starting() },
         }
+    }
+
+    /// True once "Quit tray" was chosen in the menu window.
+    pub fn quit_requested(&self) -> bool {
+        self.quit.load(Ordering::Relaxed)
+    }
+
+    /// What the menu window shows now, for the view the icon has.
+    pub fn menu_spec(&self, view: &View) -> crate::menuspec::Spec {
+        crate::menuspec::Spec::from_view(view, crate::autostart::enabled())
+    }
+
+    /// A click on the icon this soon after the menu closed itself (it closes when it loses focus, and the click on the icon is
+    /// what took the focus) is the same click, so it closes the menu and must not open it again.
+    const MENU_REOPEN_GUARD: Duration = Duration::from_millis(500);
+
+    /// Opens the menu window with `spec` at `at` (its top left corner, in points), or closes it when it is open. The window is
+    /// its own process (`marginalia-node-tray --menu`): it gets the rows on its input and says what was chosen on its output,
+    /// and the choice is carried out here, so the window itself only draws.
+    pub fn toggle_menu(self: &Arc<Self>, spec: &crate::menuspec::Spec, at: (f32, f32)) -> Result<(), String> {
+        if let Ok(mut open) = self.menu.lock() {
+            if let Some(mut child) = open.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok(());
+            }
+        }
+        if self.menu_closed_at.lock().map(|t| t.map(|t| t.elapsed() < Self::MENU_REOPEN_GUARD).unwrap_or(false)).unwrap_or(false) {
+            return Ok(());
+        }
+        let exe = std::env::current_exe().map_err(|e| format!("Could not find this program: {e}"))?;
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--menu").arg("--at").arg(format!("{},{}", at.0, at.1));
+        cmd.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("Could not open the menu: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = writeln!(stdin, "{}", spec.to_json());
+        }
+        // The window must be allowed to take the keyboard focus, or a click elsewhere could not close it.
+        os::allow_foreground(child.id());
+        let Some(stdout) = child.stdout.take() else { return Err("The menu has no output.".into()) };
+        if let Ok(mut open) = self.menu.lock() {
+            *open = Some(child);
+        }
+        let me = self.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                match line.strip_prefix("action:").and_then(Action::from_name) {
+                    Some(Action::Quit) => me.quit.store(true, Ordering::Relaxed),
+                    Some(a) => me.click(a),
+                    None => {}
+                }
+            }
+            // The window has ended, however it ended.
+            if let Ok(mut open) = me.menu.lock() {
+                if let Some(mut c) = open.take() {
+                    let _ = c.wait();
+                }
+            }
+            if let Ok(mut t) = me.menu_closed_at.lock() {
+                *t = Some(Instant::now());
+            }
+            let _ = me.refresh.send(());
+        });
+        Ok(())
     }
 
     /// Opens or closes the details panel (a click on the icon).

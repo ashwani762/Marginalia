@@ -1,10 +1,11 @@
 //! The Windows icon layer: a system tray icon (the `tray-icon` crate) driven by a `winit` event loop,
 //! which supplies the message loop Windows needs. The logic is in `model` and `control`.
 //!
-//! NOTE: this file could not be compiled where it was written (no Windows target installed).
+//! A right click opens the menu window (`popover.rs`) beside the icon. With `--native-menu` the system's own menu is used instead.
 
 use crate::control::{spawn_poller, Controller};
 use crate::glyph;
+use crate::menuspec;
 use crate::model::{Action, Entry, View};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver};
@@ -37,6 +38,8 @@ struct App {
     shown_startup: bool,
     /// The screen's scale (1.0 at 100 percent), as the icon's size follows it.
     scale: f64,
+    /// Use the system's own menu instead of the menu window.
+    native: bool,
     actions: HashMap<String, Action>,
 }
 
@@ -59,6 +62,31 @@ impl App {
         (menu, actions)
     }
 
+    /// Opens the menu window beside the icon, on the screen the icon is on, on the side of it that has room.
+    fn open_menu(&mut self, event_loop: &ActiveEventLoop, icon: tray_icon::Rect) {
+        let Some(view) = self.shown.clone() else { return };
+        let mut spec = self.ctl.menu_spec(&view);
+        let icon_px = menuspec::Rect { x: icon.position.x as f32, y: icon.position.y as f32, w: icon.size.width as f32, h: icon.size.height as f32 };
+        let (cx, cy) = (icon_px.x + icon_px.w / 2.0, icon_px.y + icon_px.h / 2.0);
+        // The screen that holds the icon, else the main one.
+        let monitor = event_loop
+            .available_monitors()
+            .find(|m| {
+                let (p, s) = (m.position(), m.size());
+                cx >= p.x as f32 && cx < (p.x + s.width as i32) as f32 && cy >= p.y as f32 && cy < (p.y + s.height as i32) as f32
+            })
+            .or_else(|| event_loop.primary_monitor());
+        let (screen, scale) = match monitor {
+            Some(m) => (menuspec::Rect { x: m.position().x as f32, y: m.position().y as f32, w: m.size().width as f32, h: m.size().height as f32 }, m.scale_factor() as f32),
+            None => (menuspec::Rect { x: 0.0, y: 0.0, w: 1920.0, h: 1080.0 }, self.scale as f32),
+        };
+        let at = menuspec::place(icon_px, screen, menuspec::window_size(&spec), scale);
+        spec.rise = at.rise;
+        if let Err(e) = self.ctl.toggle_menu(&spec, (at.x, at.y)) {
+            crate::os::toast("Could not open the menu", &e, 6000);
+        }
+    }
+
     fn show(&mut self, view: View) {
         let startup = crate::autostart::enabled();
         if self.shown.as_ref() == Some(&view) && self.shown_startup == startup {
@@ -71,10 +99,15 @@ impl App {
             Some(t) => {
                 let _ = t.set_icon(icon_for(&view, self.scale));
                 let _ = t.set_tooltip(Some(crate::model::tooltip(&view)));
-                t.set_menu(Some(Box::new(menu)));
+                if self.native {
+                    t.set_menu(Some(Box::new(menu)));
+                }
             }
             None => {
-                let mut b = TrayIconBuilder::new().with_menu(Box::new(menu)).with_menu_on_left_click(false).with_tooltip(crate::model::tooltip(&view));
+                let mut b = TrayIconBuilder::new().with_menu_on_left_click(false).with_tooltip(crate::model::tooltip(&view));
+                if self.native {
+                    b = b.with_menu(Box::new(menu));
+                }
                 if let Some(i) = icon_for(&view, self.scale) {
                     b = b.with_icon(i);
                 }
@@ -115,20 +148,27 @@ impl ApplicationHandler for App {
         }
         // A left click on the icon opens or closes the details panel. The right click shows the menu.
         while let Ok(ev) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev {
-                self.ctl.toggle_panel();
+            match ev {
+                TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => self.ctl.toggle_panel(),
+                TrayIconEvent::Click { button: MouseButton::Right, button_state: MouseButtonState::Up, rect, .. } if !self.native => self.open_menu(event_loop, rect),
+                _ => {}
             }
+        }
+        if self.ctl.quit_requested() {
+            self.tray = None;
+            event_loop.exit();
+            return;
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250)));
     }
 }
 
-pub fn run(ctl: Arc<Controller>, rx: Receiver<()>) {
+pub fn run(ctl: Arc<Controller>, rx: Receiver<()>, native: bool) {
     let (tx, views) = channel();
     spawn_poller(ctl.clone(), rx, move |view| {
         let _ = tx.send(view);
     });
     let Ok(event_loop) = EventLoop::new() else { return };
-    let mut app = App { ctl, views, tray: None, shown: None, shown_startup: false, scale: 1.0, actions: HashMap::new() };
+    let mut app = App { ctl, views, tray: None, shown: None, shown_startup: false, scale: 1.0, native, actions: HashMap::new() };
     let _ = event_loop.run_app(&mut app);
 }

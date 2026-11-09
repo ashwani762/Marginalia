@@ -180,6 +180,8 @@ struct Panel {
     draft: Option<(RunDraft, String)>,
     /// Whether the tray starts at sign in, as the General card shows it.
     startup: bool,
+    /// The system's border round the window is taken off once the window exists (Windows 11).
+    border_done: bool,
     /// Saved and waiting for the node to come back.
     applying: bool,
     /// While applying: the node has gone down for its restart.
@@ -210,7 +212,7 @@ impl Panel {
             let h = home.clone();
             std::thread::spawn(move || worker(port, ctx, tx, cmd_rx, h));
         }
-        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, was_focused: false, placed: false, keep_open, settings, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
+        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, was_focused: false, placed: false, keep_open, settings, draft: None, startup: crate::autostart::enabled(), border_done: false, applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
     }
 
     fn send(&self, c: Cmd) {
@@ -267,6 +269,9 @@ impl Panel {
 
     /// Escape, or losing focus, closes the panel. The first frames place it top right where the system lets us.
     fn window_behaviour(&mut self, ctx: &egui::Context) {
+        if !self.border_done {
+            self.border_done = crate::os::remove_window_border("Marginalia node");
+        }
         let (esc, focused, monitor) = ctx.input(|i| (i.key_pressed(egui::Key::Escape), i.viewport().focused, i.viewport().monitor_size));
         if focused == Some(true) {
             self.was_focused = true;
