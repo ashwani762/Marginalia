@@ -126,6 +126,8 @@ impl Catalog {
 
 pub fn chat_e2b() -> ModelFile { get().model("chat-e2b") }
 pub fn chat_e4b() -> ModelFile { get().model("chat-e4b") }
+pub fn chat_lfm3() -> ModelFile { get().model("chat-lfm3") }
+pub fn vision_lfm3() -> ModelFile { get().model("vision-lfm3") }
 pub fn search() -> ModelFile { get().model("search") }
 pub fn speech() -> ModelFile { get().model("speech") }
 pub fn vision_e2b() -> ModelFile { get().model("vision-e2b") }

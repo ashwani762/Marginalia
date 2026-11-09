@@ -186,16 +186,15 @@ Models for the APK are linked by `scripts/app/stage-models.sh` (symlinks, so use
 3. Cluster, the rest: member lists, standby mode and roles (`DESIGN.md`). The first slice (join, shared phone records, forwarding chat and search) is done.
 4. Speech on nodes: done on both sides. The phone replaces its live transcript after a meeting with the `Transcribe` request and corrects the captions during the meeting with short windows (checked on a real phone). No open stream is planned, because windows already fail over for free and a stream would need state per stream on a node.
 5. A Windows service wrapper (the tray plus Task Scheduler is the interim answer).
-6. Find the best chat model for what the node does (asked 2026-11-09). Start with Liquid AI's LFM family (the owner wrote "LFM3": check which names and sizes
-   exist today) and with an omni model, one model that takes text, audio and photos, which could replace the three separate files (chat, speech, photos). Gemma 4 E2B
-   and E4B are the ones to beat. Do not decide from a model card: run each on the same recordings and questions as the Gemma runs above and write down the numbers here.
-   - What it must do: meeting write-ups, answers with citations from the person's notes, correcting a live transcript, reading a photo, in English first and then
-     the languages the phone offers.
-   - What to measure on the RTX 4060 (8 GB, Windows and Linux): quality against the Gemma answers on the same input, tokens a second, memory with the context the
-     node uses, time to the first token, and whether it fits next to the search and speech models.
-   - What decides whether it can ship: the licence allows commercial use, a GGUF exists, the llama.cpp in `compute-node/vendor` loads it (check each architecture
-     before downloading gigabytes), and audio or photo input works through `mtmd` for an omni model.
-   - Where it plugs in: a model is a section in `compute-node/models.toml`, so a candidate can be tried by name without a code change when llama.cpp supports it.
+6. LFM3-Omni-2B, measured 2026-11-09 on the RTX 4060 against Gemma 4 E2B, E4B and Whisper, with `marginalia-node lab` and with `probe --transcribe`. It is in the node as an option, and E2B with Whisper stay the default.
+   - Speech, word errors weighted over 11 real recordings (20 min: AMI meetings, close and far microphone, and broadcast speech): Whisper 24.2%, LFM3 in 30 s pieces 25.0%, LFM3 on the whole file 31.8%, E4B 28.8%, E2B 31.6%. Whisper leads on clear speech (3.4% against 6.0% on one clip), LFM3 on close microphone meetings (18.0% against 19.2%). A whole file falls apart on some clips (34% against 9%), so the node cuts recordings into 30 s pieces.
+   - Speed: LFM3 writes 165 tokens a second, E2B 113, E4B 63. Speech: 1212 s of audio took LFM3 29 s and Whisper 44 s.
+   - Photos: on a handwritten Japanese train notice LFM3 and E4B got all 7 times, E2B invented 2. On multilingual handwriting LFM3 lost the Arabic lines, E4B read them best.
+   - Notes: E2B and E4B were more accurate. LFM3 said who approved what wrongly, filed action items under decisions, wrote a 14 word title where 3 to 7 were asked for, and returned objects where the question scan asks for a list of strings, which the phone may not read. This is why it is not the default.
+   - Video with its soundtrack works in `lab` only: it read a real slide correctly, and on a narrated slide it gave the wrong month and mixed up two facts. Phones cannot send video, that needs a change to the protocol and the app.
+   - Memory: 4750 MiB on the card with LFM3 for chat and speech, before a first photo or recording, against 5200 MiB with E2B and Whisper, both with the desktop's 1500 MiB.
+   - No word times from LFM3: each 30 s piece is one segment. It does not report the language it heard.
+   - Not measured: languages other than English, because the FLEURS recordings could not be fetched. The licence allows commercial use only under US$10M annual revenue.
 7. Linux pass on the new tray (2026-11-09): the details window with its sidebar, the new icon at its five sizes, the Start at sign in switch and the installed-or-not
    autostart entry need a look on Ubuntu. The menu window (`--menu`) is portable and tested, but Linux still shows the top bar's own menu: wire `ksni`'s activate
    position to `menuspec::place` if the window is wanted there too, and read GNOME's `enable-animations` in `os::reduced_motion`.

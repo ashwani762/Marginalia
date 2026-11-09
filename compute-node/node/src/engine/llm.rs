@@ -82,6 +82,8 @@ pub struct GenRequest {
     pub messages: Vec<ChatMessage>,
     /// Images referenced by `<__media__>` markers in the last user message (in order).
     pub images: Vec<PathBuf>,
+    /// Recordings (16 kHz mono) referenced by markers after the images, in order, for a model that can hear.
+    pub audio: Vec<Vec<f32>>,
     pub params: GenParams,
     pub priority: Priority,
     pub cancel: Arc<AtomicBool>,
@@ -132,10 +134,21 @@ impl LlmHandle {
         params: GenParams,
         priority: Priority,
     ) -> Result<String> {
+        self.complete_media(messages, images, Vec::new(), params, priority)
+    }
+
+    /// One recording through a model that can hear, with `instruction` as its system prompt. Returns what it wrote.
+    pub fn hear(&self, instruction: &str, audio: Vec<f32>) -> Result<String> {
+        let messages = vec![ChatMessage::system(instruction), ChatMessage::user(image_marker())];
+        self.complete_media(messages, Vec::new(), vec![audio], GenParams { max_tokens: 300, temperature: 0.0, ..Default::default() }, Priority::High)
+    }
+
+    fn complete_media(&self, messages: Vec<ChatMessage>, images: Vec<PathBuf>, audio: Vec<Vec<f32>>, params: GenParams, priority: Priority) -> Result<String> {
         let (tx, rx) = unbounded::<GenEvent>();
         self.generate(GenRequest {
             messages,
             images,
+            audio,
             params,
             priority,
             cancel: Arc::new(AtomicBool::new(false)),

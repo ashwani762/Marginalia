@@ -102,6 +102,12 @@ enum Cmd {
         #[arg(value_enum)]
         choice: Option<models_dl::ChatChoice>,
     },
+    /// Show or choose what turns speech into text: whisper (the default, the most accurate on clear speech) or lfm3 (faster, and needs
+    /// LFM3 as the chat model). Restart the node to apply it.
+    SpeechEngine {
+        #[arg(value_enum)]
+        choice: Option<models_dl::SpeechEngine>,
+    },
     /// Run a list of tasks (a JSON Lines file) against one model file and write down the answers and timings, to compare models. No
     /// phone and no network: it does not use the running node, so stop the node first if the graphics memory is needed.
     Lab {
@@ -393,6 +399,13 @@ async fn main() -> Result<()> {
             println!("No longer a peer of {}.", names.join(", "));
         }
         Cmd::Stats => println!("{}", metrics::report(&admin::ask(cli.admin_port, json!({"cmd": "stats"})).await?)),
+        Cmd::SpeechEngine { choice } => match choice {
+            Some(e) => {
+                models_dl::save_speech_engine(&dir, *e)?;
+                println!("Speech engine set to {}. Restart the node to use it.", e.name());
+            }
+            None => println!("Speech engine: {}. Choose with: marginalia-node speech-engine whisper|lfm3", models_dl::saved_speech_engine(&dir).name()),
+        },
         Cmd::Lab { model, mmproj, tasks, out, ctx, gpu_layers } => lab::run(model, mmproj.as_deref(), tasks, out, *ctx, *gpu_layers)?,
         Cmd::ChatModel { choice } => match choice {
             Some(c) => {
@@ -484,7 +497,7 @@ async fn main() -> Result<()> {
                 (false, None) => saved.unwrap_or(runon::Setting::plain(models_dl::RunOn::Gpu)),
             };
             tracing::info!("loading models from {}, running them on {}", models_dir.display(), run_on.words());
-            let opts = host::Options { models_dir, chat_model: chat_model.clone(), embed_model: embed_model.clone(), speech_model: speech_model.clone(), no_speech: *no_speech, run_on, ctx: *ctx, window_max_s: *window_max_seconds };
+            let opts = host::Options { models_dir, chat_model: chat_model.clone(), embed_model: embed_model.clone(), speech_model: speech_model.clone(), no_speech: *no_speech, speech_engine: models_dl::saved_speech_engine(&dir), run_on, ctx: *ctx, window_max_s: *window_max_seconds };
             let host = Arc::new(tokio::task::spawn_blocking(move || host::Host::start(&opts)).await??);
             let peers = peers::Peers::open(&dir)?;
             let cluster = cluster::Cluster::new(store.clone(), peers, identity.clone(), name.clone(), *port)?;

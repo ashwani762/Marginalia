@@ -52,6 +52,19 @@ repo = "ggml-org/gemma-4-E4B-it-GGUF"
 file = "mmproj-gemma-4-E4B-it-Q8_0.gguf"
 optional = true
 
+# LFM3-Omni: chat, and with its projector photos and, when chosen, speech to text. Free for commercial use under US$10M annual revenue.
+[models.chat-lfm3]
+role = "chat"
+repo = "LiquidAI/LFM3-Omni-2B-GGUF"
+file = "LFM3-Omni-2B-Q4_K_M.gguf"
+optional = true
+
+[models.vision-lfm3]
+role = "vision"
+repo = "LiquidAI/LFM3-Omni-2B-GGUF"
+file = "mmproj-LFM3-Omni-2B-Q8_0.gguf"
+optional = true
+
 # Telling speakers apart (sherpa-onnx): who talks when (pyannote segmentation 3.0) and which voice is which
 # (WeSpeaker ResNet34, 26 MB. On the same audio it agrees with the larger ResNet293 on 93% of the speech and is 4 times faster).
 [models.speakers-segmentation]

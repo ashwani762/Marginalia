@@ -66,8 +66,8 @@ Every command with examples and an explanation is in [COMMANDS.md](COMMANDS.md).
 
 ```sh
 marginalia-node models list
-marginalia-node models download [--dir DIR] [--only chat|search|speech] [--chat-model e4b|e2b] [--skip-speech]
-marginalia-node chat-model [e2b|e4b]   # show or choose the chat model, restart the node to apply. The tray's Settings page has the same choice and restarts the node itself
+marginalia-node models download [--dir DIR] [--only chat|search|speech] [--chat-model e4b|e2b|lfm3] [--skip-speech]
+marginalia-node chat-model [e2b|e4b|lfm3]   # show or choose the chat model, restart the node to apply. The tray's Settings page has the same choice and restarts the node itself
 marginalia-node run-on [auto|gpu|cpu|mixed] [--chat PERCENT] [--search PERCENT] [--speech gpu|cpu] [--photos gpu|cpu] [--speakers gpu|cpu]
                                          # where each model runs: the graphics card, the processor or split between them
 marginalia-node run --chat e2b|e4b      # choose it for one run
@@ -140,7 +140,7 @@ marginalia-node-tray --print                    # prints the menu as text and ex
   - **Overview.** The node's state in large type with jobs served, phones and uptime beside it, with Start, Pause and Stop under them (each lit only when it can be used, and Stop asks first), a switch for letting new phones join, the live activity (one pulsing dot per running or waiting job and the last 2 minutes of processor, memory, graphics card and network use, kept in memory in the window only), what the node runs and how fast, and the addresses with a Copy button.
   - **Phones.** Show pairing code (each character on its own tile with a ring counting down the 5 minutes, never in the menu), the phones that are asking to join with Allow and Deny (the sidebar row shows how many), the paired phones with their job counts and when they were last seen, each with Block and Remove (both ask first), and the peers.
   - **Models.** Each model file with a tick and its size, or a Get button, and the download in progress with a bar. A download is its own process, so it carries on when the window closes. After a model the node loads at start, a Restart node button appears.
-  - **Settings.** Start at sign in, the chat model (E2B or E4B), where the models run (Auto, Graphics card, Processor or Custom, and with Auto where they are right now), where speakers are told apart, and the log folder. Save and restart floats in only when something changed. It writes the settings with `chat-model` and `run-on` into the node's own state folder and restarts that same node.
+  - **Settings.** Start at sign in, the chat model (E2B, E4B or LFM3), with LFM3 a choice of Whisper or LFM3 for speech to text, where the models run (Auto, Graphics card, Processor or Custom, and with Auto where they are right now), where speakers are told apart, and the log folder. Save and restart floats in only when something changed. It writes the settings with `chat-model` and `run-on` into the node's own state folder and restarts that same node.
   - When the node is not running every page shows a friendly empty state with a Start node button. While it starts or stops they say so, with a spinner and nothing to press. The icon, its tooltip, the menu and the window all show the same stage: not running, starting, running, stopping. The node says when it is stopping (`stopping` in `status`), and a node program that does not answer is taken as arriving or leaving by what it was doing before, whichever program started it.
 - **Pairing code.** It appears inside the panel in large type with a 5 minute countdown, and is hidden otherwise. It is never in the menu and nothing is copied.
 - **Not running.** The panel shows a friendly empty state with a Start node button.

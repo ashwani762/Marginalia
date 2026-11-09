@@ -248,7 +248,7 @@ struct Panel {
     /// The window is told once to follow the dark theme.
     theme_set: bool,
     /// What the Settings page is editing, filled from the node the first time it is shown.
-    draft: Option<(RunDraft, String)>,
+    draft: Option<(RunDraft, String, String)>,
     /// Whether the tray starts at sign in, as the General card shows it.
     startup: bool,
     /// Saved and waiting for the node to come back.
@@ -944,8 +944,8 @@ impl Panel {
     }
 
     /// What the node uses now, as the Settings page shows it.
-    fn current_settings(i: &Info) -> (RunDraft, String) {
-        (RunDraft::from_setting(i.run_setting.as_deref()), model::chat_choice(i).unwrap_or("e2b").to_string())
+    fn current_settings(i: &Info) -> (RunDraft, String, String) {
+        (RunDraft::from_setting(i.run_setting.as_deref()), model::chat_choice(i).unwrap_or("e2b").to_string(), model::speech_choice(i).to_string())
     }
 
     fn settings_page(&mut self, ui: &mut Ui, i: &Info) {
@@ -954,7 +954,7 @@ impl Panel {
         if self.draft.is_none() {
             self.draft = Some(current.clone());
         }
-        let Some((mut run, mut chat)) = self.draft.clone() else { return };
+        let Some((mut run, mut chat, mut speech)) = self.draft.clone() else { return };
 
         kit::heading(ui, "General");
         let mut startup = self.startup;
@@ -973,11 +973,28 @@ impl Panel {
 
         kit::heading(ui, "Models");
         kit::group(ui, |ui, g| {
-            g.setting(ui, "Chat model", Some("E2B is faster. E4B answers better and needs 2 GB more"), |ui| {
-                let mut idx = if chat == "e4b" { 1 } else { 0 };
-                if kit::segmented(ui, "chat", &["E2B", "E4B"], &mut idx) {
-                    chat = if idx == 1 { "e4b" } else { "e2b" }.into();
+            g.setting(ui, "Chat model", Some("E2B is the all-rounder. E4B writes the best notes. LFM3 is the fastest"), |ui| {
+                let mut idx = match chat.as_str() {
+                    "e4b" => 1,
+                    "lfm3" => 2,
+                    _ => 0,
+                };
+                if kit::segmented(ui, "chat", &["E2B", "E4B", "LFM3"], &mut idx) {
+                    chat = ["e2b", "e4b", "lfm3"][idx].into();
                 }
+            });
+            // Only LFM3 can hear, so the choice is only there with LFM3, and it goes back to Whisper with any other model.
+            let lfm3 = chat == "lfm3";
+            if !lfm3 {
+                speech = "whisper".into();
+            }
+            kit::reveal(ui, "speech-engine", lfm3, |ui| {
+                g.setting(ui, "Speech to text", Some("Whisper is the most accurate on clear speech. LFM3 is faster"), |ui| {
+                    let mut idx = if speech == "lfm3" { 1 } else { 0 };
+                    if kit::segmented(ui, "speech", &["Whisper", "LFM3"], &mut idx) {
+                        speech = ["whisper", "lfm3"][idx].into();
+                    }
+                });
             });
             let line = RunDraft::MODES.iter().find(|(v, _, _)| *v == run.mode).map(|(_, _, l)| *l);
             g.setting(ui, "Run the models on", line, |ui| {
@@ -1056,7 +1073,7 @@ impl Panel {
         }
         ui.add_space(4.0);
         if !self.applying {
-            self.draft = Some((run, chat));
+            self.draft = Some((run, chat, speech));
         }
     }
 
@@ -1139,8 +1156,8 @@ impl Panel {
     /// Save and Undo float over the page only while there is something to save, rising from the bottom edge and going back the same way.
     fn save_capsule(&mut self, ctx: &egui::Context, area: egui::Rect, i: &Info, on_page: bool) {
         let current = Self::current_settings(i);
-        let Some((run, chat)) = self.draft.clone() else { return };
-        let changed = (run.clone(), chat.clone()) != current;
+        let Some((run, chat, speech)) = self.draft.clone() else { return };
+        let changed = (run.clone(), chat.clone(), speech.clone()) != current;
         let applying = self.applying;
         let k = kit::spring(ctx, egui::Id::NULL.with("save-capsule"), if on_page && (changed || applying) { 1.0 } else { 0.0 }, 1.0, 0.26);
         if k < 0.01 {
@@ -1180,6 +1197,9 @@ impl Panel {
             let mut cmds = vec![];
             if chat != current.1 {
                 cmds.push(vec!["chat-model".to_string(), chat.clone()]);
+            }
+            if speech != current.2 {
+                cmds.push(vec!["speech-engine".to_string(), speech.clone()]);
             }
             if run != current.0 {
                 cmds.push(run.args());

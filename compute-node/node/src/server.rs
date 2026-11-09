@@ -394,6 +394,7 @@ async fn chat_with_images(sh: &Arc<Shared>, r: marginalia_proto::ChatRequest, im
     let done_jobs = jobs.clone();
     let (sh2, cl) = (sh.clone(), client);
     llm.generate(GenRequest {
+        audio: Vec::new(),
         messages,
         images,
         params: GenParams { max_tokens: r.max_tokens as usize, temperature: r.temperature, top_p: r.top_p, top_k: r.top_k, repeat_penalty: 1.05 },

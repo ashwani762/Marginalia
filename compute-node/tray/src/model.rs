@@ -664,10 +664,12 @@ pub fn model_items(list: &Value) -> Vec<ModelItem> {
     [
         one(&["chat-e2b"], "Chat E2B", &["--only", "chat", "--chat-model", "e2b"], true),
         one(&["chat-e4b"], "Chat E4B", &["--only", "chat", "--chat-model", "e4b"], true),
+        one(&["chat-lfm3"], "Chat LFM3", &["--only", "chat", "--chat-model", "lfm3"], true),
         one(&["search"], "Search", &["--only", "search"], true),
         one(&["speech"], "Speech", &["--only", "speech"], true),
         one(&["vision-e2b"], "Photos (E2B)", &["--only", "vision", "--chat-model", "e2b"], true),
         one(&["vision-e4b"], "Photos (E4B)", &["--only", "vision", "--chat-model", "e4b"], true),
+        one(&["vision-lfm3"], "Photos and speech (LFM3)", &["--only", "vision", "--chat-model", "lfm3"], true),
         one(&["speakers-segmentation", "speakers-voices"], "Speakers", &["--only", "speakers"], false),
     ]
     .into_iter()
@@ -700,9 +702,18 @@ pub fn size_text(bytes: u64) -> String {
     if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{} MB", (bytes as f64 / 1e6).round() as u64) }
 }
 
-/// The chat model the node runs now, `e2b` or `e4b`.
+/// What turns speech into text on the node now, `whisper` or `lfm3`.
+pub fn speech_choice(i: &Info) -> &'static str {
+    match i.speech_model.as_deref() {
+        Some(s) if s.contains("LFM3") => "lfm3",
+        _ => "whisper",
+    }
+}
+
+/// The chat model the node runs now, `e2b`, `e4b` or `lfm3`.
 pub fn chat_choice(i: &Info) -> Option<&'static str> {
     match i.chat_model.as_deref() {
+        Some(c) if c.contains("LFM3") => Some("lfm3"),
         Some(c) if c.contains("E4B") => Some("e4b"),
         Some(c) if c.contains("E2B") => Some("e2b"),
         _ => None,

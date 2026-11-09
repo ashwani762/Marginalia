@@ -1,5 +1,6 @@
 //! The models the node serves. They load once and stay loaded; a job only borrows them.
 
+use crate::engine::speech::Transcriber;
 use crate::engine::whisper::{Whisper, WhisperConfig};
 use crate::engine::{ChatMessage, EmbedHandle, EmbedKind, GenParams, LlmHandle, Priority};
 use anyhow::{anyhow, Context, Result};
@@ -21,6 +22,8 @@ pub struct Options {
     pub speech_model: Option<PathBuf>,
     /// Do not load the speech model even if it is there.
     pub no_speech: bool,
+    /// What turns speech into text. LFM3 only applies while LFM3 is the chat model.
+    pub speech_engine: crate::models_dl::SpeechEngine,
     /// The most seconds of audio a short live window may hold (see `--window-max-seconds`).
     pub window_max_s: u32,
 }
@@ -30,7 +33,7 @@ pub struct Host {
     pub llm: Option<LlmHandle>,
     pub embed: Option<EmbedHandle>,
     /// Speech to text, if the model file was there.
-    pub whisper: Option<Arc<Whisper>>,
+    pub whisper: Option<Transcriber>,
     pub caps: parking_lot::Mutex<Capabilities>,
     /// The chat model has its vision projector next to it, so this node can read photos.
     pub vision: bool,
@@ -283,7 +286,17 @@ impl Host {
         };
 
         let speech_path = opts.speech_model.clone().unwrap_or_else(|| opts.models_dir.join(speech_file()));
-        let whisper = if opts.no_speech {
+        let lfm3_chat = chat_path.file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase().starts_with("lfm3")).unwrap_or(false);
+        let lfm3_hears = opts.speech_engine == crate::models_dl::SpeechEngine::Lfm3 && !opts.no_speech && lfm3_chat && llm.is_some() && projector.is_some();
+        if opts.speech_engine == crate::models_dl::SpeechEngine::Lfm3 && !lfm3_hears && !opts.no_speech {
+            tracing::warn!("speech is set to LFM3, which needs LFM3 as the chat model with its projector: using Whisper");
+        }
+        let whisper = if lfm3_hears {
+            tracing::info!("speech to text by the chat model (LFM3)");
+            caps.transcribe = Some("LFM3-Omni-2B".to_string());
+            caps.window_max_s = opts.window_max_s;
+            llm.clone().map(|llm| Transcriber::Lfm3 { llm, gpu: chat_on.map(|l| l > 0).unwrap_or(false) })
+        } else if opts.no_speech {
             None
         } else if speech_path.is_file() {
             let mut found = None;
@@ -293,7 +306,7 @@ impl Host {
                 match Whisper::load(&cfg) {
                     Ok(w) => {
                         tracing::info!("speech model loaded ({})", if gpu { "graphics card" } else { "processor" });
-                        found = Some(Arc::new(w));
+                        found = Some(Transcriber::Whisper(Arc::new(w)));
                         break;
                     }
                     Err(e) => tracing::warn!("speech model did not load{}: {e:#}", if gpu { " on the graphics card" } else { "" }),
@@ -438,7 +451,7 @@ fn sample_pcm() -> Option<Vec<f32>> {
 }
 
 /// Times faster than real time on the sample, or None if it could not run.
-fn bench_speech(w: &crate::engine::whisper::Whisper) -> Option<f32> {
+fn bench_speech(w: &Transcriber) -> Option<f32> {
     let one = sample_pcm()?;
     let gap = vec![0.0f32; 16_000];
     let mut pcm = Vec::with_capacity((one.len() + gap.len()) * 6);

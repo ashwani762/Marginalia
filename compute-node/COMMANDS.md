@@ -33,7 +33,7 @@ marginalia-node run --port 47725 --admin-port 47726 --state-dir /tmp/test-node -
 | `--port PORT` | The port phones connect to (default 47615). |
 | `--name NAME` | The name phones see. Defaults to this machine's name. |
 | `--models DIR` | The models folder. Defaults to `~/.local/share/marginalia/models` (Linux) or `%APPDATA%\marginalia\models` (Windows). |
-| `--chat e2b\|e4b` | Which chat model to load for this run only. Without it the choice from `chat-model` is used. |
+| `--chat e2b\|e4b\|lfm3` | Which chat model to load for this run only. Without it the choice from `chat-model` is used. |
 | `--chat-model FILE`, `--embed-model FILE`, `--speech-model FILE` | Use these exact files instead of the ones in the models folder. |
 | `--no-speech` | Do not load the speech model, so this node does not transcribe recordings. |
 | `--run-on auto\|gpu\|cpu\|mixed` | Where the models run, for this run only. Without it the choice from `run-on` is used, then `gpu`. |
@@ -68,12 +68,32 @@ The log is `logs/node.log` in the state folder, 5 files of 5 MB at most. It hold
 
 ## Choosing models and where they run
 
+### `speech-engine`
+
+Chooses what turns speech into text. Restart the node to apply it. LFM3 needs LFM3 as the chat model with its projector, and without them the node uses Whisper.
+
+```
+marginalia-node speech-engine          # show the choice
+marginalia-node speech-engine whisper  # the default, the most accurate on clear speech
+marginalia-node speech-engine lfm3     # faster, and uses the chat model that is already loaded
+```
+
+### `lab`
+
+Runs a list of tasks against one model file, and writes the answers and timings to compare models. It needs no phone and no network and does not use the running node, so stop the node first if the graphics card memory is needed. Each line of the tasks file is one task, and `media` takes photos, audio files and videos (videos need `ffmpeg` in PATH and a model that can watch them).
+
+```
+marginalia-node lab --model LFM3-Omni-2B-Q4_K_M.gguf --mmproj mmproj-LFM3-Omni-2B-Q8_0.gguf --tasks tasks.jsonl --out answers.jsonl
+{"id": "photo-1", "system": "Be brief.", "user": "What does this say?", "media": ["board.png"], "max_tokens": 300, "temperature": 0.2}
+```
+
 ### `chat-model`
 
 ```
 marginalia-node chat-model        # show the choice
 marginalia-node chat-model e4b    # the larger model, answers better, needs about 2 GB more memory
 marginalia-node chat-model e2b    # the smaller, faster model (the default)
+marginalia-node chat-model lfm3   # LFM3-Omni: the fastest, less accurate on notes, reads photos and can do speech to text
 ```
 
 If the file is missing: `marginalia-node models download --chat-model e4b`.

@@ -41,6 +41,7 @@ pub enum Only {
 pub enum ChatChoice {
     E2b,
     E4b,
+    Lfm3,
 }
 
 impl ChatChoice {
@@ -48,12 +49,14 @@ impl ChatChoice {
         match self {
             ChatChoice::E2b => crate::catalog::chat_e2b().file,
             ChatChoice::E4b => crate::catalog::chat_e4b().file,
+            ChatChoice::Lfm3 => crate::catalog::chat_lfm3().file,
         }
     }
     pub fn name(self) -> &'static str {
         match self {
             ChatChoice::E2b => "e2b",
             ChatChoice::E4b => "e4b",
+            ChatChoice::Lfm3 => "lfm3",
         }
     }
 }
@@ -63,6 +66,7 @@ pub fn saved_chat_choice(state: &Path) -> Option<ChatChoice> {
     match std::fs::read_to_string(state.join("chat-model")).ok()?.trim() {
         "e2b" => Some(ChatChoice::E2b),
         "e4b" => Some(ChatChoice::E4b),
+        "lfm3" => Some(ChatChoice::Lfm3),
         _ => None,
     }
 }
@@ -70,6 +74,36 @@ pub fn saved_chat_choice(state: &Path) -> Option<ChatChoice> {
 pub fn save_chat_choice(state: &Path, c: ChatChoice) -> Result<()> {
     std::fs::create_dir_all(state)?;
     std::fs::write(state.join("chat-model"), c.name()).context("could not save the chat model choice")
+}
+
+/// What turns speech into text. Saved with `marginalia-node speech-engine`, read when the node starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default)]
+pub enum SpeechEngine {
+    #[default]
+    Whisper,
+    Lfm3,
+}
+
+impl SpeechEngine {
+    pub fn name(self) -> &'static str {
+        match self {
+            SpeechEngine::Whisper => "whisper",
+            SpeechEngine::Lfm3 => "lfm3",
+        }
+    }
+}
+
+/// The speech engine saved with `marginalia-node speech-engine`. Whisper when none was chosen.
+pub fn saved_speech_engine(state: &Path) -> SpeechEngine {
+    match std::fs::read_to_string(state.join("speech-engine")).ok().as_deref().map(str::trim) {
+        Some("lfm3") => SpeechEngine::Lfm3,
+        _ => SpeechEngine::Whisper,
+    }
+}
+
+pub fn save_speech_engine(state: &Path, e: SpeechEngine) -> Result<()> {
+    std::fs::create_dir_all(state)?;
+    std::fs::write(state.join("speech-engine"), e.name()).context("could not save the speech engine choice")
 }
 
 /// Where the models run. Saved with `marginalia-node run-on`, read when the node starts.
@@ -117,12 +151,17 @@ pub fn wanted(only: Option<Only>, chat: ChatChoice, skip_speech: bool) -> Vec<Mo
     let chat_file = match chat {
         ChatChoice::E2b => crate::catalog::chat_e2b(),
         ChatChoice::E4b => crate::catalog::chat_e4b(),
+        ChatChoice::Lfm3 => crate::catalog::chat_lfm3(),
     };
     match only {
         Some(Only::Chat) => vec![chat_file],
         Some(Only::Search) => vec![crate::catalog::search()],
         Some(Only::Speech) => vec![crate::catalog::speech()],
-        Some(Only::Vision) => vec![if chat == ChatChoice::E4b { crate::catalog::vision_e4b() } else { crate::catalog::vision_e2b() }],
+        Some(Only::Vision) => vec![match chat {
+            ChatChoice::E2b => crate::catalog::vision_e2b(),
+            ChatChoice::E4b => crate::catalog::vision_e4b(),
+            ChatChoice::Lfm3 => crate::catalog::vision_lfm3(),
+        }],
         Some(Only::Speakers) => vec![crate::catalog::speakers_segmentation(), crate::catalog::speakers_voices()],
         None if skip_speech => vec![chat_file, crate::catalog::search()],
         None => vec![chat_file, crate::catalog::search(), crate::catalog::speech()],
@@ -352,7 +391,7 @@ pub fn list(dir: Option<PathBuf>) -> Result<()> {
         None => println!("Models list: built in (put a models.toml in the state folder to change it)\n"),
     }
     let mut missing_needed = false;
-    for m in [crate::catalog::chat_e2b(), crate::catalog::search(), crate::catalog::speech(), crate::catalog::chat_e4b(), crate::catalog::vision_e2b(), crate::catalog::vision_e4b(), crate::catalog::speakers_segmentation(), crate::catalog::speakers_voices()] {
+    for m in [crate::catalog::chat_e2b(), crate::catalog::search(), crate::catalog::speech(), crate::catalog::chat_e4b(), crate::catalog::chat_lfm3(), crate::catalog::vision_e2b(), crate::catalog::vision_e4b(), crate::catalog::vision_lfm3(), crate::catalog::speakers_segmentation(), crate::catalog::speakers_voices()] {
         let len = std::fs::metadata(dir.join(m.file)).ok().filter(|x| x.is_file()).map(|x| x.len());
         let part = std::fs::metadata(part_path(&dir, &m)).ok().map(|x| x.len()).filter(|l| *l > 0);
         let role = match (m.optional, m.role) {
@@ -772,5 +811,35 @@ mod tests {
         assert!(m.contains("marginalia-node models download"));
         assert!(!m.contains("--dir"));
         assert!(missing_message(Path::new("D:\\x")).contains("--dir"));
+    }
+}
+
+#[cfg(test)]
+mod speech_engine_tests {
+    use super::*;
+
+    fn fresh(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("marginalia-speech-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn whisper_stays_the_choice_until_someone_changes_it() {
+        let dir = fresh("engine");
+        assert_eq!(saved_speech_engine(&dir), SpeechEngine::Whisper);
+        save_speech_engine(&dir, SpeechEngine::Lfm3).unwrap();
+        assert_eq!(saved_speech_engine(&dir), SpeechEngine::Lfm3);
+        save_speech_engine(&dir, SpeechEngine::Whisper).unwrap();
+        assert_eq!(saved_speech_engine(&dir), SpeechEngine::Whisper);
+    }
+
+    #[test]
+    fn lfm3_is_a_chat_choice_with_its_own_files() {
+        let dir = fresh("chat");
+        save_chat_choice(&dir, ChatChoice::Lfm3).unwrap();
+        assert_eq!(saved_chat_choice(&dir), Some(ChatChoice::Lfm3));
+        assert_eq!(wanted(Some(Only::Chat), ChatChoice::Lfm3, false)[0].file, "LFM3-Omni-2B-Q4_K_M.gguf");
+        assert_eq!(wanted(Some(Only::Vision), ChatChoice::Lfm3, false)[0].file, "mmproj-LFM3-Omni-2B-Q8_0.gguf");
     }
 }

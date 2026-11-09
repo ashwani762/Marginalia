@@ -138,8 +138,8 @@ impl Worker<'_, '_> {
         let mut batch = LlamaBatch::new(n_batch.max(512), 1);
         let mut pos: i32 = 0;
         let total = tokens.len();
-        if !req.images.is_empty() {
-            match self.eval_multimodal_prompt(&prompt, &req.images) {
+        if !req.images.is_empty() || !req.audio.is_empty() {
+            match self.eval_multimodal_prompt(&prompt, &req.images, &req.audio) {
                 Ok(n_past) => {
                     pos = n_past;
                     // Skip the plain-text prompt path below.
@@ -181,7 +181,7 @@ impl Worker<'_, '_> {
 
     /// Tokenize a prompt with image markers through the vision projector and
     /// evaluate it; returns the next position.
-    fn eval_multimodal_prompt(&mut self, prompt: &str, images: &[PathBuf]) -> anyhow::Result<i32> {
+    fn eval_multimodal_prompt(&mut self, prompt: &str, images: &[PathBuf], audio: &[Vec<f32>]) -> anyhow::Result<i32> {
         if self.mtmd.is_none() {
             let path = self.mmproj_path.clone().ok_or_else(|| anyhow!("vision projector not downloaded"))?;
             let mut params = MtmdContextParams::default();
@@ -193,12 +193,15 @@ impl Worker<'_, '_> {
             self.mtmd = Some(m);
         }
         let mtmd = self.mtmd.as_mut().expect("mtmd loaded");
-        let mut bitmaps = Vec::with_capacity(images.len());
+        let mut bitmaps = Vec::with_capacity(images.len() + audio.len());
         for img in images {
             bitmaps.push(
                 MtmdBitmap::from_file(mtmd, &img.to_string_lossy(), false)
                     .map_err(|e| anyhow!("decoding {}: {e}", img.display()))?,
             );
+        }
+        for a in audio {
+            bitmaps.push(MtmdBitmap::from_audio_data(a).map_err(|e| anyhow!("audio: {e}"))?);
         }
         let refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
         let chunks = mtmd

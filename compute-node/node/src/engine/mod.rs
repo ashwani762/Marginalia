@@ -5,6 +5,7 @@
 pub mod embed;
 pub mod gate;
 pub mod llm;
+pub mod speech;
 pub mod whisper;
 mod whisper_sys;
 
