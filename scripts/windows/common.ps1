@@ -362,10 +362,21 @@ function Get-BackendStamp([bool]$cpu, [bool]$vulkan, [bool]$cuda) {
 }
 
 # $true when both built programs exist, are newer than all the sources, and were built with the same backend.
+# When a program was last known to match its sources: when it was linked, or when a build last finished, whichever is later. A build
+# with nothing to do for it leaves the file as it was (Cargo.lock changing for the tray does not relink the node), and that is still current.
+function Get-BuiltTime([string]$exe) {
+    $t = (Get-Item $exe).LastWriteTime
+    if (Test-Path $MN_BuildStamp) {
+        $s = (Get-Item $MN_BuildStamp).LastWriteTime
+        if ($s -gt $t) { $t = $s }
+    }
+    return $t
+}
+
 function Test-BuildCurrent([bool]$cpu, [bool]$vulkan, [bool]$cuda) {
     if (-not (Test-Path $MN_BuiltNode) -or -not (Test-Path $MN_BuiltTray)) { return $false }
-    if ((Get-NewestSourceTime 'node') -gt (Get-Item $MN_BuiltNode).LastWriteTime) { return $false }
-    if ((Get-NewestSourceTime 'tray') -gt (Get-Item $MN_BuiltTray).LastWriteTime) { return $false }
+    if ((Get-NewestSourceTime 'node') -gt (Get-BuiltTime $MN_BuiltNode)) { return $false }
+    if ((Get-NewestSourceTime 'tray') -gt (Get-BuiltTime $MN_BuiltTray)) { return $false }
     if (-not (Test-Path $MN_BuildStamp)) { return $false }
     $want = Get-BackendStamp $cpu $vulkan $cuda
     if (-not $want) { return $false }

@@ -111,8 +111,8 @@ if (-not ($haveNode -and $haveTray)) {
 } elseif (-not (Test-Path $MN_BuiltNode)) {
     Check-Skip 'installed copy is current' 'no build in target\release to compare with'
 } else {
-    $staleTray = (Test-Path $MN_BuiltTray) -and ((Get-NewestSourceTime 'tray') -gt (Get-Item $MN_BuiltTray).LastWriteTime)
-    if (((Get-NewestSourceTime 'node') -gt (Get-Item $MN_BuiltNode).LastWriteTime) -or $staleTray) {
+    $staleTray = (Test-Path $MN_BuiltTray) -and ((Get-NewestSourceTime 'tray') -gt (Get-BuiltTime $MN_BuiltTray))
+    if (((Get-NewestSourceTime 'node') -gt (Get-BuiltTime $MN_BuiltNode)) -or $staleTray) {
         Check-Fail 'installed copy is current' 'the code changed after the last build, so what runs is old' $devCmd
     } elseif (-not (Test-InstalledCurrent $MN_BuiltNode $MN_InstNode) -or ((Test-Path $MN_BuiltTray) -and -not (Test-InstalledCurrent $MN_BuiltTray $MN_InstTray))) {
         Check-Fail 'installed copy is current' 'target\release holds newer programs than the installed ones' $devCmd
