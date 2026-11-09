@@ -138,6 +138,36 @@ pub fn node_says(args: &[&str]) -> Result<(), String> {
     }
 }
 
+/// Brings the window with this title to the front, restored if it was minimised. Returns false when there is no such window or
+/// the system has no way to do it, and the caller does something else (the details window is closed and opened again).
+pub fn focus_window(title: &str) -> bool {
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+            fn ShowWindow(hwnd: isize, command: i32) -> i32;
+            fn SetForegroundWindow(hwnd: isize) -> i32;
+        }
+        let wide: Vec<u16> = title.encode_utf16().chain([0]).collect();
+        let hwnd = unsafe { FindWindowW(std::ptr::null(), wide.as_ptr()) };
+        if hwnd == 0 {
+            return false;
+        }
+        // SW_RESTORE, so a minimised window comes back as it was.
+        unsafe {
+            ShowWindow(hwnd, 9);
+            SetForegroundWindow(hwnd);
+        }
+        return true;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = title;
+        false
+    }
+}
+
 /// Lets the program with this id take the keyboard focus even though it was started by one that is in the background (the tray
 /// is, until its icon is clicked). Without it a menu window can open without focus and then not know when it is clicked away
 /// from. Other systems have no such rule.

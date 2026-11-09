@@ -59,8 +59,12 @@ struct Cli {
     /// With `--panel`: open on the Settings page.
     #[arg(long)]
     settings: bool,
-    /// With `--panel`: do not close the panel when it loses focus. For taking screenshots.
+    /// With `--panel`: open on this page (overview, phones, models or settings).
+    #[arg(long, value_name = "PAGE")]
+    page: Option<String>,
+    /// No longer needed: the window stays until it is closed. Accepted so older scripts still run.
     #[arg(long, hide = true)]
+    #[allow(dead_code)]
     keep_open: bool,
     /// Set by the sign in entry: start the node too when it is not running.
     #[arg(long = "at-login")]
@@ -182,14 +186,14 @@ fn main() {
                 // Opened again (from the Start menu, say) while it runs: show its window instead of doing nothing. The
                 // system's own sign in start has nothing to show.
                 if !cli.at_login && cli.startup.is_none() {
-                    panel::run(cli.admin_port, false, false);
+                    panel::run(cli.admin_port, panel::Page::Overview);
                 }
                 return;
             }
         }
     };
     if cli.panel {
-        panel::run(cli.admin_port, cli.keep_open, cli.settings);
+        panel::run(cli.admin_port, cli.page.as_deref().and_then(panel::Page::from_name).unwrap_or(if cli.settings { panel::Page::Settings } else { panel::Page::Overview }));
         return;
     }
     let (ctl, rx) = control::Controller::new(cli.admin_port);

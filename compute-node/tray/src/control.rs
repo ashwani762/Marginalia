@@ -111,6 +111,11 @@ impl PanelHost {
 
     pub fn toggle(&self) {
         if self.is_open() {
+            // A window that stays until it is closed: a click on the icon brings it to the front. Where that cannot be done it is
+            // closed, as the click used to do.
+            if os::focus_window("Marginalia node") {
+                return;
+            }
             if let Ok(mut c) = self.child.lock() {
                 if let Some(ch) = c.as_mut() {
                     let _ = ch.kill();

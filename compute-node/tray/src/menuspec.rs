@@ -19,6 +19,10 @@ pub enum Icon {
     Stop,
     Exit,
     Power,
+    /// For the window's sidebar: the overview, the phones and the models.
+    Chart,
+    Phone,
+    Stack,
 }
 
 impl Icon {
@@ -32,11 +36,14 @@ impl Icon {
             Icon::Stop => "stop",
             Icon::Exit => "exit",
             Icon::Power => "power",
+            Icon::Chart => "chart",
+            Icon::Phone => "phone",
+            Icon::Stack => "stack",
         }
     }
 
     fn from_name(s: &str) -> Icon {
-        [Icon::Pause, Icon::Play, Icon::Window, Icon::Gear, Icon::Stop, Icon::Exit, Icon::Power].into_iter().find(|i| i.name() == s).unwrap_or(Icon::None)
+        [Icon::Pause, Icon::Play, Icon::Window, Icon::Gear, Icon::Stop, Icon::Exit, Icon::Power, Icon::Chart, Icon::Phone, Icon::Stack].into_iter().find(|i| i.name() == s).unwrap_or(Icon::None)
     }
 
     fn of(action: Action) -> Icon {

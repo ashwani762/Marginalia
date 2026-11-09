@@ -329,7 +329,7 @@ fn draw_switch(painter: &Painter, centre: Pos2, on: f32, alpha: f32) {
 }
 
 /// The row pictures, drawn with lines and shapes so there are no image files. Each fits a box about 14 points across.
-fn draw_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
+pub(crate) fn draw_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
     let stroke = Stroke::new(1.6, col);
     match icon {
         Icon::None => {}
@@ -361,6 +361,21 @@ fn draw_icon(p: &Painter, icon: Icon, c: Pos2, col: Color32) {
             p.add(Shape::line(vec![pos2(c.x - 1.0, c.y - 6.0), pos2(c.x - 6.0, c.y - 6.0), pos2(c.x - 6.0, c.y + 6.0), pos2(c.x - 1.0, c.y + 6.0)], stroke));
             p.line_segment([pos2(c.x - 2.0, c.y), pos2(c.x + 6.0, c.y)], stroke);
             p.add(Shape::line(vec![pos2(c.x + 3.0, c.y - 3.0), pos2(c.x + 6.0, c.y), pos2(c.x + 3.0, c.y + 3.0)], stroke));
+        }
+        Icon::Chart => {
+            // Three bars of different heights.
+            for (dx, h) in [(-4.5, 5.0), (0.0, 11.0), (4.5, 8.0)] {
+                p.rect_filled(Rect::from_min_max(pos2(c.x + dx - 1.7, c.y + 5.5 - h), pos2(c.x + dx + 1.7, c.y + 5.5)), CornerRadius::same(1), col);
+            }
+        }
+        Icon::Phone => {
+            p.rect_stroke(Rect::from_center_size(c, vec2(9.0, 14.0)), CornerRadius::same(2), stroke, StrokeKind::Inside);
+            p.circle_filled(pos2(c.x, c.y + 4.2), 0.9, col);
+        }
+        Icon::Stack => {
+            // Three layers, the top one drawn as a diamond.
+            p.add(Shape::line(vec![pos2(c.x - 6.0, c.y - 1.0), pos2(c.x, c.y - 4.5), pos2(c.x + 6.0, c.y - 1.0), pos2(c.x, c.y + 2.5), pos2(c.x - 6.0, c.y - 1.0)], stroke));
+            p.add(Shape::line(vec![pos2(c.x - 6.0, c.y + 2.2), pos2(c.x, c.y + 5.5), pos2(c.x + 6.0, c.y + 2.2)], stroke));
         }
         Icon::Power => {
             // An open ring with a stroke at the top.

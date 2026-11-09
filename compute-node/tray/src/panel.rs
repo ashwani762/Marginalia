@@ -1,24 +1,37 @@
-//! The details panel: a small frameless window that opens when the tray icon is clicked. It is its
-//! own process (`marginalia-node-tray --panel`), started and stopped by the tray. It polls the node's
-//! local admin channel every 1.5 seconds while it is open and shows counts, names and timings only.
+//! The details window: a normal window with a sidebar of pages (Overview, Phones, Models, Settings) that opens when the tray
+//! icon is clicked. It is its own process (`marginalia-node-tray --panel`), started by the tray, and it stays until it is closed.
+//! It polls the node's local admin channel every 1.5 seconds while it is open and shows counts, names and timings only.
 //! Everything it can do goes through the same admin commands as the command line.
 
+use crate::anim::{clamp01, Spring};
 use crate::charts::{self, Line};
 use crate::control::{Controller, Pairing};
+use crate::menuspec::Icon;
 use crate::model::{self, Action, Activity, Download, Info, ModelItem, Phone, Poll, RunDraft, State, View, Waiting};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use crate::popover::draw_icon;
 use crate::usage::{self, History, Load, Reading};
-use eframe::egui::{self, Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use eframe::egui::{self, Align, Color32, CornerRadius, FontId, Frame, Layout, Margin, RichText, Sense, Stroke, Ui, Vec2};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const WIDTH: f32 = 340.0;
-const HEIGHT: f32 = 540.0;
+/// The window's size, and the least it can be made.
+const WINDOW: [f32; 2] = [940.0, 660.0];
+const WINDOW_MIN: [f32; 2] = [780.0, 540.0];
+const SIDEBAR_W: f32 = 220.0;
+/// A sidebar row, and the space between rows.
+const NAV_H: f32 = 38.0;
+const NAV_GAP: f32 = 3.0;
+/// The longest a page's content runs across, so lines stay short in a wide window.
+const CONTENT_W: f32 = 720.0;
 const POLL: Duration = Duration::from_millis(1500);
 const SPARK_COLUMNS: usize = 60;
 
 const BG: Color32 = Color32::from_rgb(22, 24, 29);
+const SIDEBAR: Color32 = Color32::from_rgb(17, 19, 24);
+/// The mark's indigo: the selected row of the sidebar.
+const ACCENT: Color32 = Color32::from_rgb(124, 108, 246);
 const CARD: Color32 = Color32::from_rgb(32, 35, 42);
 const TRACK: Color32 = Color32::from_rgb(52, 56, 66);
 const TEXT: Color32 = Color32::from_rgb(232, 234, 238);
@@ -31,6 +44,9 @@ const GREY: Color32 = Color32::from_rgb(130, 134, 142);
 const TEAL: Color32 = Color32::from_rgb(70, 200, 200);
 const ORANGE: Color32 = Color32::from_rgb(255, 150, 80);
 const RED: Color32 = Color32::from_rgb(240, 100, 95);
+const FAINT: Color32 = Color32::from_rgb(98, 104, 116);
+/// The sidebar's icon on the selected row: the indigo, lightened to read on its own tint.
+const ACCENT_TEXT: Color32 = Color32::from_rgb(176, 166, 255);
 const GREEN_BTN: Color32 = Color32::from_rgb(38, 120, 66);
 const RED_BTN: Color32 = Color32::from_rgb(110, 42, 44);
 
@@ -41,6 +57,46 @@ fn state_colour(s: State) -> Color32 {
         State::Paused => AMBER,
         State::Locked => VIOLET,
         State::Down => RED,
+    }
+}
+
+/// The pages of the window, in the order of the sidebar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Page {
+    Overview,
+    Phones,
+    Models,
+    Settings,
+}
+
+impl Page {
+    const ALL: [Page; 4] = [Page::Overview, Page::Phones, Page::Models, Page::Settings];
+
+    fn title(self) -> &'static str {
+        match self {
+            Page::Overview => "Overview",
+            Page::Phones => "Phones",
+            Page::Models => "Models",
+            Page::Settings => "Settings",
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Page::Overview => Icon::Chart,
+            Page::Phones => Icon::Phone,
+            Page::Models => Icon::Stack,
+            Page::Settings => Icon::Gear,
+        }
+    }
+
+    fn index(self) -> usize {
+        Page::ALL.iter().position(|p| *p == self).unwrap_or(0)
+    }
+
+    /// By the name on the command line (`--page phones`).
+    pub fn from_name(name: &str) -> Option<Page> {
+        Page::ALL.into_iter().find(|p| p.title().eq_ignore_ascii_case(name))
     }
 }
 
@@ -169,19 +225,18 @@ struct Panel {
     /// "Stop node" asks once more before it does anything.
     confirm_stop: bool,
     notice: Option<(String, Instant)>,
-    /// Closing on focus loss only makes sense once the window has had focus.
-    was_focused: bool,
-    placed: bool,
-    /// Do not close when focus is lost (for taking screenshots).
-    keep_open: bool,
-    /// The Settings page is showing instead of the overview.
-    settings: bool,
+    /// The page showing.
+    page: Page,
+    /// Where the sidebar's selected row is, in rows, and how far the page has come in (0 to 1) since it was chosen.
+    nav: Spring,
+    page_in: Spring,
+    reduced: bool,
+    /// The window is told once to follow the dark theme.
+    theme_set: bool,
     /// What the Settings page is editing, filled from the node the first time it is shown.
     draft: Option<(RunDraft, String)>,
     /// Whether the tray starts at sign in, as the General card shows it.
     startup: bool,
-    /// The system's border round the window is taken off once the window exists (Windows 11).
-    border_done: bool,
     /// Saved and waiting for the node to come back.
     applying: bool,
     /// While applying: the node has gone down for its restart.
@@ -195,14 +250,14 @@ struct Panel {
 }
 
 impl Panel {
-    fn new(port: u16, keep_open: bool, settings: bool, ctx: egui::Context) -> Panel {
+    fn new(port: u16, page: Page, ctx: egui::Context) -> Panel {
         let (tx, rx) = channel();
         let (cmds, cmd_rx) = channel();
         {
             let (ctx, tx) = (ctx.clone(), tx.clone());
             std::thread::spawn(move || usage_worker(port, ctx, tx));
         }
-        let settings_visible = Arc::new(AtomicBool::new(settings));
+        let settings_visible = Arc::new(AtomicBool::new(page == Page::Models));
         let home: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
         {
             let (ctx, tx, v, h) = (ctx.clone(), tx.clone(), settings_visible.clone(), home.clone());
@@ -212,7 +267,7 @@ impl Panel {
             let h = home.clone();
             std::thread::spawn(move || worker(port, ctx, tx, cmd_rx, h));
         }
-        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, was_focused: false, placed: false, keep_open, settings, draft: None, startup: crate::autostart::enabled(), border_done: false, applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
+        Panel { rx, cmds, view: None, history: History::default(), activity: Activity::default(), started: Instant::now(), pairing: None, confirm: None, confirm_stop: false, notice: None, page, nav: Spring::new(page.index() as f32, 0.86, 0.22), page_in: Spring::new(1.0, 1.0, 0.18), reduced: crate::os::reduced_motion(), theme_set: false, draft: None, startup: crate::autostart::enabled(), applying: false, applying_down: false, models: None, fetching: None, settings_visible, home }
     }
 
     fn send(&self, c: Cmd) {
@@ -267,24 +322,31 @@ impl Panel {
         }
     }
 
-    /// Escape, or losing focus, closes the panel. The first frames place it top right where the system lets us.
+    /// Sets the window up once it exists: dark title bar, whatever the system theme is.
     fn window_behaviour(&mut self, ctx: &egui::Context) {
-        if !self.border_done {
-            self.border_done = crate::os::remove_window_border("Marginalia node");
+        if !self.theme_set {
+            self.theme_set = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
         }
-        let (esc, focused, monitor) = ctx.input(|i| (i.key_pressed(egui::Key::Escape), i.viewport().focused, i.viewport().monitor_size));
-        if focused == Some(true) {
-            self.was_focused = true;
+    }
+
+    fn go(&mut self, page: Page) {
+        if page != self.page {
+            self.page = page;
+            self.page_in.snap(0.0);
+            self.page_in.set_target(1.0);
+            // The model files are only looked at while the Models page is showing.
+            self.settings_visible.store(page == Page::Models, Ordering::Relaxed);
         }
-        if esc || (self.was_focused && !self.keep_open && focused == Some(false)) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        }
-        if let (false, Some(m)) = (self.placed, monitor) {
-            self.placed = true;
-            // Top right under the top bar, or bottom right above the taskbar on Windows. Wayland ignores this.
-            let y = if cfg!(windows) { m.y - HEIGHT - 56.0 } else { 36.0 };
-            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2((m.x - WIDTH - 12.0).max(0.0), y.max(0.0))));
-        }
+    }
+
+    /// Moves the springs on, and says whether any is still moving.
+    fn animate(&mut self, ctx: &egui::Context) -> bool {
+        let dt = ctx.input(|i| i.stable_dt);
+        self.nav.set_target(self.page.index() as f32);
+        self.nav.step(dt, self.reduced);
+        self.page_in.step(dt, self.reduced);
+        self.nav.moving() || self.page_in.moving()
     }
 }
 
@@ -435,48 +497,11 @@ fn truncated(ui: &mut Ui, text: RichText) {
     ui.add(egui::Label::new(text).truncate());
 }
 
-/// A small cross that is drawn rather than typed, so it looks the same on every system.
-fn close_button(ui: &mut Ui) {
-    let (rect, r) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::click());
-    let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Close (Esc)");
-    if r.hovered() {
-        ui.painter().circle_filled(rect.center(), 10.0, TRACK);
-    }
-    let c = rect.center();
-    let stroke = Stroke::new(1.6, if r.hovered() { TEXT } else { DIM });
-    ui.painter().line_segment([c + Vec2::new(-4.0, -4.0), c + Vec2::new(4.0, 4.0)], stroke);
-    ui.painter().line_segment([c + Vec2::new(-4.0, 4.0), c + Vec2::new(4.0, -4.0)], stroke);
-    if r.clicked() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
-    }
-}
-
 fn now_epoch() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 impl Panel {
-    fn header(&mut self, ui: &mut Ui, view: &View) {
-        let colour = state_colour(view.state());
-        let (name, state, sub) = match &view.poll {
-            Poll::Up(i) => (i.name.clone(), if i.paused { "Paused" } else { "Running" }, Some(model::status_line(i))),
-            Poll::Down => ("Marginalia node".to_string(), if view.starting { "Starting" } else { "Not running" }, None),
-        };
-        ui.horizontal(|ui| {
-            dot(ui, colour, 6.0);
-            truncated(ui, RichText::new(name).size(17.0).strong().color(TEXT));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                close_button(ui);
-                Frame::NONE.fill(colour.gamma_multiply(0.18)).corner_radius(CornerRadius::same(9)).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
-                    ui.label(RichText::new(state).size(11.5).strong().color(colour));
-                });
-            });
-        });
-        if let Some(sub) = sub {
-            ui.label(dim(sub));
-        }
-    }
-
     fn numbers(&self, ui: &mut Ui, i: &Info) {
         card(ui, |ui| {
             ui.columns(3, |cols| {
@@ -814,18 +839,6 @@ impl Panel {
         });
     }
 
-    /// Overview or Settings, under the header.
-    fn tabs(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            for (name, settings) in [("Overview", false), ("Settings", true)] {
-                if choice(ui, name, self.settings == settings, if settings { "Models and logs" } else { "What the node is doing" }) {
-                    self.settings = settings;
-                    self.settings_visible.store(settings, Ordering::Relaxed);
-                }
-            }
-        });
-    }
-
     /// What the node uses now, as the Settings page shows it.
     fn current_settings(i: &Info) -> (RunDraft, String) {
         (RunDraft::from_setting(i.run_setting.as_deref()), model::chat_choice(i).unwrap_or("e2b").to_string())
@@ -936,8 +949,6 @@ impl Panel {
             });
             ui.label(dim("Card needs the GPU helper and cuDNN."));
         });
-
-        self.models_section(ui);
 
         if let Some(dir) = &i.log_dir {
             section(ui, "Logs");
@@ -1090,49 +1101,120 @@ impl Panel {
         ui.ctx().request_repaint_after(Duration::from_millis(250));
     }
 
-    fn footer(&mut self, ui: &mut Ui, i: &Info) {
-        ui.spacing_mut().item_spacing.y = 6.0;
-        ui.columns(2, |cols| {
-            let (label, hint, action) = if i.paused {
-                ("Resume", "Take new jobs again", Action::Resume)
-            } else {
-                ("Pause", "Turn new jobs away. Jobs already running finish.", Action::Pause)
-            };
-            if big_button(&mut cols[0], label, None, hint) {
-                self.send(Cmd::Click(action));
-            }
-            if big_button(&mut cols[1], "Show pairing code", None, "Show a code to type on a new phone") {
-                self.send(Cmd::Pair);
-            }
+    /// The sidebar: the node's name and state, then the pages, the selected one under a highlight that glides to it.
+    fn sidebar(&mut self, ui: &mut Ui, view: &Option<View>, info: Option<&Info>) {
+        let (title, sub, colour) = match view {
+            Some(v) => match &v.poll {
+                Poll::Up(i) => (i.name.clone(), model::status_line(i), state_colour(v.state())),
+                Poll::Down => ("Marginalia node".to_string(), if v.starting { "Starting" } else { "Not running" }.to_string(), state_colour(State::Down)),
+            },
+            None => ("Marginalia node".to_string(), "Looking for the node".to_string(), GREY),
+        };
+        ui.horizontal(|ui| {
+            dot(ui, colour, 6.0);
+            truncated(ui, RichText::new(title).size(16.0).strong().color(TEXT));
         });
-        if self.confirm_stop {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Stop the node? Phones lose it until it is started.").size(11.5).color(AMBER));
-            });
-            ui.columns(2, |cols| {
-                if big_button(&mut cols[0], "Yes, stop it", Some(RED_BTN), "") {
-                    self.send(Cmd::Click(Action::Stop));
-                    self.confirm_stop = false;
+        ui.add(egui::Label::new(dim(sub)).wrap());
+        ui.add_space(20.0);
+
+        let width = ui.available_width();
+        let top = ui.cursor().min;
+        // The highlight first, so the rows draw over it.
+        let y = self.nav.value() * (NAV_H + NAV_GAP);
+        ui.painter().rect_filled(egui::Rect::from_min_size(egui::pos2(top.x, top.y + y), Vec2::new(width, NAV_H)), CornerRadius::same(9), ACCENT.gamma_multiply(0.28));
+        let mut chosen = None;
+        // The rows are NAV_H + NAV_GAP apart exactly, whatever the usual space between things is: the highlight is placed by that.
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for page in Page::ALL {
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, NAV_H), Sense::click());
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            // How much this row is the selected one, as the highlight arrives or leaves it.
+            let lit = clamp01(1.0 - (self.nav.value() - page.index() as f32).abs());
+            if resp.hovered() && lit < 0.5 {
+                ui.painter().rect_filled(rect, CornerRadius::same(9), Color32::from_white_alpha(10));
+            }
+            let text = if lit > 0.5 { TEXT } else { Color32::from_rgb(190, 195, 205) };
+            draw_icon(ui.painter(), page.icon(), egui::pos2(rect.left() + 22.0, rect.center().y), if lit > 0.5 { ACCENT_TEXT } else { DIM });
+            ui.painter().text(egui::pos2(rect.left() + 44.0, rect.center().y), egui::Align2::LEFT_CENTER, page.title(), FontId::proportional(13.5), text);
+            // The phones waiting to be let in, on the Phones row.
+            if let (Page::Phones, Some(i)) = (page, info) {
+                if !i.asking.is_empty() {
+                    let c = egui::pos2(rect.right() - 16.0, rect.center().y);
+                    ui.painter().circle_filled(c, 9.0, AMBER);
+                    ui.painter().text(c, egui::Align2::CENTER_CENTER, i.asking.len().to_string(), FontId::proportional(11.0), Color32::BLACK);
                 }
-                if big_button(&mut cols[1], "Cancel", None, "") {
-                    self.confirm_stop = false;
+            }
+            if resp.clicked() {
+                chosen = Some(page);
+            }
+            ui.add_space(NAV_GAP);
+        }
+        if let Some(p) = chosen {
+            self.go(p);
+        }
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.label(RichText::new("Right click the tray icon for the menu").size(11.0).color(FAINT));
+        });
+    }
+
+    /// The big title of a page, and a line under it.
+    fn page_title(&self, ui: &mut Ui, title: &str, line: &str) {
+        ui.label(RichText::new(title).size(24.0).strong().color(TEXT));
+        if !line.is_empty() {
+            ui.label(dim(line));
+        }
+        ui.add_space(10.0);
+    }
+
+    /// Pause, lock and stop: what the old footer held.
+    fn node_card(&mut self, ui: &mut Ui, i: &Info) {
+        card(ui, |ui| {
+            heading(ui, "NODE");
+            ui.add_space(2.0);
+            let wide = |text: &str, fill: Option<Color32>| {
+                let mut b = egui::Button::new(RichText::new(text).size(12.5).color(TEXT)).min_size(Vec2::new(150.0, 30.0));
+                if let Some(f) = fill {
+                    b = b.fill(f);
                 }
-            });
-        } else {
-            ui.columns(2, |cols| {
+                b
+            };
+            if self.confirm_stop {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Stop the node? Phones lose it until it is started.").size(12.0).color(AMBER));
+                });
+                ui.horizontal(|ui| {
+                    if finish(ui.add(wide("Yes, stop it", Some(RED_BTN))), "") {
+                        self.send(Cmd::Click(Action::Stop));
+                        self.confirm_stop = false;
+                    }
+                    if finish(ui.add(wide("Cancel", None)), "") {
+                        self.confirm_stop = false;
+                    }
+                });
+                return;
+            }
+            ui.horizontal_wrapped(|ui| {
+                let (label, hint, action) = if i.paused {
+                    ("Resume", "Take new jobs again", Action::Resume)
+                } else {
+                    ("Pause", "Turn new jobs away. Jobs already running finish.", Action::Pause)
+                };
+                if finish(ui.add(wide(label, None)), hint) {
+                    self.send(Cmd::Click(action));
+                }
                 let (label, hint, action) = if i.locked {
                     ("Unlock", "Let any phone on the network join again", Action::Unlock)
                 } else {
                     ("Lock new phones", "New phones must be allowed before they can join", Action::Lock)
                 };
-                if big_button(&mut cols[0], label, None, hint) {
+                if finish(ui.add(wide(label, None)), hint) {
                     self.send(Cmd::Click(action));
                 }
-                if big_button(&mut cols[1], "Stop node", Some(RED_BTN), "Finish running jobs and shut the node down") {
+                if finish(ui.add(wide("Stop node", Some(RED_BTN))), "Finish running jobs and shut the node down") {
                     self.confirm_stop = true;
                 }
             });
-        }
+        });
     }
 
     fn empty_state(&mut self, ui: &mut Ui, starting: bool) {
@@ -1153,7 +1235,8 @@ impl Panel {
 
 impl eframe::App for Panel {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        [0.0; 4]
+        let [r, g, b, _] = BG.to_normalized_gamma_f32();
+        [r, g, b, 1.0]
     }
 
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
@@ -1163,98 +1246,107 @@ impl eframe::App for Panel {
         if self.notice.as_ref().map(|(_, t)| t.elapsed() > Duration::from_secs(8)).unwrap_or(false) {
             self.notice = None;
         }
-        let rect = ui.max_rect();
-        ui.painter().rect_filled(rect, CornerRadius::same(14), BG);
-        ui.painter().rect_stroke(rect.shrink(0.5), CornerRadius::same(14), Stroke::new(1.0, TRACK), StrokeKind::Inside);
+        let moving = self.animate(&ctx);
 
         let view = self.view.clone();
         let info = match &view {
             Some(View { poll: Poll::Up(i), .. }) => Some((**i).clone()),
             _ => None,
         };
-        let edge = Margin { left: 12, right: 12, top: 4, bottom: 10 };
-        if let Some(i) = &info {
-            egui::Panel::bottom("footer").frame(Frame::NONE.inner_margin(edge)).show(ui, |ui| {
-                if let Some((n, _)) = &self.notice {
-                    ui.label(RichText::new(n).size(12.0).color(RED));
-                }
-                if self.settings {
-                    self.settings_footer(ui, i);
-                } else {
-                    self.footer(ui, i);
-                }
+
+        egui::Panel::left("nav").exact_size(SIDEBAR_W).resizable(false).frame(Frame::NONE.fill(SIDEBAR).inner_margin(Margin { left: 14, right: 14, top: 20, bottom: 14 })).show(ui, |ui| {
+            self.sidebar(ui, &view, info.as_ref());
+        });
+
+        // Settings keep their Save bar at the bottom of the window, in reach whatever the page's length.
+        if let (Page::Settings, Some(i)) = (self.page, &info) {
+            egui::Panel::bottom("save").frame(Frame::NONE.fill(SIDEBAR).inner_margin(Margin { left: 28, right: 28, top: 10, bottom: 12 })).show(ui, |ui| {
+                ui.set_max_width(ui.available_width().min(CONTENT_W));
+                self.settings_footer(ui, i);
             });
         }
+
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            Frame::NONE.inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 2 }).show(ui, |ui| {
-                match &view {
-                    None => {
+            // The page comes in: a short fade and a rise of a few points.
+            let t = clamp01(self.page_in.value());
+            ui.set_opacity(t);
+            Frame::NONE.inner_margin(Margin { left: 28, right: 28, top: 22, bottom: 0 }).show(ui, |ui| {
+                ui.add_space((1.0 - t) * 10.0);
+                match (&view, &info) {
+                    (None, _) => {
                         ui.label(dim("Looking for the node..."));
                     }
-                    Some(v) => {
-                        self.header(ui, v);
-                        if info.is_some() {
-                            self.tabs(ui);
-                        }
-                    }
-                }
-            });
-            match (&view, &info) {
-                (Some(v), None) => {
-                    Frame::NONE.inner_margin(Margin::symmetric(12, 0)).show(ui, |ui| {
+                    (Some(v), None) => {
                         self.empty_state(ui, v.starting);
                         if let Some((n, _)) = &self.notice {
                             ui.add_space(12.0);
-                            ui.label(RichText::new(n).size(12.0).color(RED));
-                        }
-                    });
-                }
-                (_, Some(i)) => {
-                    let out = egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        Frame::NONE.inner_margin(Margin::symmetric(12, 4)).show(ui, |ui| {
-                            ui.spacing_mut().item_spacing.y = 6.0;
-                            if self.settings {
-                                self.settings_page(ui, i);
-                                return;
-                            }
-                            self.pairing_card(ui);
-                            self.asking(ui, &i.asking);
-                            self.numbers(ui, i);
-                            self.speed(ui, i);
-                            self.activity(ui, i);
-                            self.phones(ui, &i.phones);
-                            self.peers(ui, i);
-                            self.addresses(ui, i);
-                        });
-                    });
-                    // A soft fade at the bottom says there is more to scroll to.
-                    let more = out.state.clamped_offset().y + out.inner_rect.height() < out.content_size.y - 2.0;
-                    if more {
-                        let r = out.inner_rect;
-                        for k in 0..10 {
-                            let strip = egui::Rect::from_min_max(egui::pos2(r.left(), r.bottom() - (10 - k) as f32 * 2.0), egui::pos2(r.right(), r.bottom() - (9 - k) as f32 * 2.0));
-                            ui.painter().rect_filled(strip, 0.0, BG.gamma_multiply((k + 1) as f32 / 12.0));
+                            ui.vertical_centered(|ui| ui.label(RichText::new(n).size(12.0).color(RED)));
                         }
                     }
+                    (Some(_), Some(i)) => {
+                        if let Some((n, _)) = &self.notice {
+                            ui.label(RichText::new(n).size(12.5).color(RED));
+                        }
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                            ui.set_max_width(ui.available_width().min(CONTENT_W));
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            self.page_content(ui, i);
+                            ui.add_space(16.0);
+                        });
+                    }
                 }
-                (None, None) => {}
-            };
+            });
         });
+
+        if moving || self.nav.moving() {
+            ctx.request_repaint();
+        }
     }
 }
 
-pub fn run(port: u16, keep_open: bool, settings: bool) {
+impl Panel {
+    /// The page's content, under its title.
+    fn page_content(&mut self, ui: &mut Ui, i: &Info) {
+        match self.page {
+            Page::Overview => {
+                self.page_title(ui, "Overview", &model::status_line(i));
+                self.numbers(ui, i);
+                self.node_card(ui, i);
+                self.speed(ui, i);
+                self.activity(ui, i);
+                self.addresses(ui, i);
+            }
+            Page::Phones => {
+                self.page_title(ui, "Phones", "The phones that use this node, and how to add one");
+                if finish(ui.add(egui::Button::new(RichText::new("Show pairing code").size(12.5).color(TEXT)).fill(GREEN_BTN).min_size(Vec2::new(170.0, 30.0))), "Show a code to type on a new phone") {
+                    self.send(Cmd::Pair);
+                }
+                ui.add_space(2.0);
+                self.pairing_card(ui);
+                self.asking(ui, &i.asking);
+                self.phones(ui, &i.phones);
+                self.peers(ui, i);
+            }
+            Page::Models => {
+                self.page_title(ui, "Models", "The files the node uses, and what is still to download");
+                self.models_section(ui);
+            }
+            Page::Settings => {
+                self.page_title(ui, "Settings", "Where the node runs its models, which chat model it uses, and how it starts");
+                self.settings_page(ui, i);
+            }
+        }
+    }
+}
+
+pub fn run(port: u16, page: Page) {
+    let (rgba, w, h) = (crate::glyph::mark_rgba(64), 64, 64);
     let viewport = egui::ViewportBuilder::default()
         .with_title("Marginalia node")
         .with_app_id("marginalia-node-tray")
-        .with_inner_size([WIDTH, HEIGHT])
-        .with_resizable(false)
-        .with_decorations(false)
-        .with_transparent(true)
-        .with_always_on_top()
-        .with_taskbar(false);
+        .with_inner_size(WINDOW)
+        .with_min_inner_size(WINDOW_MIN)
+        .with_icon(egui::IconData { rgba, width: w, height: h });
     let options = eframe::NativeOptions { viewport, ..Default::default() };
     let result = eframe::run_native(
         "Marginalia node",
@@ -1262,6 +1354,7 @@ pub fn run(port: u16, keep_open: bool, settings: bool) {
         Box::new(move |cc| {
             let mut style = (*cc.egui_ctx.global_style()).clone();
             style.visuals = egui::Visuals::dark();
+            style.visuals.panel_fill = BG;
             style.visuals.widgets.inactive.weak_bg_fill = TRACK;
             style.visuals.widgets.inactive.corner_radius = CornerRadius::same(6);
             style.visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
@@ -1270,10 +1363,40 @@ pub fn run(port: u16, keep_open: bool, settings: bool) {
             // Text is not selectable, so a click on a card's words reaches the card.
             style.interaction.selectable_labels = false;
             cc.egui_ctx.set_global_style(style);
-            Ok(Box::new(Panel::new(port, keep_open, settings, cc.egui_ctx.clone())))
+            Ok(Box::new(Panel::new(port, page, cc.egui_ctx.clone())))
         }),
     );
     if let Err(e) = result {
-        eprintln!("Could not open the details panel: {e}");
+        eprintln!("Could not open the details window: {e}");
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    #[test]
+    fn pages_are_found_by_name_in_any_case() {
+        assert_eq!(Page::from_name("phones"), Some(Page::Phones));
+        assert_eq!(Page::from_name("SETTINGS"), Some(Page::Settings));
+        assert_eq!(Page::from_name("models"), Some(Page::Models));
+        assert_eq!(Page::from_name("overview"), Some(Page::Overview));
+        assert_eq!(Page::from_name("nonsense"), None);
+    }
+
+    #[test]
+    fn the_sidebar_lists_every_page_once_in_order() {
+        let names: Vec<_> = Page::ALL.iter().map(|p| p.title()).collect();
+        assert_eq!(names, ["Overview", "Phones", "Models", "Settings"]);
+        for (i, p) in Page::ALL.iter().enumerate() {
+            assert_eq!(p.index(), i);
+        }
+    }
+
+    #[test]
+    fn page_titles_use_plain_wording() {
+        for p in Page::ALL {
+            assert!(!p.title().contains(';') && !p.title().ends_with("..."));
+        }
     }
 }
