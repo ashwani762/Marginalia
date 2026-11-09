@@ -408,51 +408,64 @@ pub fn divider(ui: &mut Ui, height: f32) {
     ui.painter().rect_filled(rect, CornerRadius::ZERO, HAIR);
 }
 
-/// The window's own close, minimise and zoom buttons. They go grey when the window is not in front, and show what they do when the
-/// pointer is near any of them.
-pub fn window_controls(ui: &mut Ui) {
-    const D: f32 = 12.0;
-    const GAP: f32 = 8.0;
-    let (area, _) = ui.allocate_exact_size(vec2(3.0 * D + 2.0 * GAP, D), Sense::hover());
-    let ctx = ui.ctx().clone();
-    let (focused, maximized, near) = ctx.input(|i| (i.viewport().focused.unwrap_or(true), i.viewport().maximized.unwrap_or(false), i.pointer.hover_pos().is_some_and(|p| area.expand(5.0).contains(p))));
-    let id = ui.scope_id().with("kit-window-controls");
-    let shown = spring(&ctx, id.with("near"), if near { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
-    let awake = spring(&ctx, id.with("focus"), if focused || near { 1.0 } else { 0.0 }, GLIDE.0, 0.18);
-    let colours = [Color32::from_rgb(255, 95, 87), Color32::from_rgb(254, 188, 46), Color32::from_rgb(40, 200, 64)];
-    for (n, base) in colours.into_iter().enumerate() {
-        let c = pos2(area.left() + D / 2.0 + n as f32 * (D + GAP), area.center().y);
-        let hit = Rect::from_center_size(c, vec2(D + GAP, D + 10.0));
-        let resp = ui.interact(hit, id.with(n), Sense::click());
-        let down = spring(&ctx, id.with(("down", n)), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, ANSWER.0, 0.06);
-        let fill = mix(mix(Color32::from_rgb(74, 74, 78), base, awake), Color32::BLACK, down * 0.28);
-        ui.painter().circle_filled(c, D / 2.0, fill);
-        let mark = Color32::from_black_alpha((150.0 * shown) as u8);
-        if shown > 0.02 {
-            let stroke = Stroke::new(1.3, mark);
-            match n {
-                0 => {
-                    ui.painter().line_segment([c + vec2(-2.6, -2.6), c + vec2(2.6, 2.6)], stroke);
-                    ui.painter().line_segment([c + vec2(-2.6, 2.6), c + vec2(2.6, -2.6)], stroke);
+/// The window's minimise, maximise and close buttons, in the top right corner, the way a Windows window has them. Thin line glyphs, a
+/// soft lift on hover and red under close. Dimmed when the window is not in front. Returns where they are, so the edges around them do
+/// not take their clicks.
+pub fn caption_buttons(ctx: &egui::Context, window: Rect, radius: u8) -> Rect {
+    const W: f32 = 46.0;
+    const H: f32 = 32.0;
+    let area = Rect::from_min_size(pos2(window.right() - 3.0 * W, window.top()), vec2(3.0 * W, H));
+    let (focused, maximized) = ctx.input(|i| (i.viewport().focused.unwrap_or(true), i.viewport().maximized.unwrap_or(false)));
+    egui::Area::new(Id::NULL.with("kit-caption")).order(egui::Order::Foreground).fixed_pos(area.min).show(ctx, |ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        ui.horizontal(|ui| {
+            for n in 0..3 {
+                let (rect, resp) = ui.allocate_exact_size(vec2(W, H), Sense::click());
+                let id = resp.id;
+                let hover = spring(ctx, id.with("h"), if resp.hovered() { 1.0 } else { 0.0 }, ANSWER.0, ANSWER.1);
+                let down = spring(ctx, id.with("d"), if resp.is_pointer_button_down_on() { 1.0 } else { 0.0 }, ANSWER.0, 0.06);
+                let is_close = n == 2;
+                let fill = if is_close {
+                    mix(Color32::from_rgb(196, 43, 28), Color32::from_rgb(150, 34, 22), down).gamma_multiply(hover)
+                } else {
+                    Color32::from_white_alpha((20.0 * hover - 8.0 * down).max(0.0) as u8)
+                };
+                let corner = if is_close { CornerRadius { ne: radius, ..CornerRadius::ZERO } } else { CornerRadius::ZERO };
+                ui.painter().rect_filled(rect, corner, fill);
+                let rest = if focused { SOFT } else { FAINT };
+                let colour = if is_close { mix(rest, Color32::WHITE, hover) } else { mix(rest, TEXT, hover) };
+                let stroke = Stroke::new(1.0, colour);
+                // On the pixel grid, so one point wide stays one sharp line.
+                let c = pos2(rect.center().x.round() + 0.5, rect.center().y.round() + 0.5);
+                let p = ui.painter();
+                match n {
+                    0 => {
+                        p.line_segment([c + vec2(-5.0, 0.0), c + vec2(5.0, 0.0)], stroke);
+                    }
+                    1 if maximized => {
+                        // Restore: a square with another behind it.
+                        p.rect_stroke(Rect::from_min_max(c + vec2(-5.0, -3.0), c + vec2(3.0, 5.0)), CornerRadius::same(1), stroke, egui::StrokeKind::Middle);
+                        p.add(egui::Shape::line(vec![c + vec2(-3.0, -3.0), c + vec2(-3.0, -5.0), c + vec2(5.0, -5.0), c + vec2(5.0, 3.0), c + vec2(3.0, 3.0)], stroke));
+                    }
+                    1 => {
+                        p.rect_stroke(Rect::from_center_size(c, vec2(10.0, 10.0)), CornerRadius::same(1), stroke, egui::StrokeKind::Middle);
+                    }
+                    _ => {
+                        p.line_segment([c + vec2(-5.0, -5.0), c + vec2(5.0, 5.0)], stroke);
+                        p.line_segment([c + vec2(-5.0, 5.0), c + vec2(5.0, -5.0)], stroke);
+                    }
                 }
-                1 => {
-                    ui.painter().line_segment([c + vec2(-3.2, 0.0), c + vec2(3.2, 0.0)], stroke);
-                }
-                _ => {
-                    // Two small corners pointing apart.
-                    ui.painter().add(egui::Shape::convex_polygon(vec![c + vec2(-3.0, 1.2), c + vec2(-3.0, -3.0), c + vec2(1.2, -3.0)], mark, Stroke::NONE));
-                    ui.painter().add(egui::Shape::convex_polygon(vec![c + vec2(3.0, -1.2), c + vec2(3.0, 3.0), c + vec2(-1.2, 3.0)], mark, Stroke::NONE));
+                if resp.clicked() {
+                    ctx.send_viewport_cmd(match n {
+                        0 => egui::ViewportCommand::Minimized(true),
+                        1 => egui::ViewportCommand::Maximized(!maximized),
+                        _ => egui::ViewportCommand::Close,
+                    });
                 }
             }
-        }
-        if resp.clicked() {
-            ctx.send_viewport_cmd(match n {
-                0 => egui::ViewportCommand::Close,
-                1 => egui::ViewportCommand::Minimized(true),
-                _ => egui::ViewportCommand::Maximized(!maximized),
-            });
-        }
-    }
+        });
+    });
+    area
 }
 
 /// Makes `rect` move the window when dragged and zoom it when double clicked. Call it before what is drawn over it: whatever comes
@@ -493,10 +506,13 @@ pub fn edge_at(window: Rect, p: egui::Pos2) -> Option<egui::ResizeDirection> {
 }
 
 /// Resizing from the edges of a window with no frame of its own: the pointer shows it, and a press starts it.
-pub fn resize_edges(ctx: &egui::Context, window: Rect) {
+pub fn resize_edges(ctx: &egui::Context, window: Rect, except: Rect) {
     use egui::{CursorIcon as C, ResizeDirection as D};
     let (pos, pressed, maximized) = ctx.input(|i| (i.pointer.latest_pos(), i.pointer.primary_pressed(), i.viewport().maximized.unwrap_or(false)));
     let (Some(p), false) = (pos, maximized) else { return };
+    if except.contains(p) {
+        return;
+    }
     let Some(dir) = edge_at(window, p) else { return };
     ctx.set_cursor_icon(match dir {
         D::North | D::South => C::ResizeVertical,

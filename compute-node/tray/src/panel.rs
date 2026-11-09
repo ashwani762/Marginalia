@@ -1140,12 +1140,7 @@ impl Panel {
         };
         // Everything in the sidebar that is not a control moves the window.
         kit::drag_region(ui, ui.max_rect().expand(14.0), "sidebar");
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            kit::window_controls(ui);
-        });
-        ui.add_space(16.0);
+        ui.add_space(6.0);
         let logo = self.logo.get_or_insert_with(|| ui.ctx().load_texture("mark", egui::ColorImage::from_rgba_unmultiplied([96, 96], &crate::glyph::mark_rgba(96)), egui::TextureOptions::LINEAR)).id();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
@@ -1353,13 +1348,14 @@ impl eframe::App for Panel {
             content = ui.max_rect();
             ui.painter().rect_filled(content, CornerRadius { nw: 0, sw: 0, ne: radius, se: radius }, BG);
             // The strip along the top moves the window, where there is no title bar to take hold of.
-            kit::drag_region(ui, egui::Rect::from_min_size(content.min, Vec2::new(content.width(), 22.0)), "top");
+            kit::drag_region(ui, egui::Rect::from_min_size(content.min, Vec2::new(content.width(), 32.0)), "top");
             // The page comes in from the side it was moved towards: a short fade and a few points of travel.
             let t = clamp01(self.page_in.value() * 1.3);
             let travel = (1.0 - clamp01(self.page_in.value())) * 12.0 * self.page_dir;
             ui.set_opacity(t);
             Frame::NONE.inner_margin(Margin { left: 26, right: 12, top: 12, bottom: 0 }).show(ui, |ui| {
-                ui.add_space((14.0 + travel).max(0.0));
+                // Clear of the window's buttons in the top right corner.
+                ui.add_space((26.0 + travel).max(0.0));
                 match (&view, &info) {
                     (None, _) => {
                         ui.add_space((ui.available_height() * 0.36).max(30.0));
@@ -1401,7 +1397,8 @@ impl eframe::App for Panel {
             self.save_capsule(&ctx, content, i);
         }
         self.toast(&ctx, content);
-        kit::resize_edges(&ctx, window);
+        let buttons = kit::caption_buttons(&ctx, window, radius);
+        kit::resize_edges(&ctx, window, buttons);
 
         if moving || self.nav.moving() {
             ctx.request_repaint();
